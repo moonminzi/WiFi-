@@ -68,6 +68,7 @@ struct QRSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var toast: String?
     @State private var originalBrightness: CGFloat?
+    @State private var screen: UIScreen?
 
     var body: some View {
         TermPage(path: "qr") {
@@ -124,18 +125,36 @@ struct QRSheet: View {
         }
         .termToast($toast)
         .presentationBackground(Term.bg)
-        .onAppear {
-            guard let screen = Self.screen else { return }
+        .background(ScreenReader { screen = $0 })
+        .onChange(of: screen) { _, screen in
+            guard let screen, originalBrightness == nil else { return }
             originalBrightness = screen.brightness
             screen.brightness = 1
         }
         .onDisappear {
-            if let originalBrightness { Self.screen?.brightness = originalBrightness }
+            if let originalBrightness { screen?.brightness = originalBrightness }
         }
     }
+}
 
-    private static var screen: UIScreen? {
-        (UIApplication.shared.connectedScenes.first { $0.activationState == .foregroundActive } as? UIWindowScene)?
-            .screen
+/// 이 뷰가 올라간 창의 화면을 알려준다. 앱 확장에서는 UIApplication.shared를 못 써서 창에서 직접 찾는다.
+private struct ScreenReader: UIViewRepresentable {
+    let onScreen: (UIScreen) -> Void
+
+    func makeUIView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.onScreen = onScreen
+        return view
+    }
+
+    func updateUIView(_ uiView: ProbeView, context: Context) {}
+
+    final class ProbeView: UIView {
+        var onScreen: ((UIScreen) -> Void)?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            if let screen = window?.windowScene?.screen { onScreen?(screen) }
+        }
     }
 }

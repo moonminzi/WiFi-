@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UIKit
 import UniformTypeIdentifiers
 
 struct SharedFile: Codable, Identifiable, Hashable {
@@ -75,6 +76,18 @@ final class ShareStore {
         history.insert(file, at: 0)
         persistHistory()
         return file
+    }
+
+    /// 아이폰 기본 HEIC는 안드로이드·PC에서 잘 안 열려서 JPEG로 바꾼다. 바꿀 필요가 없으면 그대로 돌려준다.
+    nonisolated static func convertingHEICToJPEG(_ url: URL) -> URL {
+        guard let type = UTType(filenameExtension: url.pathExtension),
+              type.conforms(to: .heic) || type.conforms(to: .heif),
+              let jpeg = UIImage(contentsOfFile: url.path())?.jpegData(compressionQuality: 0.9)
+        else { return url }
+        let dest = url.deletingPathExtension().appendingPathExtension("jpg")
+        guard (try? jpeg.write(to: dest)) != nil else { return url }
+        try? FileManager.default.removeItem(at: url)
+        return dest
     }
 
     /// 서버에서 바로 지울 방법은 없어서, 목록에서만 뺀다(정한 시간이 지나면 서버에서도 지워짐).

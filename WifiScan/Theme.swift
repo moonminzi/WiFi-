@@ -287,3 +287,22 @@ struct ImagePreview: View {
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Term.border))
     }
 }
+
+/// `[██████░░░░░░] 52%` 형태의 진행률
+struct UploadProgress: View {
+    let value: Double
+    private let width = 20
+
+    var body: some View {
+        let filled = Int((value * Double(width)).rounded())
+        HStack(spacing: 8) {
+            Text("[" + String(repeating: "█", count: filled) + String(repeating: "░", count: width - filled) + "]")
+                .foregroundStyle(Term.green)
+            Text("\(Int(value * 100))%")
+                .foregroundStyle(Term.muted)
+        }
+        .font(Term.mono(13))
+        .lineLimit(1)
+        .minimumScaleFactor(0.6)
+    }
+}

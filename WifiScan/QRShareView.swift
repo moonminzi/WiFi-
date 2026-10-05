@@ -35,6 +35,8 @@ private struct FileShareSection: View {
     @State private var showImporter = false
     @State private var progress: Double?
     @State private var errorMessage: String?
+    @State private var showScanner = false
+    @State private var scan: ScannedPDF?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -45,9 +47,40 @@ private struct FileShareSection: View {
                 Button { showImporter = true } label: {
                     Label("files", systemImage: "folder")
                 }
+                Button { showScanner = true } label: {
+                    Label("scan", systemImage: "doc.viewfinder")
+                }
+                .disabled(!DocumentScanner.isSupported)
             }
             .buttonStyle(TermButtonStyle(fill: true))
+            .labelStyle(.titleAndIcon)
             .disabled(progress != nil)
+
+            if let scan {
+                TermBlock(label: "scan") {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(scan.url.lastPathComponent)
+                            .font(Term.mono(14))
+                            .lineLimit(1)
+                        Text("\(scan.pages)p · \(Self.sizeText(scan.size))")
+                            .font(Term.mono(11))
+                            .foregroundStyle(Term.muted)
+                    }
+                    HStack(spacing: 8) {
+                        Button {
+                            Task { await shareScan(scan) }
+                        } label: {
+                            Label("upload → qr", systemImage: "qrcode")
+                        }
+                        .buttonStyle(.termPrimary)
+                        .disabled(progress != nil)
+                        ShareLink(item: scan.url) {
+                            Label("share", systemImage: "square.and.arrow.up")
+                        }
+                        .buttonStyle(.term)
+                    }
+                }
+            }
 
             HStack(spacing: 10) {
                 Text("ttl").font(Term.mono(13)).foregroundStyle(Term.muted)
@@ -99,6 +132,13 @@ private struct FileShareSection: View {
                 }
             }
         }
+        .fullScreenCover(isPresented: $showScanner) {
+            DocumentScanner { pages in
+                showScanner = false
+                if let pages, !pages.isEmpty { Task { await makePDF(pages) } }
+            }
+            .ignoresSafeArea()
+        }
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item]) { result in
             guard case .success(let url) = result else { return }
             Task { await shareImported(url) }
@@ -137,6 +177,36 @@ private struct FileShareSection: View {
                 try fileData.write(to: dest)
                 await share(fileAt: dest, name: dest.lastPathComponent)
             }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func makePDF(_ pages: [UIImage]) async {
+        errorMessage = nil
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd_HHmm"
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("scans", isDirectory: true)
+        let url = dir.appendingPathComponent("scan_\(formatter.string(from: .now)).pdf")
+        do {
+            try? FileManager.default.removeItem(at: dir)   // 이전 스캔은 지운다
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try await Task.detached(priority: .userInitiated) {
+                try PDFBuilder.makePDF(from: pages, to: url)
+            }.value
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+            scan = ScannedPDF(url: url, pages: pages.count, size: size)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// 업로드가 끝나면 임시 폴더를 지우므로, 스캔 원본은 남겨 두고 복사본을 올린다.
+    private func shareScan(_ scan: ScannedPDF) async {
+        do {
+            let dest = try Self.makeTempDirectory().appendingPathComponent(scan.url.lastPathComponent)
+            try FileManager.default.copyItem(at: scan.url, to: dest)
+            await share(fileAt: dest, name: dest.lastPathComponent)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -194,23 +264,10 @@ private struct FileShareSection: View {
     }
 }
 
-/// `[██████░░░░░░] 52%` 형태의 진행률
-private struct UploadProgress: View {
-    let value: Double
-    private let width = 20
-
-    var body: some View {
-        let filled = Int((value * Double(width)).rounded())
-        HStack(spacing: 8) {
-            Text("[" + String(repeating: "█", count: filled) + String(repeating: "░", count: width - filled) + "]")
-                .foregroundStyle(Term.green)
-            Text("\(Int(value * 100))%")
-                .foregroundStyle(Term.muted)
-        }
-        .font(Term.mono(13))
-        .lineLimit(1)
-        .minimumScaleFactor(0.6)
-    }
+private struct ScannedPDF {
+    let url: URL
+    let pages: Int
+    let size: Int64
 }
 
 /// 사진 앱의 동영상을 메모리에 다 올리지 않고 파일째로 받는다.
