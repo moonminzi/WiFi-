@@ -11,7 +11,6 @@ struct QRShareView: View {
 
     @AppStorage("qrMode") private var mode: Mode = .file
     @State private var qr: QRPayload?
-    @State private var showSettings = false
 
     var body: some View {
         NavigationStack {
@@ -26,19 +25,13 @@ struct QRShareView: View {
                 .listRowInsets(EdgeInsets())
 
                 switch mode {
-                case .file: FileShareSections(qr: $qr, showSettings: $showSettings)
+                case .file: FileShareSections(qr: $qr)
                 case .wifi: WiFiShareSections(qr: $qr)
                 case .text: TextShareSections(qr: $qr)
                 }
             }
             .navigationTitle("QR 공유")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showSettings = true } label: { Image(systemName: "gearshape") }
-                }
-            }
             .sheet(item: $qr) { QRSheet(payload: $0) }
-            .sheet(isPresented: $showSettings) { ShareSettingsView() }
         }
     }
 }
@@ -47,7 +40,6 @@ struct QRShareView: View {
 
 private struct FileShareSections: View {
     @Binding var qr: QRPayload?
-    @Binding var showSettings: Bool
 
     private let store = ShareStore.shared
     @AppStorage("shareHours") private var hours = 24
@@ -57,18 +49,8 @@ private struct FileShareSections: View {
     @State private var errorMessage: String?
 
     var body: some View {
-        if !store.isConfigured {
-            Section {
-                Button { showSettings = true } label: {
-                    Label("Cloudflare 연결 설정하기", systemImage: "cloud")
-                }
-            } footer: {
-                Text("파일은 내 Cloudflare Worker에 올라가고, 정한 기간이 지나면 자동으로 지워져요.")
-            }
-        } else {
-            uploadSection
-            historySection
-        }
+        uploadSection
+        historySection
     }
 
     private var uploadSection: some View {
@@ -86,8 +68,9 @@ private struct FileShareSections: View {
 
             Picker("공유 기간", selection: $hours) {
                 Text("1시간").tag(1)
+                Text("6시간").tag(6)
                 Text("1일").tag(24)
-                Text("7일").tag(168)
+                Text("2일").tag(48)
             }
 
             if let progress {
@@ -99,7 +82,7 @@ private struct FileShareSections: View {
             if let errorMessage {
                 Text(errorMessage).foregroundStyle(.red)
             } else {
-                Text("100MB까지 올릴 수 있어요. 받는 사람은 QR을 찍으면 내려받기 페이지가 열려요.")
+                Text("tmpfiles.org에 100MB까지 올라가고, 기간이 지나면 지워져요. 링크를 아는 사람은 누구나 받을 수 있으니 민감한 파일은 올리지 마세요.")
             }
         }
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item]) { result in
@@ -134,15 +117,13 @@ private struct FileShareSections: View {
                         .foregroundStyle(.primary)
                     }
                     .swipeActions {
-                        Button("공유 중지", role: .destructive) {
-                            Task { await store.stopSharing(file) }
-                        }
+                        Button("목록에서 빼기", role: .destructive) { store.remove(file) }
                     }
                 }
             } header: {
                 Text("공유 중")
             } footer: {
-                Text("왼쪽으로 밀면 기간 전에 지울 수 있어요.")
+                Text("누르면 QR을 다시 볼 수 있어요.")
             }
         }
     }
@@ -332,85 +313,6 @@ private struct TextShareSections: View {
             .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } footer: {
             Text("\(text.utf8.count) / 약 2,900바이트")
-        }
-    }
-}
-
-// MARK: - 설정
-
-struct ShareSettingsView: View {
-    enum TestState: Equatable {
-        case idle, testing, ok
-        case failed(String)
-    }
-
-    @Environment(\.dismiss) private var dismiss
-    @Bindable private var store = ShareStore.shared
-    @State private var testState: TestState = .idle
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    TextField("qr-share.내아이디.workers.dev", text: $store.serverURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                } header: {
-                    Text("Worker 주소")
-                }
-
-                Section {
-                    SecureField("UPLOAD_TOKEN 값", text: $store.token)
-                } header: {
-                    Text("업로드 비밀번호")
-                } footer: {
-                    Text("Cloudflare 대시보드에 UPLOAD_TOKEN 시크릿으로 넣은 값과 같아야 해요. 이 기기 키체인에 저장돼요.")
-                }
-
-                Section {
-                    Button {
-                        Task { await test() }
-                    } label: {
-                        HStack {
-                            Text("연결 테스트")
-                            Spacer()
-                            switch testState {
-                            case .idle: EmptyView()
-                            case .testing: ProgressView()
-                            case .ok: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                            case .failed: Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
-                            }
-                        }
-                    }
-                    .disabled(!store.isConfigured || testState == .testing)
-                } footer: {
-                    if case .failed(let message) = testState {
-                        Text(message).foregroundStyle(.red)
-                    } else if testState == .ok {
-                        Text("연결됐어요. 이제 파일을 올릴 수 있어요.")
-                    }
-                }
-            }
-            .navigationTitle("Cloudflare 설정")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("완료") { dismiss() }
-                }
-            }
-            .onChange(of: store.serverURL) { testState = .idle }
-            .onChange(of: store.token) { testState = .idle }
-        }
-    }
-
-    private func test() async {
-        testState = .testing
-        do {
-            try await store.ping()
-            testState = .ok
-        } catch {
-            testState = .failed(error.localizedDescription)
         }
     }
 }
