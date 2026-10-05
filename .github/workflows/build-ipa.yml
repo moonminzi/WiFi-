@@ -3,6 +3,10 @@ name: Build unsigned IPA
 on:
   push:
     branches: [main]
+    paths-ignore: ['worker/**', '**.md']
+  pull_request:
+    branches: [main]
+    paths-ignore: ['worker/**', '**.md']
   workflow_dispatch:
 
 permissions:
@@ -41,6 +45,7 @@ jobs:
           path: WifiScan.ipa
 
       - name: Publish release
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

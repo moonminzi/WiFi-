@@ -1,13 +1,9 @@
-import PhotosUI
 import SwiftUI
 
-struct ContentView: View {
+struct WiFiScanView: View {
     @State private var model = ScanModel()
-    @State private var showCamera = false
-    @State private var pickerItem: PhotosPickerItem?
-    @State private var pasteboardHasImage = UIPasteboard.general.hasImages
+    @State private var qr: QRPayload?
     @AppStorage("autoJoin") private var autoJoin = true
-    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
@@ -17,26 +13,7 @@ struct ContentView: View {
                 joinSection
             }
             .navigationTitle("와이파이 스캔")
-            .fullScreenCover(isPresented: $showCamera) {
-                CameraPicker { image in
-                    showCamera = false
-                    if let image { scan(image) }
-                }
-                    .ignoresSafeArea()
-            }
-            .onChange(of: pickerItem) { _, item in
-                guard let item else { return }
-                Task {
-                    if let data = try? await item.loadTransferable(type: Data.self),
-                       let image = UIImage(data: data) {
-                        await model.load(image, autoJoin: autoJoin)
-                    }
-                    pickerItem = nil
-                }
-            }
-            .onChange(of: scenePhase) { _, phase in
-                if phase == .active { pasteboardHasImage = UIPasteboard.general.hasImages }
-            }
+            .sheet(item: $qr) { QRSheet(payload: $0) }
         }
     }
 
@@ -51,20 +28,9 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: 220)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
             }
-            HStack(spacing: 10) {
-                SourceButton(title: "촬영", systemImage: "camera") { showCamera = true }
-                    .disabled(!UIImagePickerController.isSourceTypeAvailable(.camera))
-                PhotosPicker(selection: $pickerItem, matching: .images) {
-                    SourceLabel(title: "사진", systemImage: "photo")
-                }
-                .buttonStyle(.bordered)
-                SourceButton(title: "붙여넣기", systemImage: "doc.on.clipboard") {
-                    if let image = UIPasteboard.general.image { scan(image) }
-                }
-                .disabled(!pasteboardHasImage)
-            }
-            .listRowBackground(Color.clear)
-            .listRowInsets(EdgeInsets())
+            ImageSourceBar(onImage: { scan($0) })
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets())
             Toggle("인식되면 바로 연결", isOn: $autoJoin)
         } footer: {
             if model.status == .scanning {
@@ -124,6 +90,12 @@ struct ContentView: View {
                 }
             }
             .disabled(!model.canJoin)
+            Button {
+                qr = .wifi(ssid: model.ssid, password: model.password)
+            } label: {
+                Label("QR로 공유", systemImage: "qrcode")
+            }
+            .disabled(model.ssid.trimmingCharacters(in: .whitespaces).isEmpty)
         } footer: {
             switch model.status {
             case .joined(let ssid):
@@ -144,32 +116,6 @@ struct ContentView: View {
 }
 
 // MARK: - 작은 뷰들
-
-private struct SourceLabel: View {
-    let title: String
-    let systemImage: String
-
-    var body: some View {
-        VStack(spacing: 4) {
-            Image(systemName: systemImage).font(.title3)
-            Text(title).font(.caption)
-        }
-        .frame(maxWidth: .infinity, minHeight: 52)
-    }
-}
-
-private struct SourceButton: View {
-    let title: String
-    let systemImage: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            SourceLabel(title: title, systemImage: systemImage)
-        }
-        .buttonStyle(.bordered)
-    }
-}
 
 /// OCR이 함께 내놓은 다른 후보들. 누르면 그 값으로 바꾼다.
 private struct AlternativeChips: View {

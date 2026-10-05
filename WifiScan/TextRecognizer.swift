@@ -13,6 +13,12 @@ enum TextRecognizer {
         return second.fieldCount > first.fieldCount ? (second, korean) : (first, english)
     }
 
+    /// 사진 속 글자를 위에서 아래 순서의 여러 줄 텍스트로 돌려준다(같은 행에 있는 조각은 한 줄로 합침).
+    static func recognizeText(in image: UIImage) async -> String {
+        let lines = (try? await recognize(image, languages: ["ko-KR", "en-US"])) ?? []
+        return AccountParser.joinRows(lines)
+    }
+
     static func recognize(_ image: UIImage, languages: [String]) async throws -> [OCRLine] {
         guard let cgImage = image.cgImage else { return [] }
         let orientation = CGImagePropertyOrientation(image.imageOrientation)

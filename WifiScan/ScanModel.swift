@@ -52,6 +52,7 @@ final class ScanModel {
         switch await WiFiJoiner.join(ssid: ssid, password: password) {
         case .joined:
             status = .joined(ssid)
+            WiFiStore.shared.save(ssid: ssid, password: password)
             UINotificationFeedbackGenerator().notificationOccurred(.success)
         case .cancelled:
             status = .idle
