@@ -1,0 +1,6 @@
+*.xcodeproj/
+build/
+Payload/
+*.ipa
+WifiScan/Info.plist
+WifiScan/WifiScan.entitlements

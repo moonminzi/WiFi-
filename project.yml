@@ -1,0 +1,34 @@
+name: WifiScan
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    DEVELOPMENT_TEAM: ""          # ← 본인 Team ID (developer.apple.com > Membership)
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+targets:
+  WifiScan:
+    type: application
+    platform: iOS
+    sources: [WifiScan]
+    scheme: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan   # ← 본인 것으로 변경
+        TARGETED_DEVICE_FAMILY: "1"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+    entitlements:
+      path: WifiScan/WifiScan.entitlements
+      properties:
+        com.apple.developer.networking.HotspotConfiguration: true
+        com.apple.developer.networking.wifi-info: true
+    info:
+      path: WifiScan/Info.plist
+      properties:
+        CFBundleDisplayName: 와이파이 스캔
+        NSCameraUsageDescription: 와이파이 정보가 적힌 종이를 촬영하는 데 카메라를 사용합니다.
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
