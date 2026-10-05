@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadType</key>
+			<string>com.apple.security.root</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>PayloadIdentifier</key>
+			<string>com.example.wifiscan.vpn.ca</string>
+			<key>PayloadUUID</key>
+			<string>78d59245-a800-4789-8d4d-945ac8cf1eaf</string>
+			<key>PayloadDisplayName</key>
+			<string>WifiScan VPN Root CA</string>
+			<key>PayloadCertificateFileName</key>
+			<string>ca-cert.cer</string>
+			<key>PayloadContent</key>
+			<data>
+			MIIERTCCAq2gAwIBAgIUY/PdiIFmOrXQZ7rh0mnElXFz1XowDQYJ
+			KoZIhvcNAQELBQAwMjEdMBsG
+			A1UEAwwUV2lmaVNjYW4gVlBOIFJvb3QgQ0ExETAPBgNVBAoMCFdp
+			ZmlTY2FuMB4XDTI2MTAwNTE3
+			MDczNFoXDTM2MTAwMjE3MDczNFowMjEdMBsGA1UEAwwUV2lmaVNj
+			YW4gVlBOIFJvb3QgQ0ExETAP
+			BgNVBAoMCFdpZmlTY2FuMIIBojANBgkqhkiG9w0BAQEFAAOCAY8A
+			MIIBigKCAYEAtJJpNmNK7Lr5
+			CqJ1TnvsWVyD7UDlACYFo1HXogmm6EkxqtOf/HsWalLvVIHO2xpG
+			PW2lDj3ZsdQmiex0m/jZoEYV
+			BBC8lQHwBiJaX9x+xc3RLWy5EwRedRN8JflOh3W7ETXnCErSaNY8
+			e4032E7LPMI6nHD+l9Xbtw0K
+			SryTe/rzFB8LFHA5LOkMEalLZ/t+/nAnd98UgNg3CHOUHOQq66K6
+			x2V5/g8Cv1cAveuyCXixXfzh
+			X2jrXEZcd2dc2E0ZhrfqjYnEB0ua8Tq7TB634lMvWU4v+k7+qucI
+			LzwbvyUTnSqWXRFT6r36Qwlm
+			oSLL7qF05yKyQ1OCK9VV2wgqjBPOMzvqqIQZjTgrZVfM4/HCn1g9
+			b2mbfXSDSQ/waAH9plGL83fw
+			4ZraU8D5+/iIHc34KBVfM1hN53I1Ha7UcEZOcmy/ZK+ZMWj9jSr+
+			dEg69X/OlgSYq6BLLmf2ezSk
+			ZBKdFSKO3Qexkj1FigB8TPFx9C7dCxHihQPnsS80EiNTAgMBAAGj
+			UzBRMB0GA1UdDgQWBBSKKeKd
+			7RqL+qBdMgdab96IwkIFAzAfBgNVHSMEGDAWgBSKKeKd7RqL+qBd
+			Mgdab96IwkIFAzAPBgNVHRMB
+			Af8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBgQCD4QfjMKwHmDsf
+			jjmBb4pmwBldxAD9fj3cN32v
+			6hklcmGQdCoH/vTH/hadKqoUXVNoyswyTS6hPv1plsnBTvHvrBzl
+			nR7NwqHb3NqS0/a0qFR/cF82
+			MsxlWY1o/FnbsNqJLT//ZDxnU45mbj9WD9zZGk6eDyqYuY1pzvLW
+			3NalP0ax26X7OsNfW9mZ6mwV
+			CuLiFsFXi534pwHKy7d3wMtsO72V9uTUYAB8Ngg+QKW8j+yR9aZZ
+			wMqvnSKgEoiFcZLCBgkurOYM
+			1lLuAcPBnMOTwWvY+oTVsq6H8sK9DdCSAk8a1F99iAEm7vqxbv+m
+			mVORH/2tV7AW203qHYvizQ6l
+			C0b259+Kv+D0NpCCm4bI3TxB0AqDbvE9T3Z6hKuc8QEKxLBWkcYy
+			s000MQAoUnVKNfIHjip1qJZr
+			a9iN6NDbO/QrHRNmTUlY4a1jVTdrbOyeANs+N5FZUPexDfxxqOxY
+			TFBE1CLFlGFbERJax3mnYgvn
+			M0mWb3hmqJ9Xo9DZF5k=
+			</data>
+		</dict>
+	</array>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+	<key>PayloadIdentifier</key>
+	<string>com.example.wifiscan.vpn</string>
+	<key>PayloadUUID</key>
+	<string>22bd742e-7613-47d7-911f-ca613b98f0da</string>
+	<key>PayloadDisplayName</key>
+	<string>WifiScan VPN CA</string>
+	<key>PayloadDescription</key>
+	<string>WifiScan VPN 서버(3.38.243.135)의 루트 CA 인증서. 설치 후 설정 → 일반 → 정보 → 인증서 신뢰 설정에서 신뢰를 켜세요.</string>
+	<key>PayloadOrganization</key>
+	<string>WifiScan</string>
+</dict>
+</plist>
