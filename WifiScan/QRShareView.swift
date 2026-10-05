@@ -4,41 +4,29 @@ import UniformTypeIdentifiers
 
 struct QRShareView: View {
     enum Mode: String, CaseIterable {
-        case file = "파일"
-        case wifi = "와이파이"
-        case text = "텍스트"
+        case file, wifi, text
     }
 
     @AppStorage("qrMode") private var mode: Mode = .file
     @State private var qr: QRPayload?
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    Picker("종류", selection: $mode) {
-                        ForEach(Mode.allCases, id: \.self) { Text($0.rawValue) }
-                    }
-                    .pickerStyle(.segmented)
-                }
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets())
+        TermPage(path: "share") {
+            TermChoice(options: Mode.allCases.map { (label: $0.rawValue, value: $0) }, selection: $mode)
 
-                switch mode {
-                case .file: FileShareSections(qr: $qr)
-                case .wifi: WiFiShareSections(qr: $qr)
-                case .text: TextShareSections(qr: $qr)
-                }
+            switch mode {
+            case .file: FileShareSection(qr: $qr)
+            case .wifi: WiFiShareSection(qr: $qr)
+            case .text: TextShareSection(qr: $qr)
             }
-            .navigationTitle("QR 공유")
-            .sheet(item: $qr) { QRSheet(payload: $0) }
         }
+        .sheet(item: $qr) { QRSheet(payload: $0) }
     }
 }
 
 // MARK: - 파일
 
-private struct FileShareSections: View {
+private struct FileShareSection: View {
     @Binding var qr: QRPayload?
 
     private let store = ShareStore.shared
@@ -49,40 +37,66 @@ private struct FileShareSections: View {
     @State private var errorMessage: String?
 
     var body: some View {
-        uploadSection
-        historySection
-    }
-
-    private var uploadSection: some View {
-        Section {
-            HStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 8) {
                 PhotosPicker(selection: $pickerItem, matching: .any(of: [.images, .videos])) {
-                    SourceLabel(title: "사진·동영상", systemImage: "photo.on.rectangle")
+                    Label("photos", systemImage: "photo.on.rectangle")
                 }
-                .buttonStyle(.bordered)
-                SourceButton(title: "파일", systemImage: "folder") { showImporter = true }
+                Button { showImporter = true } label: {
+                    Label("files", systemImage: "folder")
+                }
             }
+            .buttonStyle(TermButtonStyle(fill: true))
             .disabled(progress != nil)
-            .listRowBackground(Color.clear)
-            .listRowInsets(EdgeInsets())
 
-            Picker("공유 기간", selection: $hours) {
-                Text("1시간").tag(1)
-                Text("6시간").tag(6)
-                Text("1일").tag(24)
-                Text("2일").tag(48)
+            HStack(spacing: 10) {
+                Text("ttl").font(Term.mono(13)).foregroundStyle(Term.muted)
+                TermChoice(options: [("1h", 1), ("6h", 6), ("1d", 24), ("2d", 48)], selection: $hours)
+                Spacer()
             }
 
             if let progress {
-                ProgressView(value: progress) {
-                    Text("올리는 중… \(Int(progress * 100))%")
-                }
-            }
-        } footer: {
-            if let errorMessage {
-                Text(errorMessage).foregroundStyle(.red)
+                UploadProgress(value: progress)
+            } else if let errorMessage {
+                StatusLine(kind: .error, text: errorMessage)
             } else {
-                Text("tmpfiles.org에 100MB까지 올라가고, 기간이 지나면 지워져요. 링크를 아는 사람은 누구나 받을 수 있으니 민감한 파일은 올리지 마세요.")
+                Text("tmpfiles.org · public link · ≤100MB")
+                    .font(Term.mono(12))
+                    .foregroundStyle(Term.muted)
+            }
+
+            let files = store.history.filter { !$0.isExpired }
+            if !files.isEmpty {
+                TermBlock(label: "active") {
+                    ForEach(Array(files.enumerated()), id: \.element.id) { index, file in
+                        if index > 0 { TermDivider() }
+                        HStack(spacing: 10) {
+                            Button {
+                                qr = payload(for: file)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(file.name)
+                                        .font(Term.mono(14))
+                                        .foregroundStyle(Term.text)
+                                        .lineLimit(1)
+                                    Text("\(Self.sizeText(file.size)) · exp \(Self.expiryText(file.expiresAt))")
+                                        .font(Term.mono(11))
+                                        .foregroundStyle(Term.muted)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            Button { store.remove(file) } label: {
+                                Image(systemName: "xmark")
+                                    .font(Term.mono(12))
+                                    .foregroundStyle(Term.muted)
+                                    .frame(width: 28, height: 28)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
             }
         }
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item]) { result in
@@ -93,38 +107,6 @@ private struct FileShareSections: View {
             guard let item else { return }
             pickerItem = nil
             Task { await sharePicked(item) }
-        }
-    }
-
-    @ViewBuilder
-    private var historySection: some View {
-        let files = store.history.filter { !$0.isExpired }
-        if !files.isEmpty {
-            Section {
-                ForEach(files) { file in
-                    Button {
-                        qr = payload(for: file)
-                    } label: {
-                        HStack {
-                            Image(systemName: "qrcode")
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(file.name).lineLimit(1)
-                                Text("\(Self.sizeText(file.size)) · \(file.expiresAt.formatted(date: .abbreviated, time: .shortened))까지")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .foregroundStyle(.primary)
-                    }
-                    .swipeActions {
-                        Button("목록에서 빼기", role: .destructive) { store.remove(file) }
-                    }
-                }
-            } header: {
-                Text("공유 중")
-            } footer: {
-                Text("누르면 QR을 다시 볼 수 있어요.")
-            }
         }
     }
 
@@ -192,10 +174,7 @@ private struct FileShareSections: View {
     }
 
     private func payload(for file: SharedFile) -> QRPayload {
-        .link(
-            file.url,
-            title: file.name,
-            subtitle: "\(Self.sizeText(file.size)) · \(file.expiresAt.formatted(date: .abbreviated, time: .shortened))까지")
+        .link(file.url, title: file.name, subtitle: "\(Self.sizeText(file.size)) · exp \(Self.expiryText(file.expiresAt))")
     }
 
     private static func makeTempDirectory() throws -> URL {
@@ -206,6 +185,31 @@ private struct FileShareSections: View {
 
     private static func sizeText(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private static func expiryText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : "MM/dd HH:mm"
+        return formatter.string(from: date)
+    }
+}
+
+/// `[██████░░░░░░] 52%` 형태의 진행률
+private struct UploadProgress: View {
+    let value: Double
+    private let width = 20
+
+    var body: some View {
+        let filled = Int((value * Double(width)).rounded())
+        HStack(spacing: 8) {
+            Text("[" + String(repeating: "█", count: filled) + String(repeating: "░", count: width - filled) + "]")
+                .foregroundStyle(Term.green)
+            Text("\(Int(value * 100))%")
+                .foregroundStyle(Term.muted)
+        }
+        .font(Term.mono(13))
+        .lineLimit(1)
+        .minimumScaleFactor(0.6)
     }
 }
 
@@ -228,7 +232,7 @@ private struct PickedMovie: Transferable {
 
 // MARK: - 와이파이
 
-private struct WiFiShareSections: View {
+private struct WiFiShareSection: View {
     @Binding var qr: QRPayload?
 
     private let store = WiFiStore.shared
@@ -236,48 +240,52 @@ private struct WiFiShareSections: View {
     @State private var password = ""
 
     var body: some View {
-        Section {
-            TextField("네트워크 이름", text: $ssid)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-            TextField("비밀번호 (없으면 비워 두기)", text: $password)
-                .font(.body.monospaced())
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
+        VStack(alignment: .leading, spacing: 18) {
+            TermBlock(label: "new") {
+                TermField(key: "ssid", text: $ssid, placeholder: "—")
+                TermDivider()
+                TermField(key: "pw", text: $password, placeholder: "open")
+            }
+
             Button {
                 store.save(ssid: ssid, password: password)
                 qr = .wifi(ssid: ssid, password: password)
                 ssid = ""
                 password = ""
             } label: {
-                Label("QR 만들기", systemImage: "qrcode")
+                Label("qr", systemImage: "qrcode")
             }
+            .buttonStyle(.termPrimary)
             .disabled(ssid.trimmingCharacters(in: .whitespaces).isEmpty)
-        } header: {
-            Text("직접 입력")
-        } footer: {
-            Text("상대가 기본 카메라로 찍으면 비밀번호 입력 없이 바로 연결돼요.")
-        }
 
-        if !store.networks.isEmpty {
-            Section("저장된 와이파이") {
-                ForEach(store.networks) { network in
-                    Button {
-                        qr = .wifi(ssid: network.ssid, password: network.password)
-                    } label: {
-                        HStack {
-                            Image(systemName: "wifi")
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(network.ssid)
-                                Text(network.password.isEmpty ? "비밀번호 없음" : network.password)
-                                    .font(.caption.monospaced())
-                                    .foregroundStyle(.secondary)
+            if !store.networks.isEmpty {
+                TermBlock(label: "saved") {
+                    ForEach(Array(store.networks.enumerated()), id: \.element.id) { index, network in
+                        if index > 0 { TermDivider() }
+                        HStack(spacing: 10) {
+                            Button {
+                                qr = .wifi(ssid: network.ssid, password: network.password)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(network.ssid)
+                                        .font(Term.mono(14))
+                                        .foregroundStyle(Term.text)
+                                    Text(network.password.isEmpty ? "open" : network.password)
+                                        .font(Term.mono(11))
+                                        .foregroundStyle(Term.muted)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
                             }
+                            .buttonStyle(.plain)
+                            Button { store.delete(network) } label: {
+                                Image(systemName: "xmark")
+                                    .font(Term.mono(12))
+                                    .foregroundStyle(Term.muted)
+                                    .frame(width: 28, height: 28)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .foregroundStyle(.primary)
-                    }
-                    .swipeActions {
-                        Button("삭제", role: .destructive) { store.delete(network) }
                     }
                 }
             }
@@ -287,32 +295,47 @@ private struct WiFiShareSections: View {
 
 // MARK: - 텍스트
 
-private struct TextShareSections: View {
+private struct TextShareSection: View {
     @Binding var qr: QRPayload?
     @State private var text = ""
 
     var body: some View {
-        Section {
-            TextField("링크나 글자", text: $text, axis: .vertical)
-                .lineLimit(3...8)
-            Button {
-                text = UIPasteboard.general.string ?? text
-            } label: {
-                Label("복사한 내용 붙여넣기", systemImage: "doc.on.clipboard")
-            }
-            Button {
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let url = URL(string: trimmed), let scheme = url.scheme, ["http", "https"].contains(scheme) {
-                    qr = .link(url, title: url.host() ?? trimmed, subtitle: trimmed)
-                } else {
-                    qr = .text(trimmed)
+        VStack(alignment: .leading, spacing: 18) {
+            TermBlock(label: "input") {
+                TextField("", text: $text, prompt: Text("text or url").foregroundStyle(Term.muted.opacity(0.5)), axis: .vertical)
+                    .font(Term.mono(15))
+                    .lineLimit(3...10)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                HStack {
+                    Spacer()
+                    Text("\(text.utf8.count)/2900 B")
+                        .font(Term.mono(11))
+                        .foregroundStyle(text.utf8.count > 2900 ? Term.red : Term.muted)
                 }
-            } label: {
-                Label("QR 만들기", systemImage: "qrcode")
             }
-            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        } footer: {
-            Text("\(text.utf8.count) / 약 2,900바이트")
+
+            HStack(spacing: 8) {
+                Button {
+                    text = UIPasteboard.general.string ?? text
+                } label: {
+                    Label("paste", systemImage: "doc.on.clipboard")
+                }
+                .buttonStyle(.term)
+
+                Button {
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let url = URL(string: trimmed), let scheme = url.scheme, ["http", "https"].contains(scheme) {
+                        qr = .link(url, title: url.host() ?? trimmed, subtitle: nil)
+                    } else {
+                        qr = .text(trimmed)
+                    }
+                } label: {
+                    Label("qr", systemImage: "qrcode")
+                }
+                .buttonStyle(.termPrimary)
+                .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
         }
     }
 }

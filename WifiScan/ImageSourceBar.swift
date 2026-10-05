@@ -1,7 +1,7 @@
 import PhotosUI
 import SwiftUI
 
-/// 촬영 / 사진 / 붙여넣기 버튼 묶음. 와이파이·계좌번호 탭에서 같이 쓴다.
+/// cam / photos / paste 버튼 묶음. 와이파이·계좌번호 탭에서 같이 쓴다.
 struct ImageSourceBar<Extra: View>: View {
     var onImage: (UIImage) -> Void
     @ViewBuilder var extra: Extra
@@ -12,19 +12,22 @@ struct ImageSourceBar<Extra: View>: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        HStack(spacing: 10) {
-            SourceButton(title: "촬영", systemImage: "camera") { showCamera = true }
+        HStack(spacing: 8) {
+            Button { showCamera = true } label: { Label("cam", systemImage: "camera") }
                 .disabled(!UIImagePickerController.isSourceTypeAvailable(.camera))
             PhotosPicker(selection: $pickerItem, matching: .images) {
-                SourceLabel(title: "사진", systemImage: "photo")
+                Label("photos", systemImage: "photo")
             }
-            .buttonStyle(.bordered)
-            SourceButton(title: "이미지 붙여넣기", systemImage: "doc.on.clipboard") {
+            Button {
                 if let image = UIPasteboard.general.image { onImage(image) }
+            } label: {
+                Label("img", systemImage: "doc.on.clipboard")
             }
             .disabled(!pasteboardHasImage)
             extra
         }
+        .buttonStyle(TermButtonStyle(fill: true))
+        .labelStyle(.titleAndIcon)
         .fullScreenCover(isPresented: $showCamera) {
             CameraPicker { image in
                 showCamera = false
@@ -51,31 +54,5 @@ struct ImageSourceBar<Extra: View>: View {
 extension ImageSourceBar where Extra == EmptyView {
     init(onImage: @escaping (UIImage) -> Void) {
         self.init(onImage: onImage) { EmptyView() }
-    }
-}
-
-struct SourceLabel: View {
-    let title: String
-    let systemImage: String
-
-    var body: some View {
-        VStack(spacing: 4) {
-            Image(systemName: systemImage).font(.title3)
-            Text(title).font(.caption).lineLimit(1).minimumScaleFactor(0.7)
-        }
-        .frame(maxWidth: .infinity, minHeight: 52)
-    }
-}
-
-struct SourceButton: View {
-    let title: String
-    let systemImage: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            SourceLabel(title: title, systemImage: systemImage)
-        }
-        .buttonStyle(.bordered)
     }
 }

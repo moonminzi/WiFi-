@@ -38,8 +38,8 @@ final class ShareStore {
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> SharedFile {
         let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
-        guard size > 0 else { throw ShareError.message("빈 파일은 올릴 수 없어요.") }
-        guard size <= Self.maxUploadBytes else { throw ShareError.message("100MB까지만 올릴 수 있어요.") }
+        guard size > 0 else { throw ShareError.message("empty file") }
+        guard size <= Self.maxUploadBytes else { throw ShareError.message("file > 100MB") }
 
         let hours = min(max(hours, 1), Self.maxHours)
         let boundary = "Boundary-\(UUID().uuidString)"
@@ -66,7 +66,7 @@ final class ShareStore {
               let body = try? JSONDecoder().decode(UploadResponse.self, from: data),
               body.status == "success", let link = body.data?.url, let url = URL(string: link)
         else {
-            throw ShareError.message("업로드에 실패했어요. 잠시 뒤 다시 해 보세요.")
+            throw ShareError.message("upload failed · retry")
         }
 
         let file = SharedFile(

@@ -6,116 +6,72 @@ struct WiFiScanView: View {
     @AppStorage("autoJoin") private var autoJoin = true
 
     var body: some View {
-        NavigationStack {
-            Form {
-                sourceSection
-                credentialsSection
-                joinSection
-            }
-            .navigationTitle("와이파이 스캔")
-            .sheet(item: $qr) { QRSheet(payload: $0) }
-        }
-    }
-
-    // MARK: - 사진 입력
-
-    private var sourceSection: some View {
-        Section {
-            if let image = model.image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: 220)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
+        TermPage(path: "wifi") {
             ImageSourceBar(onImage: { scan($0) })
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets())
-            Toggle("인식되면 바로 연결", isOn: $autoJoin)
-        } footer: {
-            if model.status == .scanning {
-                Label("글자 읽는 중…", systemImage: "text.viewfinder")
-            } else if model.status == .notFound {
-                Text("와이파이 정보를 찾지 못했어요. 종이가 화면에 꽉 차게 다시 찍거나 직접 입력하세요.")
+
+            if let image = model.image {
+                ImagePreview(image: image)
             }
-        }
-    }
 
-    // MARK: - 인식 결과
+            switch model.status {
+            case .scanning: StatusLine(kind: .running, text: "ocr…")
+            case .notFound: StatusLine(kind: .error, text: "no ssid found")
+            default: EmptyView()
+            }
 
-    private var credentialsSection: some View {
-        Group {
-            Section("네트워크 이름 (ID)") {
-                TextField("SSID", text: $model.ssid)
-                    .font(.body.monospaced())
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+            TermBlock(label: "net") {
+                TermField(key: "ssid", text: $model.ssid, placeholder: "—")
                 AlternativeChips(values: model.ssidAlternatives) { model.ssid = $0 }
-            }
-            Section {
-                TextField("비밀번호", text: $model.password)
-                    .font(.body.monospaced())
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                TermDivider()
+                TermField(key: "pw", text: $model.password, placeholder: "—")
                 if !model.password.isEmpty {
                     AmbiguousCharacterEditor(text: $model.password)
                 }
                 AlternativeChips(values: model.passwordAlternatives) { model.password = $0 }
-            } header: {
-                Text("비밀번호 (PW)")
-            } footer: {
-                if model.password.contains(where: { AmbiguousCharacterEditor.group(for: $0) != nil }) {
-                    Text("색으로 표시된 글자는 손글씨에서 헷갈리기 쉬운 글자예요. 누르면 비슷한 글자로 바뀝니다.")
-                }
             }
-        }
-    }
 
-    // MARK: - 연결
-
-    private var joinSection: some View {
-        Section {
-            Button {
-                Task { await model.join() }
-            } label: {
-                HStack {
-                    Spacer()
+            HStack(spacing: 8) {
+                Button {
+                    Task { await model.join() }
+                } label: {
                     if model.status == .joining {
-                        ProgressView()
+                        ProgressView().tint(Term.bg)
                     } else {
-                        Label("연결", systemImage: "wifi")
-                            .font(.headline)
+                        Label("connect", systemImage: "wifi")
                     }
-                    Spacer()
                 }
+                .buttonStyle(.termPrimary)
+                .disabled(!model.canJoin)
+
+                Button {
+                    qr = .wifi(ssid: model.ssid, password: model.password)
+                } label: {
+                    Label("qr", systemImage: "qrcode")
+                }
+                .buttonStyle(.term)
+                .disabled(model.ssid.trimmingCharacters(in: .whitespaces).isEmpty)
             }
-            .disabled(!model.canJoin)
-            Button {
-                qr = .wifi(ssid: model.ssid, password: model.password)
-            } label: {
-                Label("QR로 공유", systemImage: "qrcode")
+
+            Toggle(isOn: $autoJoin) {
+                Text("--auto-join")
+                    .font(Term.mono(13))
+                    .foregroundStyle(Term.muted)
             }
-            .disabled(model.ssid.trimmingCharacters(in: .whitespaces).isEmpty)
-        } footer: {
+            .tint(Term.green)
+
             switch model.status {
-            case .joined(let ssid):
-                Label("\(ssid)에 연결됐어요", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            case .failed(let message):
-                Label(message, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red)
-            default:
-                EmptyView()
+            case .joined(let ssid): StatusLine(kind: .ok, text: "joined \(ssid)")
+            case .failed(let message): StatusLine(kind: .error, text: message)
+            default: EmptyView()
             }
         }
+        .sheet(item: $qr) { QRSheet(payload: $0) }
     }
 
     private func scan(_ image: UIImage) {
         Task { await model.load(image, autoJoin: autoJoin) }
     }
 }
-
-// MARK: - 작은 뷰들
 
 /// OCR이 함께 내놓은 다른 후보들. 누르면 그 값으로 바꾼다.
 private struct AlternativeChips: View {
@@ -125,20 +81,26 @@ private struct AlternativeChips: View {
     var body: some View {
         if !values.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack {
-                    Text("다른 후보").font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Text("alt")
+                        .foregroundStyle(Term.muted)
+                        .frame(width: 56, alignment: .leading)
                     ForEach(values, id: \.self) { value in
                         Button(value) { onSelect(value) }
-                            .font(.caption.monospaced())
-                            .buttonStyle(.bordered)
+                            .foregroundStyle(Term.blue)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Term.border))
+                            .buttonStyle(.plain)
                     }
                 }
+                .font(Term.mono(12))
             }
         }
     }
 }
 
-/// 비밀번호를 한 글자씩 보여주고, 헷갈리는 글자를 누르면 비슷한 글자로 순환시킨다.
+/// 비밀번호를 한 글자씩 보여주고, 헷갈리는 글자(노란색)를 누르면 비슷한 글자로 순환시킨다.
 struct AmbiguousCharacterEditor: View {
     @Binding var text: String
 
@@ -159,7 +121,7 @@ struct AmbiguousCharacterEditor: View {
     var body: some View {
         let chars = Array(text)
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 3) {
+            HStack(spacing: 4) {
                 ForEach(chars.indices, id: \.self) { i in
                     let c = chars[i]
                     if let group = Self.group(for: c) {
@@ -169,20 +131,23 @@ struct AmbiguousCharacterEditor: View {
                             updated[i] = group[next]
                             text = String(updated)
                         } label: {
-                            cell(c).background(Color.orange.opacity(0.25), in: RoundedRectangle(cornerRadius: 5))
+                            cell(c, color: Term.amber)
                         }
                         .buttonStyle(.plain)
                     } else {
-                        cell(c).background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
+                        cell(c, color: Term.text)
                     }
                 }
             }
         }
     }
 
-    private func cell(_ c: Character) -> some View {
+    private func cell(_ c: Character, color: Color) -> some View {
         Text(String(c))
-            .font(.title3.monospaced().weight(.semibold))
+            .font(Term.mono(18, .semibold))
+            .foregroundStyle(color)
             .frame(minWidth: 26, minHeight: 36)
+            .background(color == Term.amber ? Term.amber.opacity(0.12) : Term.bg, in: RoundedRectangle(cornerRadius: 4))
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(color == Term.amber ? Term.amber.opacity(0.6) : Term.border))
     }
 }

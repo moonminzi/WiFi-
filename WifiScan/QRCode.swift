@@ -17,7 +17,7 @@ struct QRPayload: Identifiable {
             : "WIFI:T:WPA;S:\(escape(ssid));P:\(escape(password));;"
         return QRPayload(
             title: ssid,
-            subtitle: "카메라로 찍으면 바로 연결돼요",
+            subtitle: password.isEmpty ? "open" : "wpa",
             content: content,
             copyText: password.isEmpty ? ssid : password)
     }
@@ -27,14 +27,14 @@ struct QRPayload: Identifiable {
     }
 
     static func text(_ text: String) -> QRPayload {
-        QRPayload(title: "텍스트", subtitle: nil, content: text, copyText: text)
+        QRPayload(title: "text", subtitle: "\(text.utf8.count) B", content: text, copyText: text)
     }
 
     static func account(_ account: AccountCandidate) -> QRPayload {
         let text = [account.bank, account.number, account.holder].compactMap { $0 }.joined(separator: " ")
         return QRPayload(
             title: [account.bank, account.number].compactMap { $0 }.joined(separator: " "),
-            subtitle: account.holder.map { "예금주 \($0)" },
+            subtitle: account.holder,
             content: text,
             copyText: text)
     }
@@ -66,61 +66,64 @@ enum QRCode {
 struct QRSheet: View {
     let payload: QRPayload
     @Environment(\.dismiss) private var dismiss
-    @State private var copied = false
+    @State private var toast: String?
     @State private var originalBrightness: CGFloat?
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 20) {
-                if let image = QRCode.image(for: payload.content) {
-                    Image(uiImage: image)
-                        .interpolation(.none)
-                        .resizable()
-                        .scaledToFit()
-                        .padding(16)
-                        .background(Color.white, in: RoundedRectangle(cornerRadius: 16))
-                        .frame(maxWidth: 320)
-                } else {
-                    ContentUnavailableView(
-                        "QR로 만들기엔 너무 길어요",
-                        systemImage: "exclamationmark.triangle",
-                        description: Text("약 2,900바이트(한글 약 900자)까지 들어가요."))
-                }
-
-                VStack(spacing: 4) {
-                    Text(payload.title)
-                        .font(.title3.bold())
-                        .textSelection(.enabled)
-                    if let subtitle = payload.subtitle {
-                        Text(subtitle)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .multilineTextAlignment(.center)
-
-                HStack {
-                    Button {
-                        UIPasteboard.general.string = payload.copyText
-                        copied = true
-                    } label: {
-                        Label(copied ? "복사됨" : "복사", systemImage: copied ? "checkmark" : "doc.on.doc")
-                    }
-                    ShareLink(item: payload.copyText) {
-                        Label("공유", systemImage: "square.and.arrow.up")
-                    }
-                }
-                .buttonStyle(.bordered)
-
-                Spacer()
+        TermPage(path: "qr") {
+            if let image = QRCode.image(for: payload.content) {
+                Image(uiImage: image)
+                    .interpolation(.none)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(14)
+                    .background(Color.white, in: RoundedRectangle(cornerRadius: 10))
+                    .frame(maxWidth: 300)
+                    .frame(maxWidth: .infinity)
+            } else {
+                StatusLine(kind: .error, text: "payload > 2900 B")
             }
-            .padding()
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("닫기") { dismiss() }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(payload.title)
+                    .font(Term.mono(17, .bold))
+                    .textSelection(.enabled)
+                if let subtitle = payload.subtitle {
+                    Text(subtitle)
+                        .font(Term.mono(12))
+                        .foregroundStyle(Term.muted)
                 }
+            }
+
+            TermBlock(label: "payload") {
+                Text(payload.content)
+                    .font(Term.mono(12))
+                    .foregroundStyle(Term.muted)
+                    .lineLimit(4)
+                    .textSelection(.enabled)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    UIPasteboard.general.string = payload.copyText
+                    toast = "✓ copied"
+                } label: {
+                    Label("copy", systemImage: "doc.on.doc")
+                }
+                .buttonStyle(.termPrimary)
+                ShareLink(item: payload.copyText) {
+                    Label("share", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.term)
             }
         }
+        .overlay(alignment: .topTrailing) {
+            Button("esc") { dismiss() }
+                .buttonStyle(.term)
+                .padding(16)
+        }
+        .termToast($toast)
+        .presentationBackground(Term.bg)
         .onAppear {
             guard let screen = Self.screen else { return }
             originalBrightness = screen.brightness

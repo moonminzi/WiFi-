@@ -37,91 +37,65 @@ struct AccountScanView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    if let image = model.image {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxWidth: .infinity, maxHeight: 220)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                    ImageSourceBar(onImage: { image in Task { await model.load(image) } }) {
-                        SourceButton(title: "글자 붙여넣기", systemImage: "text.badge.plus") {
-                            if let text = UIPasteboard.general.string { model.load(text: text) }
-                        }
-                        .disabled(!pasteboardHasText)
-                    }
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets())
-                } footer: {
-                    if model.isScanning {
-                        Label("글자 읽는 중…", systemImage: "text.viewfinder")
-                    } else if model.notFound {
-                        Text("계좌번호를 찾지 못했어요. 더 가까이 찍거나, 글자를 복사해서 붙여넣어 보세요.")
-                    } else if model.accounts.isEmpty {
-                        Text("단톡방 캡처, 공지 사진, 복사한 메시지에서 은행과 계좌번호를 찾아요.")
-                    }
+        TermPage(path: "acct") {
+            ImageSourceBar(onImage: { image in Task { await model.load(image) } }) {
+                Button {
+                    if let text = UIPasteboard.general.string { model.load(text: text) }
+                } label: {
+                    Label("txt", systemImage: "text.alignleft")
                 }
+                .disabled(!pasteboardHasText)
+            }
 
-                ForEach($model.accounts) { $account in
-                    AccountSection(account: $account) { action in
-                        perform(action, on: account)
-                    }
+            if let image = model.image {
+                ImagePreview(image: image)
+            }
+
+            if model.isScanning {
+                StatusLine(kind: .running, text: "ocr…")
+            } else if model.notFound {
+                StatusLine(kind: .error, text: "no account found")
+            } else if !model.accounts.isEmpty {
+                StatusLine(kind: .ok, text: "\(model.accounts.count) found")
+            }
+
+            ForEach($model.accounts) { $account in
+                let index = model.accounts.firstIndex { $0.id == account.id } ?? 0
+                AccountBlock(index: index, account: $account) { action in
+                    perform(action, on: account)
                 }
             }
-            .navigationTitle("계좌번호")
-            .sheet(item: $qr) { QRSheet(payload: $0) }
-            .overlay(alignment: .bottom) {
-                if let toast {
-                    Text(toast)
-                        .font(.subheadline)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(.thinMaterial, in: Capsule())
-                        .padding(.bottom, 24)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-            .animation(.default, value: toast)
-            .onChange(of: scenePhase) { _, phase in
-                if phase == .active { pasteboardHasText = UIPasteboard.general.hasStrings }
-            }
+        }
+        .termToast($toast)
+        .sheet(item: $qr) { QRSheet(payload: $0) }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { pasteboardHasText = UIPasteboard.general.hasStrings }
         }
     }
 
-    private func perform(_ action: AccountSection.Action, on account: AccountCandidate) {
+    private func perform(_ action: AccountBlock.Action, on account: AccountCandidate) {
         // 토스·은행 앱은 "은행 계좌번호"가 복사돼 있으면 송금 화면에서 자동으로 잡아준다
         let withBank = [account.bank, account.digits].compactMap { $0 }.joined(separator: " ")
         switch action {
         case .copy:
             UIPasteboard.general.string = withBank
-            show("복사했어요. 송금 앱에서 붙여넣으세요")
+            toast = "✓ copied: \(withBank)"
         case .copyDigits:
             UIPasteboard.general.string = account.digits
-            show("숫자만 복사했어요")
+            toast = "✓ copied: \(account.digits)"
         case .qr:
             qr = .account(account)
         case .open(let app):
             UIPasteboard.general.string = withBank
             guard let url = URL(string: app.urlScheme) else { return }
             openURL(url) { accepted in
-                show(accepted ? "복사해 뒀어요. 송금 화면에서 붙여넣으세요" : "\(app.title) 앱이 없어요")
+                toast = accepted ? "✓ copied → \(app.title)" : "✗ \(app.title) not installed"
             }
-        }
-    }
-
-    private func show(_ message: String) {
-        toast = message
-        Task {
-            try? await Task.sleep(for: .seconds(2.5))
-            if toast == message { toast = nil }
         }
     }
 }
 
-private struct AccountSection: View {
+private struct AccountBlock: View {
     enum Action {
         case copy, copyDigits, qr
         case open(BankApp)
@@ -132,8 +106,8 @@ private struct AccountSection: View {
 
         var title: String {
             switch self {
-            case .toss: "토스"
-            case .kakaoBank: "카카오뱅크"
+            case .toss: "toss"
+            case .kakaoBank: "kakaobank"
             }
         }
 
@@ -145,41 +119,45 @@ private struct AccountSection: View {
         }
     }
 
+    let index: Int
     @Binding var account: AccountCandidate
     let onAction: (Action) -> Void
 
     var body: some View {
-        Section {
+        TermBlock(label: String(format: "%02d", index + 1)) {
             HStack {
-                TextField("은행", text: optional(\.bank))
+                TermField(key: "bank", text: optional(\.bank), placeholder: "?")
                 Menu {
                     ForEach(AccountParser.bankNames, id: \.self) { name in
                         Button(name) { account.bank = name }
                     }
                 } label: {
                     Image(systemName: "chevron.up.chevron.down")
+                        .font(Term.mono(13))
+                        .foregroundStyle(Term.muted)
+                        .frame(width: 32, height: 28)
                 }
             }
-            TextField("계좌번호", text: $account.number)
-                .font(.title3.monospaced())
-                .keyboardType(.numbersAndPunctuation)
-            TextField("예금주 (선택)", text: optional(\.holder))
+            TermDivider()
+            TermField(key: "no", text: $account.number, keyboard: .numbersAndPunctuation)
+            TermDivider()
+            TermField(key: "holder", text: optional(\.holder), placeholder: "?")
 
-            HStack {
-                Button { onAction(.copy) } label: { Label("복사", systemImage: "doc.on.doc") }
-                Button { onAction(.copyDigits) } label: { Text("숫자만") }
-                Button { onAction(.qr) } label: { Label("QR", systemImage: "qrcode") }
+            HStack(spacing: 8) {
+                Button("copy") { onAction(.copy) }
+                    .buttonStyle(.termPrimary)
+                Button("digits") { onAction(.copyDigits) }
+                Button { onAction(.qr) } label: { Image(systemName: "qrcode") }
                 Menu {
                     ForEach(BankApp.allCases, id: \.self) { app in
                         Button(app.title) { onAction(.open(app)) }
                     }
                 } label: {
-                    Label("송금 앱", systemImage: "arrow.up.forward.app")
+                    Text("open ▾")
                 }
             }
-            .buttonStyle(.bordered)
-            .labelStyle(.titleAndIcon)
-            .font(.subheadline)
+            .buttonStyle(.term)
+            .menuStyle(.button)
         }
     }
 

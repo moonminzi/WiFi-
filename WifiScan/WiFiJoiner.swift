@@ -20,8 +20,8 @@ enum WiFiJoiner {
             switch NEHotspotConfigurationError(rawValue: error.code) {
             case .alreadyAssociated: return .joined
             case .userDenied: return .cancelled
-            case .invalidWPAPassphrase: return .failed("비밀번호는 8~63자여야 합니다.")
-            case .invalidSSID: return .failed("네트워크 이름(SSID)이 올바르지 않습니다.")
+            case .invalidWPAPassphrase: return .failed("pw must be 8–63 chars")
+            case .invalidSSID: return .failed("invalid ssid")
             default: return .failed(error.localizedDescription)
             }
         } catch {
