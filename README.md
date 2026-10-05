@@ -1,11 +1,24 @@
 # 와이파이 스캔 (iOS)
 
-와이파이 안내 종이를 찍거나 사진을 고르면 ID/PW를 읽어서 바로 연결해 주는 앱.
+탭 두 개짜리 앱입니다.
+
+- **와이파이 스캔** 탭: 와이파이 안내 종이를 찍거나 사진을 고르면 ID/PW를 읽어서 바로 연결
+- **VPN** 탭: AWS에 띄운 IKEv2 서버로 연결(공용 와이파이에서 트래픽 보호)
+
+## 와이파이 스캔 탭
 
 - OCR: Apple Vision (기기 안에서 처리, 네트워크 안 씀)
 - 연결: `NEHotspotConfiguration` → "연결하시겠습니까?" 한 번 누르면 접속
 - 접속 확인: `NEHotspotNetwork.fetchCurrent()`로 실제로 붙었는지 확인하고, 실패하면 저장된 설정을 지움
 - 손글씨에서 헷갈리는 글자(0/O/D, 1/l/I, 5/S, 6/G …)를 색으로 표시하고, 누르면 비슷한 글자로 바뀜
+
+## VPN 탭
+
+- iOS 내장 Personal VPN(`NEVPNManager`)으로 **IKEv2 + EAP-MSCHAPv2** 연결 — 별도 확장/라이브러리 없음
+- 서버는 AWS EC2의 **strongSwan**. 구축·재현 방법과 접속 안내는 [`server/README.md`](server/README.md) 참고
+- 자체 서명 CA라서 최초 1회 `server/WifiScanVPN.mobileconfig` 설치 + 인증서 신뢰가 필요
+  (설정 → 일반 → 정보 → 인증서 신뢰 설정)
+- 비밀번호는 기기 **키체인**에만 저장(소스/저장소에 없음)
 
 ## 빌드 방법 A: XcodeGen (추천)
 
@@ -21,10 +34,11 @@ open WifiScan.xcodeproj
 ## 빌드 방법 B: Xcode에서 직접 만들기
 
 1. File → New → Project → iOS App (Interface: SwiftUI), iOS 17 이상
-2. 템플릿이 만든 `ContentView.swift`, `<이름>App.swift`는 지우고 `WifiScan/` 폴더의 `.swift` 파일 7개를 끌어다 넣기
+2. 템플릿이 만든 `ContentView.swift`, `<이름>App.swift`는 지우고 `WifiScan/` 폴더의 `.swift` 파일 9개를 끌어다 넣기
 3. Signing & Capabilities → 본인 Team 선택 → `+ Capability`로 추가:
    - **Hotspot Configuration**
    - **Access Wi-Fi Information**
+   - **Personal VPN** (VPN 탭용)
 4. Info 탭 → `Privacy - Camera Usage Description` 추가 (예: "와이파이 안내문 촬영")
 5. 아이폰에서 실행
 

@@ -25,6 +25,7 @@ targets:
       properties:
         com.apple.developer.networking.HotspotConfiguration: true
         com.apple.developer.networking.wifi-info: true
+        com.apple.developer.networking.vpn.api: [allow-vpn]
     info:
       path: WifiScan/Info.plist
       properties:
