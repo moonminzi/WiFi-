@@ -3,6 +3,10 @@ name: Build unsigned IPA
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md']
+  pull_request:
+    branches: [main]
+    paths-ignore: ['**.md']
   workflow_dispatch:
 
 permissions:
@@ -30,8 +34,11 @@ jobs:
         run: |
           mkdir -p Payload
           cp -R build/Build/Products/Release-iphoneos/WifiScan.app Payload/
+          # 확장(공유 시트)을 먼저 서명하고 앱을 서명한다(안쪽부터)
+          for ext in Payload/WifiScan.app/PlugIns/*.appex; do codesign --force --sign - "$ext"; done
           # 재서명 도구가 권한을 그대로 가져가도록 entitlements를 바이너리에 박아 둔다(ad-hoc 서명)
           codesign --force --sign - --entitlements WifiScan/WifiScan.entitlements Payload/WifiScan.app
+          ls Payload/WifiScan.app/PlugIns
           codesign -d --entitlements - Payload/WifiScan.app
           zip -qry WifiScan.ipa Payload
 
@@ -41,6 +48,7 @@ jobs:
           path: WifiScan.ipa
 
       - name: Publish release
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

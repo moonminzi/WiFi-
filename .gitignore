@@ -4,3 +4,4 @@ Payload/
 *.ipa
 WifiScan/Info.plist
 WifiScan/WifiScan.entitlements
+ShareExtension/Info.plist

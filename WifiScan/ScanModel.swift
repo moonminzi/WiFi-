@@ -52,11 +52,12 @@ final class ScanModel {
         switch await WiFiJoiner.join(ssid: ssid, password: password) {
         case .joined:
             status = .joined(ssid)
+            WiFiStore.shared.save(ssid: ssid, password: password)
             UINotificationFeedbackGenerator().notificationOccurred(.success)
         case .cancelled:
             status = .idle
         case .notConnected:
-            status = .failed("연결되지 않았어요. 비밀번호에서 헷갈리는 글자(색으로 표시)를 확인해 보세요.")
+            status = .failed("not joined · check yellow chars")
             UINotificationFeedbackGenerator().notificationOccurred(.error)
         case .failed(let message):
             status = .failed(message)
