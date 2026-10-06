@@ -37,6 +37,24 @@ iOS 내장 Personal VPN(NEVPNManager)이 그대로 쓸 수 있도록 **strongSwa
    - 비밀번호: (전달받은 값)
    을 넣고 **연결**을 누릅니다. 최초 1회 "VPN 구성 추가" 허용 창이 뜹니다.
 
+## 국가 선택용 해외 서버
+
+앱 VPN 탭에서 국가를 고르면 그 나라 리전의 IKEv2 서버로 붙습니다. 서울 서버(위)와 WireGuard 사용자는 그대로입니다.
+
+| 국가 | 리전 | 인스턴스 | 서버 ID (인증서 SAN) |
+|---|---|---|---|
+| 🇯🇵 일본 | `ap-northeast-1` (도쿄) | `c7g.medium` | `jp.nago.vpn` |
+| 🇺🇸 미국 | `us-west-2` (오리건) | `c7g.medium` | `us.nago.vpn` |
+| 🇬🇧 영국 | `eu-west-2` (런던) | `c7g.medium` | `uk.nago.vpn` |
+
+- 고정 IP(EIP)를 쓰지 않습니다. 켤 때마다 IP가 바뀌므로 인증서 ID를 FQDN으로 두고,
+  앱은 국가 API(Lambda + API Gateway, `GET /region?r=jp`, 헤더 `x-nago-key`=VPN 비밀번호)로
+  서버를 켜고 현재 IP를 받아 접속합니다. 서버 인증서는 서울과 같은 CA로 서명해서 CA 재설치가 필요 없습니다.
+- 3시간 동안 송신 트래픽이 거의 없으면 CloudWatch 경보가 인스턴스를 중지합니다(서울과 같은 기준).
+- 구성: `setup-region.sh <번들 디렉터리>` — strongSwan(AES-256-GCM, PFS 선택), MTU 1500, BBR,
+  원거리용 TCP 버퍼, haproxy TCP 분할 가속까지 한 번에 설정합니다. 번들에는 미리 서명한
+  `server-cert.pem`/`server-key.pem`, `ca-cert.pem`, `ipsec.secrets`, `id`가 들어갑니다(레포에 넣지 않음).
+
 ## 포함된 파일
 
 | 파일 | 설명 |
@@ -44,6 +62,7 @@ iOS 내장 Personal VPN(NEVPNManager)이 그대로 쓸 수 있도록 **strongSwa
 | `ca-cert.pem` | 현재 서버의 루트 CA 인증서(공개). 앱/기기가 서버를 신뢰하는 데 사용 |
 | `WifiScanVPN.mobileconfig` | 위 CA를 아이폰에 설치·신뢰시키는 구성 프로파일 |
 | `setup-strongswan.sh` | Ubuntu 서버에서 strongSwan을 처음부터 구성하는 스크립트 |
+| `setup-region.sh` | 국가 선택용 해외 서버(FQDN ID, 가속 포함)를 구성하는 스크립트 |
 | `cloudformation.yaml` | EIP·보안그룹·IAM·EC2까지 한 번에 세우는 IaC 템플릿 |
 
 ## 처음부터 다시 세우기

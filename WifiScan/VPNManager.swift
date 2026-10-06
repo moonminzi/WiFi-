@@ -39,35 +39,24 @@ final class VPNManager {
         status = manager.connection.status
     }
 
-    /// 저장된 설정이 빠른 모드(AES-GCM)인지. 토글 값과 다르면 다시 저장해야 한다.
-    var usesFastMode: Bool {
-        (manager.protocolConfiguration as? NEVPNProtocolIKEv2)?
-            .childSecurityAssociationParameters.encryptionAlgorithm == .algorithmAES256GCM
-    }
-
     /// 서버/사용자/비밀번호로 VPN 설정을 저장한다.
     /// 처음 저장할 때 "VPN 구성 추가" 시스템 허용 창이 한 번 뜬다.
     /// 비밀번호는 평문으로 저장하지 않고 키체인에 넣은 뒤 그 참조만 설정에 연결한다.
-    /// 비밀번호를 비워 두면 이미 키체인에 저장된 것을 그대로 쓴다.
-    func save(server: String, username: String, password: String, fastMode: Bool) async throws {
+    /// - Parameters:
+    ///   - server: 접속할 주소(IP).
+    ///   - remoteIdentifier: 서버 인증서의 SAN과 같아야 하는 ID. 한국 서버는 IP, 해외 서버는 FQDN.
+    func save(server: String, remoteIdentifier: String, username: String, password: String,
+              fastMode: Bool) async throws {
         try await manager.loadFromPreferences()
-
-        let passwordRef: Data
-        if password.isEmpty, let existing = manager.protocolConfiguration?.passwordReference {
-            passwordRef = existing
-        } else {
-            passwordRef = try KeychainHelper.store(password: password, account: username)
-        }
 
         let proto = NEVPNProtocolIKEv2()
         proto.serverAddress = server
-        // 서버 인증서의 SAN(= 공인 IP)과 일치해야 한다.
-        proto.remoteIdentifier = server
+        proto.remoteIdentifier = remoteIdentifier
         proto.localIdentifier = username
         proto.authenticationMethod = .none          // EAP(사용자 이름/비밀번호)
         proto.useExtendedAuthentication = true
         proto.username = username
-        proto.passwordReference = passwordRef
+        proto.passwordReference = try KeychainHelper.store(password: password, account: username)
         proto.disconnectOnSleep = false
         proto.deadPeerDetectionRate = .medium
         proto.useConfigurationAttributeInternalIPSubnet = false
@@ -89,7 +78,7 @@ final class VPNManager {
         }
 
         manager.protocolConfiguration = proto
-        manager.localizedDescription = "WifiScan VPN"
+        manager.localizedDescription = "NAGO VPN"
         manager.isEnabled = true
         manager.isOnDemandEnabled = false
 
@@ -166,5 +155,20 @@ enum KeychainHelper {
             )
         }
         return ref
+    }
+
+    /// 저장해 둔 비밀번호를 읽는다. 국가 선택 API 인증에 쓴다.
+    static func read(account: String, service: String = "com.example.wifiscan.vpn") -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 }

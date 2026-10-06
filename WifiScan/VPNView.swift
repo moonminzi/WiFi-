@@ -4,14 +4,17 @@ import SwiftUI
 struct VPNView: View {
     @State private var vpn = VPNManager()
 
-    // 서버 주소/사용자 이름은 공개 정보라 기본값을 넣어 둔다(수정 가능).
+    // 사용자 이름은 공개 정보라 기본값을 넣어 둔다(수정 가능).
     // 비밀번호는 기기 키체인에만 저장하고 소스에는 넣지 않는다.
-    @AppStorage("vpnServer") private var server = "3.38.243.135"
+    // 서버 주소는 고른 국가에 따라 API로 받아 온다.
+    @AppStorage("vpnRegion") private var region: VPNRegion = .kr
     @AppStorage("vpnUsername") private var username = "wifiscan"
     @AppStorage("vpnFastMode") private var fastMode = true
     @State private var password = ""
 
     @State private var busy = false
+    /// 서버 켜는 중 같은 진행 상황 문구.
+    @State private var phase: String?
     @State private var message: String?
     @State private var messageIsError = false
 
@@ -44,7 +47,9 @@ struct VPNView: View {
                 }
             }
         } footer: {
-            if let message {
+            if let phase {
+                Text(phase).foregroundStyle(.orange)
+            } else if let message {
                 Text(message).foregroundStyle(messageIsError ? .red : .green)
             }
         }
@@ -62,14 +67,12 @@ struct VPNView: View {
 
     private var serverSection: some View {
         Section {
-            LabeledContent("주소") {
-                TextField("3.38.243.135", text: $server)
-                    .font(.body.monospaced())
-                    .multilineTextAlignment(.trailing)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.numbersAndPunctuation)
+            Picker("국가", selection: $region) {
+                ForEach(VPNRegion.allCases) { r in
+                    Text(r.label).tag(r)
+                }
             }
+            .disabled(busy || vpn.status.isActive)
             LabeledContent("사용자 이름") {
                 TextField("wifiscan", text: $username)
                     .font(.body.monospaced())
@@ -108,16 +111,9 @@ struct VPNView: View {
                     Spacer()
                 }
             }
-            .disabled(busy || vpn.status.isBusy || server.isEmpty || username.isEmpty)
-
-            if !vpn.status.isActive {
-                Button("설정만 저장") {
-                    Task { await saveOnly() }
-                }
-                .disabled(busy || password.isEmpty)
-            }
+            .disabled(busy || vpn.status.isBusy || username.isEmpty)
         } footer: {
-            Text("처음 저장할 때 “VPN 구성 추가” 허용 창이 한 번 뜹니다. 연결하려면 서버의 CA 인증서를 기기가 신뢰해야 해요(아래 참고).")
+            Text("처음 연결할 때 “VPN 구성 추가” 허용 창이 한 번 뜹니다. 서버가 꺼져 있으면 자동으로 켜서 1~2분 걸려요. 연결하려면 서버의 CA 인증서를 기기가 신뢰해야 해요(아래 참고).")
         }
     }
 
@@ -140,30 +136,41 @@ struct VPNView: View {
             return
         }
         busy = true
-        defer { busy = false }
+        defer {
+            busy = false
+            phase = nil
+        }
+        let user = trimmed(username)
+        // 비밀번호 칸을 비워 두면 키체인에 저장해 둔 것을 쓴다.
+        guard let key = password.isEmpty ? KeychainHelper.read(account: user) : Optional(password),
+              !key.isEmpty else {
+            show("비밀번호를 입력해 주세요.", isError: true)
+            return
+        }
         do {
-            // 비밀번호를 비워 두고 눌렀고 이미 저장돼 있으면 기존 설정으로 바로 연결.
-            // 단, 빠른 모드 토글을 바꿨으면 저장된 비밀번호로 설정만 다시 저장한다.
-            if !password.isEmpty || !vpn.isConfigured || vpn.usesFastMode != fastMode {
-                try await vpn.save(server: trimmed(server), username: trimmed(username),
-                                   password: password, fastMode: fastMode)
+            phase = "\(region.name) 서버 확인 중…"
+            let target = try await resolveTarget(key: key)
+            if target.justBooted {
+                phase = "\(region.name) 서버 준비 완료, 연결 중…"
+                try await Task.sleep(for: .seconds(5))
             }
+            try await vpn.save(server: target.address, remoteIdentifier: target.identifier,
+                               username: user, password: key, fastMode: fastMode)
             try vpn.connect()
         } catch {
             show(error.localizedDescription, isError: true)
         }
     }
 
-    private func saveOnly() async {
-        message = nil
-        busy = true
-        defer { busy = false }
+    /// 고른 국가 서버를 켜고 주소를 받는다. 비밀번호가 틀린 게 아니면 한국 서버는 고정 IP로 대신 시도한다.
+    private func resolveTarget(key: String) async throws -> RegionAPI.Target {
         do {
-            try await vpn.save(server: trimmed(server), username: trimmed(username),
-                               password: password, fastMode: fastMode)
-            show("설정을 저장했어요.", isError: false)
+            return try await RegionAPI.waitUntilReady(region, key: key) { phase = $0 }
+        } catch RegionAPI.APIError.forbidden {
+            throw RegionAPI.APIError.forbidden
         } catch {
-            show(error.localizedDescription, isError: true)
+            guard let fallback = region.fallback else { throw error }
+            return fallback
         }
     }
 

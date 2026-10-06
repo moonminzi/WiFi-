@@ -3,7 +3,7 @@
 앱 이름은 **NAGO VPN**. 탭 두 개짜리 앱입니다.
 
 - **와이파이 스캔** 탭: 와이파이 안내 종이를 찍거나 사진을 고르면 ID/PW를 읽어서 바로 연결
-- **VPN** 탭: AWS에 띄운 IKEv2 서버로 연결(공용 와이파이에서 트래픽 보호)
+- **VPN** 탭: AWS에 띄운 IKEv2 서버로 연결(공용 와이파이에서 트래픽 보호). 한국·일본·미국·영국 중 나갈 국가를 고를 수 있음
 
 ## 와이파이 스캔 탭
 
@@ -16,6 +16,7 @@
 
 - iOS 내장 Personal VPN(`NEVPNManager`)으로 **IKEv2 + EAP-MSCHAPv2** 연결 — 별도 확장/라이브러리 없음
 - 서버는 AWS EC2의 **strongSwan**. 구축·재현 방법과 접속 안내는 [`server/README.md`](server/README.md) 참고
+- **국가 선택**: 🇰🇷 서울 · 🇯🇵 도쿄 · 🇺🇸 오리건 · 🇬🇧 런던. 연결을 누르면 API(`VPNRegion.swift`)가 그 나라 서버를 켜고(꺼져 있으면 1~2분) 지금 IP를 받아 접속한다. 서버는 3시간 동안 거의 안 쓰면 알아서 꺼진다
 - 자체 서명 CA라서 최초 1회 `server/WifiScanVPN.mobileconfig` 설치 + 인증서 신뢰가 필요
   (설정 → 일반 → 정보 → 인증서 신뢰 설정)
 - 비밀번호는 기기 **키체인**에만 저장(소스/저장소에 없음)
@@ -35,7 +36,7 @@ open WifiScan.xcodeproj
 ## 빌드 방법 B: Xcode에서 직접 만들기
 
 1. File → New → Project → iOS App (Interface: SwiftUI), iOS 17 이상
-2. 템플릿이 만든 `ContentView.swift`, `<이름>App.swift`는 지우고 `WifiScan/` 폴더의 `.swift` 파일 9개를 끌어다 넣기
+2. 템플릿이 만든 `ContentView.swift`, `<이름>App.swift`는 지우고 `WifiScan/` 폴더의 `.swift` 파일 10개를 끌어다 넣기
 3. Signing & Capabilities → 본인 Team 선택 → `+ Capability`로 추가:
    - **Hotspot Configuration**
    - **Access Wi-Fi Information**
