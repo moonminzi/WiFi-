@@ -23,6 +23,18 @@
 - **비밀번호 내장(선택)**: 레포가 공개라 소스에는 넣지 않는다. 전달용 IPA에만 빌드 후 `Info.plist`에 `NAGOPresetPassword`를 넣으면 입력 칸 없이 연결된다(없으면 입력 칸이 보이고 키체인에 저장)
 - **빠른 모드** 토글(기본 켜짐): 서버 제안(`aes256gcm16`/`ecp256`)에 맞춘 AES-256-GCM + PFS, 터널 MTU 1400(iOS 기본 1280)으로 연결. 하드웨어 AES로 처리돼 iOS 기본값(AES-CBC + HMAC)보다 가볍다. 연결이 안 되면 끄면 기본값으로 돌아감
 
+## 안드로이드 앱 (`android/`)
+
+친구용 안드로이드 버전. 화면은 iOS VPN 탭과 같은 터미널 스타일이고 국가 선택(kr/jp/us/uk)도 같다.
+
+- 안드로이드 **내장 IKEv2**(VpnManager + `Ikev2VpnProfile`)를 쓴다. 별도 VPN 엔진이나 라이브러리 없음
+- 서버 CA를 앱에 넣어서(`res/raw/nago_ca.pem`) 기기에 인증서를 설치할 필요가 없다
+- 해외 서버는 IP가 바뀌므로 `IkeSessionParams`로 "접속은 IP, 인증서 확인은 FQDN(jp.nago.vpn)"을 따로 지정한다 → **Android 13 이상**
+- 데이터 암호: AES-256-GCM(재키 때 서버 사정에 따라 AES-CBC+SHA256), MTU 1400
+- 빌드: `gradle -p android assembleDebug` (CI: `.github/workflows/build-apk.yml`, 비밀번호 없는 디버그 APK)
+- 전달용 APK는 `app/src/main/assets/preset.txt`(커밋 안 함)에 비밀번호를 넣고 `NAGO_KEYSTORE`/`NAGO_KEYSTORE_PASS` 환경변수로 서명해서 만든다
+- 설치: APK 파일을 열고 "출처를 알 수 없는 앱" 허용 → 설치 → 처음 연결할 때 "VPN 연결 요청" 허용
+
 ## 빌드 방법 A: XcodeGen (추천)
 
 ```bash
