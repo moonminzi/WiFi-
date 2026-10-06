@@ -8,6 +8,7 @@ struct VPNView: View {
     // 비밀번호는 기기 키체인에만 저장하고 소스에는 넣지 않는다.
     @AppStorage("vpnServer") private var server = "3.38.243.135"
     @AppStorage("vpnUsername") private var username = "wifiscan"
+    @AppStorage("vpnFastCipher") private var fastCipher = true
     @State private var password = ""
 
     @State private var busy = false
@@ -60,7 +61,7 @@ struct VPNView: View {
     // MARK: - 서버 설정
 
     private var serverSection: some View {
-        Section("서버") {
+        Section {
             LabeledContent("주소") {
                 TextField("3.38.243.135", text: $server)
                     .font(.body.monospaced())
@@ -79,6 +80,12 @@ struct VPNView: View {
             SecureField("비밀번호", text: $password)
                 .font(.body.monospaced())
                 .textInputAutocapitalization(.never)
+            Toggle("빠른 암호 (AES-GCM)", isOn: $fastCipher)
+                .disabled(vpn.status.isActive)
+        } header: {
+            Text("서버")
+        } footer: {
+            Text("하드웨어 AES로 처리해서 더 빨라요. 연결이 안 되면 끄고 다시 연결해 보세요.")
         }
     }
 
@@ -136,8 +143,10 @@ struct VPNView: View {
         defer { busy = false }
         do {
             // 비밀번호를 비워 두고 눌렀고 이미 저장돼 있으면 기존 설정으로 바로 연결.
-            if !password.isEmpty || !vpn.isConfigured {
-                try await vpn.save(server: trimmed(server), username: trimmed(username), password: password)
+            // 단, 암호 토글을 바꿨으면 저장된 비밀번호로 설정만 다시 저장한다.
+            if !password.isEmpty || !vpn.isConfigured || vpn.usesFastCipher != fastCipher {
+                try await vpn.save(server: trimmed(server), username: trimmed(username),
+                                   password: password, fastCipher: fastCipher)
             }
             try vpn.connect()
         } catch {
@@ -150,7 +159,8 @@ struct VPNView: View {
         busy = true
         defer { busy = false }
         do {
-            try await vpn.save(server: trimmed(server), username: trimmed(username), password: password)
+            try await vpn.save(server: trimmed(server), username: trimmed(username),
+                               password: password, fastCipher: fastCipher)
             show("설정을 저장했어요.", isError: false)
         } catch {
             show(error.localizedDescription, isError: true)

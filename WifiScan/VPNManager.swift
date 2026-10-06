@@ -39,11 +39,25 @@ final class VPNManager {
         status = manager.connection.status
     }
 
+    /// 저장된 설정이 빠른 암호(AES-GCM)를 쓰는지. 토글 값과 다르면 다시 저장해야 한다.
+    var usesFastCipher: Bool {
+        (manager.protocolConfiguration as? NEVPNProtocolIKEv2)?
+            .childSecurityAssociationParameters.encryptionAlgorithm == .algorithmAES256GCM
+    }
+
     /// 서버/사용자/비밀번호로 VPN 설정을 저장한다.
     /// 처음 저장할 때 "VPN 구성 추가" 시스템 허용 창이 한 번 뜬다.
     /// 비밀번호는 평문으로 저장하지 않고 키체인에 넣은 뒤 그 참조만 설정에 연결한다.
-    func save(server: String, username: String, password: String) async throws {
+    /// 비밀번호를 비워 두면 이미 키체인에 저장된 것을 그대로 쓴다.
+    func save(server: String, username: String, password: String, fastCipher: Bool) async throws {
         try await manager.loadFromPreferences()
+
+        let passwordRef: Data
+        if password.isEmpty, let existing = manager.protocolConfiguration?.passwordReference {
+            passwordRef = existing
+        } else {
+            passwordRef = try KeychainHelper.store(password: password, account: username)
+        }
 
         let proto = NEVPNProtocolIKEv2()
         proto.serverAddress = server
@@ -53,10 +67,23 @@ final class VPNManager {
         proto.authenticationMethod = .none          // EAP(사용자 이름/비밀번호)
         proto.useExtendedAuthentication = true
         proto.username = username
-        proto.passwordReference = try KeychainHelper.store(password: password, account: username)
+        proto.passwordReference = passwordRef
         proto.disconnectOnSleep = false
         proto.deadPeerDetectionRate = .medium
         proto.useConfigurationAttributeInternalIPSubnet = false
+
+        if fastCipher {
+            // iOS 기본값(AES-CBC + HMAC)은 암호화와 인증을 따로 두 번 처리한다.
+            // AES-256-GCM은 칩의 하드웨어 AES로 한 번에 처리해서 더 빠르다.
+            // 서버 제안(ike=aes256gcm16-prfsha256-ecp256, esp=aes256gcm16-ecp256)과 정확히 맞춘다.
+            for sa in [proto.ikeSecurityAssociationParameters, proto.childSecurityAssociationParameters] {
+                sa.encryptionAlgorithm = .algorithmAES256GCM
+                sa.integrityAlgorithm = .SHA256     // GCM에선 IKE의 PRF로만 쓰인다
+                sa.diffieHellmanGroup = .group19    // ecp256
+            }
+            // 재키(rekey) 때 서버의 esp 제안(ecp256 PFS)과 맞아야 끊기지 않는다.
+            proto.enablePFS = true
+        }
 
         manager.protocolConfiguration = proto
         manager.localizedDescription = "WifiScan VPN"
