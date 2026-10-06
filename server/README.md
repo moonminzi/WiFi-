@@ -50,7 +50,7 @@ iOS 내장 Personal VPN(NEVPNManager)이 그대로 쓸 수 있도록 **strongSwa
 - 고정 IP(EIP)를 쓰지 않습니다. 켤 때마다 IP가 바뀌므로 인증서 ID를 FQDN으로 두고,
   앱은 국가 API(Lambda + API Gateway, `GET /region?r=jp`, 헤더 `x-nago-key`=VPN 비밀번호)로
   서버를 켜고 현재 IP를 받아 접속합니다. 서버 인증서는 서울과 같은 CA로 서명해서 CA 재설치가 필요 없습니다.
-- 3시간 동안 송신 트래픽이 거의 없으면 CloudWatch 경보가 인스턴스를 중지합니다(서울과 같은 기준).
+- **30분 유휴 자동 중지**: 서버 안의 `nago-idle.timer`가 매분 송신량을 보고, 분당 300KB 미만이 30분 이어지면 스스로 `poweroff` 합니다(EC2 종료 동작 = 중지). 카운터가 부팅마다 0부터라 다시 켠 직후 바로 꺼지는 일이 없습니다. CloudWatch 경보(3시간)는 백업으로 남겨 둡니다.
 - 구성: `setup-region.sh <번들 디렉터리>` — strongSwan(AES-256-GCM, PFS 선택), MTU 1500, BBR,
   원거리용 TCP 버퍼, haproxy TCP 분할 가속까지 한 번에 설정합니다. 번들에는 미리 서명한
   `server-cert.pem`/`server-key.pem`, `ca-cert.pem`, `ipsec.secrets`, `id`가 들어갑니다(레포에 넣지 않음).

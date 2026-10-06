@@ -199,6 +199,47 @@ systemctl enable haproxy nago-accel
 systemctl restart haproxy
 systemctl restart nago-accel
 
+echo ">> 유휴 자동 중지 (기본 30분 동안 분당 송신 300KB 미만이면 스스로 꺼짐 → EC2 '중지')"
+cat > /usr/local/sbin/nago-idle <<'SH'
+#!/bin/bash
+# 매분 실행. VPN 사용자가 거의 안 쓰면(분당 송신량 < NAGO_IDLE_BYTES) 카운트를 올리고,
+# NAGO_IDLE_MIN분 연속이면 poweroff 한다. 카운터는 /run(tmpfs)에 있어서 부팅할 때마다 0부터.
+LIMIT_MIN=${NAGO_IDLE_MIN:-30}
+THRESH=${NAGO_IDLE_BYTES:-300000}
+DEV=$(ip route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i=="dev") {print $(i+1); exit}}')
+S=/run/nago-idle; mkdir -p "$S"
+tx=$(cat "/sys/class/net/$DEV/statistics/tx_bytes")
+last=$(cat "$S/tx" 2>/dev/null || echo "$tx")
+echo "$tx" > "$S/tx"
+idle=$(cat "$S/idle" 2>/dev/null || echo 0)
+if [ $((tx - last)) -lt "$THRESH" ]; then idle=$((idle + 1)); else idle=0; fi
+echo "$idle" > "$S/idle"
+if [ "$idle" -ge "$LIMIT_MIN" ]; then
+    logger -t nago-idle "idle ${idle}m -> poweroff"
+    systemctl poweroff
+fi
+SH
+chmod +x /usr/local/sbin/nago-idle
+cat > /etc/systemd/system/nago-idle.service <<'UNIT'
+[Unit]
+Description=NAGO VPN idle check (poweroff when unused)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nago-idle
+UNIT
+cat > /etc/systemd/system/nago-idle.timer <<'UNIT'
+[Unit]
+Description=NAGO VPN idle check every minute
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now nago-idle.timer
+
 echo ">> strongSwan 기동"
 systemctl enable strongswan-starter
 systemctl restart strongswan-starter
