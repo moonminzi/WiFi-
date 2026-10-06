@@ -8,6 +8,8 @@ struct VPNView: View {
     // 비밀번호는 직접 입력 → 전달용 IPA에 내장된 값(VPNPreset) → 키체인 순으로 쓴다.
     // 서버 주소는 고른 국가에 따라 API로 받아 온다.
     @AppStorage("vpnRegion") private var region: VPNRegion = .kr
+    /// 시스템 VPN 설정에 실제로 저장된(= 연결되는) 국가. 선택 줄과 다를 수 있다.
+    @AppStorage("vpnSavedRegion") private var savedRegion: VPNRegion = .kr
     @AppStorage("vpnUsername") private var username = "wifiscan"
     @AppStorage("vpnFastMode") private var fastMode = true
     @State private var password = ""
@@ -45,6 +47,7 @@ struct VPNView: View {
                     Text("1. open WifiScanVPN.mobileconfig → install")
                     Text("2. settings › general › about › certificate trust")
                     Text("3. enable 'WifiScan VPN Root CA'")
+                    Text("# jp/us/uk ip changes every boot → connect from this app")
                 }
                 .font(Term.mono(12))
                 .foregroundStyle(Term.muted)
@@ -87,7 +90,7 @@ struct VPNView: View {
 
     private var statusText: String {
         switch vpn.status {
-        case .connected: return "up → \(region.rawValue)"
+        case .connected: return "up → \(savedRegion.rawValue)"
         case .connecting: return "connecting"
         case .reasserting: return "reconnecting"
         case .disconnecting: return "disconnecting"
@@ -171,7 +174,7 @@ struct VPNView: View {
             phase = nil
         }
         let user = trimmed(username)
-        // 직접 입력한 값 → 내장 값 → 키체인 순으로 쓴다.
+        // 내장 값이 있으면 입력 칸이 없으니 그걸 쓰고, 없으면 입력한 값 → 키체인 순으로 쓴다.
         let key = !password.isEmpty ? password : (preset ?? KeychainHelper.read(account: user) ?? "")
         guard !key.isEmpty else {
             errorText = "password required"
@@ -187,6 +190,7 @@ struct VPNView: View {
             phase = "\(region.rawValue): connecting \(target.address)"
             try await vpn.save(server: target.address, remoteIdentifier: target.identifier,
                                username: user, password: key, fastMode: fastMode)
+            savedRegion = region
             try vpn.connect()
         } catch {
             errorText = error.localizedDescription

@@ -70,22 +70,38 @@ enum RegionAPI {
     }
 
     /// 서버가 꺼져 있으면 켜고, 접속할 수 있을 때까지 기다렸다가 주소/ID를 돌려준다.
+    /// 해외 서버는 켜지는 동안 요청이 한두 번 실패해도(앱 전환, 망 전환, 5xx) 마감까지 계속 묻는다.
+    /// 한국 서버는 고정 IP로 바로 넘어갈 수 있게 첫 실패에서 멈춘다.
     @MainActor
     static func waitUntilReady(_ region: VPNRegion, key: String,
                                progress: (String) -> Void) async throws -> Target {
         let deadline = Date().addingTimeInterval(240)
         var waited = false
-        while Date() < deadline {
-            let s = try await status(region, key: key)
-            if s.ready, let ip = s.ip {
-                return Target(address: ip, identifier: s.id, justBooted: waited)
+        var lastError: Error?
+        while true {
+            do {
+                let s = try await status(region, key: key)
+                if s.ready, let ip = s.ip {
+                    return Target(address: ip, identifier: s.id, justBooted: waited)
+                }
+                lastError = nil
+                progress(s.state == "stopping"
+                         ? "\(region.rawValue): stopping, will restart…"
+                         : "\(region.rawValue): booting… (1-2 min)")
+            } catch APIError.forbidden {
+                throw APIError.forbidden
+            } catch APIError.badResponse(let code) where (400..<500).contains(code) && code != 429 {
+                throw APIError.badResponse(code)
+            } catch {
+                if region.fallback != nil { throw error }
+                lastError = error
+                progress("\(region.rawValue): api retry… (\(error.localizedDescription))")
             }
             waited = true
-            progress(s.state == "stopping"
-                     ? "\(region.rawValue): stopping, will restart…"
-                     : "\(region.rawValue): booting… (1-2 min)")
+            // 마감을 잠자기 전에 본다. 앱이 오래 백그라운드에 있다 돌아와도 마지막으로 한 번은 더 묻는다.
+            if Date() >= deadline { break }
             try await Task.sleep(for: .seconds(4))
         }
-        throw APIError.timeout
+        throw lastError ?? APIError.timeout
     }
 }

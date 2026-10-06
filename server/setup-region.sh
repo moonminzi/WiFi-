@@ -76,6 +76,8 @@ EOF
 
 echo ">> 커널 설정 (포워딩, BBR, 원거리용 TCP 버퍼)"
 echo tcp_bbr > /etc/modules-load.d/bbr.conf
+# conntrack 모듈이 sysctl보다 먼저 올라와야 nf_conntrack_max가 부팅 때도 적용된다
+echo nf_conntrack > /etc/modules-load.d/nago-conntrack.conf
 modprobe tcp_bbr || true
 modprobe nf_conntrack || true
 cat > /etc/sysctl.d/99-nago.conf <<EOF
@@ -125,7 +127,8 @@ iptables -C FORWARD -s "$POOL" -j ACCEPT 2>/dev/null || iptables -A FORWARD -s "
 iptables -C FORWARD -d "$POOL" -j ACCEPT 2>/dev/null || iptables -A FORWARD -d "$POOL" -j ACCEPT
 iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
     || iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-# 가속 규칙이 들어가기 전에 저장해 둔다(가속은 haproxy와 함께 켜지고 꺼진다)
+# 가속 규칙은 빼고 저장한다(가속은 haproxy와 함께 켜지고 꺼진다). 다시 실행할 때를 위해 먼저 끈다.
+[ -x /usr/local/sbin/nago-accel ] && /usr/local/sbin/nago-accel off || true
 netfilter-persistent save
 
 echo ">> TCP 분할 가속 (haproxy 투명 프록시, VPN 사용자 TCP만)"
@@ -161,6 +164,8 @@ haproxy -c -f /etc/haproxy/haproxy.cfg
 cat > /usr/local/sbin/nago-accel <<'SH'
 #!/bin/bash
 # NAGO VPN TCP 분할 가속 on|off|status (IKEv2 사용자 TCP만, 사설망 제외)
+# 프록시 포트(12345)는 REDIRECT로 들어온 연결만 받는다(직접 접속하면 자기 자신에게 무한 연결됨).
+GUARD="INPUT -p tcp --dport 12345 -m conntrack ! --ctstate DNAT -j DROP"
 IKE_MATCH="-s 10.10.10.0/24 -p tcp -m policy --dir in --pol ipsec"
 case "$1" in
 on)
@@ -169,9 +174,11 @@ on)
     iptables -t nat -A NAGO_ACCEL -d $n -j RETURN
   done
   iptables -t nat -A NAGO_ACCEL -p tcp -j REDIRECT --to-ports 12345
+  iptables -C $GUARD 2>/dev/null || iptables -I $GUARD
   iptables -t nat -C PREROUTING $IKE_MATCH -j NAGO_ACCEL 2>/dev/null || iptables -t nat -I PREROUTING $IKE_MATCH -j NAGO_ACCEL ;;
 off)
   iptables -t nat -D PREROUTING $IKE_MATCH -j NAGO_ACCEL 2>/dev/null
+  iptables -D $GUARD 2>/dev/null
   iptables -t nat -F NAGO_ACCEL 2>/dev/null; iptables -t nat -X NAGO_ACCEL 2>/dev/null ;;
 status)
   iptables -t nat -C PREROUTING $IKE_MATCH -j NAGO_ACCEL 2>/dev/null && echo "accel: ON" || echo "accel: OFF"
