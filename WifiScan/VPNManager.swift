@@ -132,6 +132,14 @@ enum VPNPreset {
               !value.isEmpty else { return nil }
         return value
     }
+
+    /// 서버 API(국가 선택, 대시보드)에 쓸 비밀번호: 내장 값 → 키체인 순.
+    static func key(username: String) -> String? {
+        if let preset = password { return preset }
+        let user = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let saved = KeychainHelper.read(account: user), !saved.isEmpty else { return nil }
+        return saved
+    }
 }
 
 // MARK: - 키체인

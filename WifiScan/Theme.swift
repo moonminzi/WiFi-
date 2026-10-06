@@ -1,19 +1,40 @@
 import SwiftUI
+import UIKit
 
-/// 터미널 느낌의 다크 테마. 색은 GitHub Dark 팔레트를 따른다.
+/// 터미널 느낌의 다크 테마. 색과 글꼴(JetBrains Mono)은 대시보드 사이트와 같다.
 enum Term {
-    static let bg = Color(hex: 0x0D1117)
-    static let surface = Color(hex: 0x161B22)
-    static let border = Color(hex: 0x30363D)
-    static let text = Color(hex: 0xE6EDF3)
-    static let muted = Color(hex: 0x7D8590)
-    static let green = Color(hex: 0x3FB950)
-    static let amber = Color(hex: 0xD29922)
-    static let red = Color(hex: 0xF85149)
-    static let blue = Color(hex: 0x58A6FF)
+    static let bg = Color(hex: 0x0A0D0A)
+    static let surface = Color(hex: 0x0D110D)   // 창 안쪽
+    static let chrome = Color(hex: 0x141A14)    // 창 제목 줄
+    static let border = Color(hex: 0x1F2A1F)
+    static let text = Color(hex: 0xC9D4C5)
+    static let muted = Color(hex: 0x5F6F5F)
+    static let green = Color(hex: 0x4ADE80)
+    static let amber = Color(hex: 0xFBBF24)
+    static let red = Color(hex: 0xF87171)
+    static let key = Color(hex: 0x67E8F9)       // 이름/키
+    static let path = Color(hex: 0x93C5FD)      // 프롬프트 경로
+    static let num = Color(hex: 0xE7ECE5)       // 숫자
+    static let track = Color(hex: 0x1C261C)     // 막대 빈 칸
+    static let dot = Color(hex: 0x3A463A)       // 창 제목 줄 점
+
+    /// 앱에 넣은 JetBrains Mono가 등록됐는지. 안 됐으면 시스템 고정폭 글꼴로 대신한다.
+    static let hasJetBrains = UIFont(name: "JetBrainsMono-Regular", size: 12) != nil
+
+    static func fontName(_ weight: Font.Weight) -> String {
+        switch weight {
+        case .bold, .heavy, .black: return "JetBrainsMono-Bold"
+        case .semibold, .medium: return "JetBrainsMono-SemiBold"
+        default: return "JetBrainsMono-Regular"
+        }
+    }
 
     static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight, design: .monospaced)
+        hasJetBrains ? .custom(fontName(weight), fixedSize: size) : .system(size: size, weight: weight, design: .monospaced)
+    }
+
+    static func uiMono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> UIFont {
+        UIFont(name: fontName(weight), size: size) ?? .monospacedSystemFont(ofSize: size, weight: .medium)
     }
 }
 
@@ -28,7 +49,7 @@ extension Color {
 
 // MARK: - 화면 틀
 
-/// `~/wifi $▌` 머리줄이 붙은 스크롤 화면
+/// `~/vpn $▌` 머리줄이 붙은 스크롤 화면
 struct TermPage<Content: View>: View {
     let path: String
     @ViewBuilder var content: Content
@@ -56,13 +77,15 @@ struct TermPage<Content: View>: View {
     }
 }
 
-private struct BlinkingCursor: View {
+struct BlinkingCursor: View {
+    var width: CGFloat = 11
+    var height: CGFloat = 22
     @State private var visible = true
 
     var body: some View {
         Rectangle()
             .fill(Term.green)
-            .frame(width: 11, height: 22)
+            .frame(width: width, height: height)
             .opacity(visible ? 1 : 0)
             .onAppear {
                 withAnimation(.easeInOut(duration: 0.55).repeatForever()) { visible = false }
@@ -242,67 +265,44 @@ struct StatusLine: View {
     }
 }
 
-/// 화면 아래에 잠깐 떴다 사라지는 한 줄 알림
-struct TermToast: ViewModifier {
-    @Binding var message: String?
+// MARK: - 창
 
-    func body(content: Content) -> some View {
-        content.overlay(alignment: .bottom) {
-            if let message {
-                Text(message)
-                    .font(Term.mono(13))
-                    .foregroundStyle(Term.green)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(Term.surface, in: RoundedRectangle(cornerRadius: 6))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Term.green.opacity(0.5)))
-                    .padding(.bottom, 16)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .task(id: message) {
-                        try? await Task.sleep(for: .seconds(2))
-                        if self.message == message { self.message = nil }
-                    }
+/// 대시보드 사이트와 같은 터미널 창: 점 세 개 제목 줄 + 안쪽 내용
+struct TermWindow<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 7) {
+                ForEach(0..<3, id: \.self) { _ in
+                    Circle().fill(Term.dot).frame(width: 10, height: 10)
+                }
+                Text(title)
+                    .font(Term.mono(11.5))
+                    .foregroundStyle(Term.muted)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .padding(.leading, 8)
+                Spacer(minLength: 0)
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(Term.chrome)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(Term.border).frame(height: 1)
+            }
+
+            VStack(alignment: .leading, spacing: 0) {
+                content
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+            .padding(.bottom, 18)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .animation(.easeOut(duration: 0.2), value: message)
-    }
-}
-
-extension View {
-    func termToast(_ message: Binding<String?>) -> some View {
-        modifier(TermToast(message: message))
-    }
-}
-
-/// 찍은 사진 미리보기
-struct ImagePreview: View {
-    let image: UIImage
-
-    var body: some View {
-        Image(uiImage: image)
-            .resizable()
-            .scaledToFit()
-            .frame(maxWidth: .infinity, maxHeight: 200)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Term.border))
-    }
-}
-
-/// `[██████░░░░░░] 52%` 형태의 진행률
-struct UploadProgress: View {
-    let value: Double
-    private let width = 20
-
-    var body: some View {
-        let filled = Int((value * Double(width)).rounded())
-        HStack(spacing: 8) {
-            Text("[" + String(repeating: "█", count: filled) + String(repeating: "░", count: width - filled) + "]")
-                .foregroundStyle(Term.green)
-            Text("\(Int(value * 100))%")
-                .foregroundStyle(Term.muted)
-        }
-        .font(Term.mono(13))
-        .lineLimit(1)
-        .minimumScaleFactor(0.6)
+        .background(Term.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Term.border, lineWidth: 1))
     }
 }

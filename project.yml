@@ -19,18 +19,22 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan   # ← 본인 것으로 변경
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "1.1"
-        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "1.2"
+        CURRENT_PROJECT_VERSION: "3"
     entitlements:
       path: WifiScan/WifiScan.entitlements
       properties:
-        com.apple.developer.networking.HotspotConfiguration: true
-        com.apple.developer.networking.wifi-info: true
         com.apple.developer.networking.vpn.api: [allow-vpn]
     info:
       path: WifiScan/Info.plist
       properties:
         CFBundleDisplayName: NAGO VPN
-        NSCameraUsageDescription: 와이파이 정보가 적힌 종이를 촬영하는 데 카메라를 사용합니다.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # 대시보드 사이트와 같은 글꼴(JetBrains Mono, SIL OFL 1.1 — WifiScan/Fonts/OFL-JetBrainsMono.txt)
+        UIAppFonts:
+          - JetBrainsMono-Regular.ttf
+          - JetBrainsMono-SemiBold.ttf
+          - JetBrainsMono-Bold.ttf
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]

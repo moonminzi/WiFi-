@@ -1,27 +1,26 @@
 # NAGO VPN (iOS)
 
-앱 이름은 **NAGO VPN**. 탭 두 개짜리 앱입니다. 화면은 터미널 스타일(GitHub Dark 색, 고정폭 글꼴, `~/vpn $▌` 머리줄)이고 아이콘은 `>_`.
+앱 이름은 **NAGO VPN**. 탭 두 개짜리 앱입니다. 화면은 대시보드 사이트와 같은 터미널 스타일(초록빛 다크 팔레트, JetBrains Mono, `~/vpn $▌` 머리줄)이고 아이콘은 `>_`.
 
-- **와이파이 스캔** 탭: 와이파이 안내 종이를 찍거나 사진을 고르면 ID/PW를 읽어서 바로 연결
-- **VPN** 탭: AWS에 띄운 IKEv2 서버로 연결(공용 와이파이에서 트래픽 보호). 한국·일본·미국·영국 중 나갈 국가를 고를 수 있음
-
-## 와이파이 스캔 탭
-
-- OCR: Apple Vision (기기 안에서 처리, 네트워크 안 씀)
-- 연결: `NEHotspotConfiguration` → "연결하시겠습니까?" 한 번 누르면 접속
-- 접속 확인: `NEHotspotNetwork.fetchCurrent()`로 실제로 붙었는지 확인하고, 실패하면 저장된 설정을 지움
-- 손글씨에서 헷갈리는 글자(0/O/D, 1/l/I, 5/S, 6/G …)를 색으로 표시하고, 누르면 비슷한 글자로 바뀜
+- **vpn** 탭: AWS에 띄운 IKEv2 서버로 연결(공용 와이파이에서 트래픽 보호). 한국·일본·미국·영국 중 나갈 국가를 고를 수 있음
+- **dash** 탭: 모든 서버(kr/jp/us/uk)의 상태·IP·가동 시간·유휴 카운터·IKEv2 접속, 서울 WireGuard 피어, 시간별 송신량, 이번 달 송신량/비용 추정을 한 화면에
 
 ## VPN 탭
 
 - iOS 내장 Personal VPN(`NEVPNManager`)으로 **IKEv2 + EAP-MSCHAPv2** 연결 — 별도 확장/라이브러리 없음
 - 서버는 AWS EC2의 **strongSwan**. 구축·재현 방법과 접속 안내는 [`server/README.md`](server/README.md) 참고
-- **국가 선택**: 🇰🇷 서울 · 🇯🇵 도쿄 · 🇺🇸 오리건 · 🇬🇧 런던. 연결을 누르면 API(`VPNRegion.swift`)가 그 나라 서버를 켜고(꺼져 있으면 1~2분) 지금 IP를 받아 접속한다. 서버는 3시간 동안 거의 안 쓰면 알아서 꺼진다
+- **국가 선택**: 🇰🇷 서울 · 🇯🇵 도쿄 · 🇺🇸 오리건 · 🇬🇧 런던. 연결을 누르면 API(`VPNRegion.swift`)가 그 나라 서버를 켜고(꺼져 있으면 1~2분) 지금 IP를 받아 접속한다. 서버는 거의 안 쓰면 알아서 꺼진다(서울 3시간, 해외 30분)
 - 자체 서명 CA라서 최초 1회 `server/WifiScanVPN.mobileconfig` 설치 + 인증서 신뢰가 필요
   (설정 → 일반 → 정보 → 인증서 신뢰 설정)
 - 비밀번호는 기기 **키체인**에만 저장(소스/저장소에 없음)
 - **비밀번호 내장(선택)**: 레포가 공개라 소스에는 넣지 않는다. 전달용 IPA에만 빌드 후 `Info.plist`에 `NAGOPresetPassword`를 넣으면 입력 칸 없이 연결된다(없으면 입력 칸이 보이고 키체인에 저장)
 - **빠른 모드** 토글(기본 켜짐): 서버 제안(`aes256gcm16`/`ecp256`)에 맞춘 AES-256-GCM + PFS, 터널 MTU 1400(iOS 기본 1280)으로 연결. 하드웨어 AES로 처리돼 iOS 기본값(AES-CBC + HMAC)보다 가볍다. 연결이 안 되면 끄면 기본값으로 돌아감
+
+## dash 탭 (통합 대시보드)
+
+- 서버 쪽 Lambda(`server/dashboard/index.py`)가 모든 리전을 모아 JSON으로 준다. 브라우저용 HTML 사이트도 같은 Lambda가 만든다(`?t=<토큰>`)
+- 앱은 VPN 비밀번호(내장 값 또는 키체인)를 `x-nago-key` 헤더로 보내 인증하고, 보이는 동안 30초마다 새로 받는다(당겨서 새로고침도 됨)
+- 비용은 실행 시간(CloudWatch 5분 데이터 개수) × 온디맨드 단가 + 고정 IP/디스크 + 무료 100GB 초과 송신으로 어림한 값
 
 ## 안드로이드 앱 (`android/`)
 
@@ -49,21 +48,9 @@ open WifiScan.xcodeproj
 ## 빌드 방법 B: Xcode에서 직접 만들기
 
 1. File → New → Project → iOS App (Interface: SwiftUI), iOS 17 이상
-2. 템플릿이 만든 `ContentView.swift`, `<이름>App.swift`는 지우고 `WifiScan/` 폴더의 `.swift` 파일 12개와 `Assets.xcassets`(앱 아이콘)를 끌어다 넣기
-3. Signing & Capabilities → 본인 Team 선택 → `+ Capability`로 추가:
-   - **Hotspot Configuration**
-   - **Access Wi-Fi Information**
-   - **Personal VPN** (VPN 탭용)
-4. Info 탭 → `Privacy - Camera Usage Description` 추가 (예: "와이파이 안내문 촬영")
+2. 템플릿이 만든 `ContentView.swift`, `<이름>App.swift`는 지우고 `WifiScan/` 폴더의 `.swift` 파일 6개, `Assets.xcassets`(앱 아이콘), `Fonts/`를 끌어다 넣기
+3. Info 탭 → `Fonts provided by application`(UIAppFonts)에 `JetBrainsMono-Regular.ttf`, `JetBrainsMono-SemiBold.ttf`, `JetBrainsMono-Bold.ttf` 추가
+4. Signing & Capabilities → 본인 Team 선택 → `+ Capability`로 **Personal VPN** 추가
 5. 아이폰에서 실행
 
-## 사용
-
-- **촬영 / 사진 / 붙여넣기** 중 하나로 이미지를 넣음 (카톡이나 메시지로 받은 사진은 길게 눌러 복사 → 붙여넣기가 제일 빠름)
-- "인식되면 바로 연결"이 켜져 있으면 ID/PW를 모두 찾았을 때 바로 연결 창이 뜸
-- 실패하면 색으로 표시된 글자를 눌러 고치고 다시 **연결**
-
-## 참고
-
-- 앱으로 추가한 네트워크는 앱을 지우면 같이 지워짐
-- 무료 계정으로는 Hotspot Configuration을 쓸 수 없음 (유료 개발자 계정 필요)
+글꼴: JetBrains Mono (SIL Open Font License 1.1, `WifiScan/Fonts/OFL-JetBrainsMono.txt`)
