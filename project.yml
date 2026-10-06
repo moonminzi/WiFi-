@@ -21,7 +21,7 @@ targets:
       - target: ShareExtension
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan   # ← 본인 것으로 변경
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.scantool   # ← 본인 것으로 변경 (NAGO VPN과 같이 깔리게 따로 둠)
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     entitlements:
       path: WifiScan/WifiScan.entitlements
@@ -50,7 +50,7 @@ targets:
       - WifiScan/AccountParser.swift
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan.share   # ← 앱 번들 ID + .share
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.scantool.share   # ← 앱 번들 ID + .share
     info:
       path: ShareExtension/Info.plist
       properties:

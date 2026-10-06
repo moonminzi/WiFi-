@@ -44,13 +44,26 @@ private struct FileShareSection: View {
                 PhotosPicker(selection: $pickerItem, matching: .any(of: [.images, .videos])) {
                     Label("photos", systemImage: "photo.on.rectangle")
                 }
+                // 화면 띄우기(fileImporter/fullScreenCover)를 같은 뷰에 여러 개 달면 SwiftUI가 뒤엣것만
+                // 띄우거나 아무것도 안 띄우는 경우가 있어서, 버튼마다 하나씩 따로 단다.
                 Button { showImporter = true } label: {
                     Label("files", systemImage: "folder")
+                }
+                .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item]) { result in
+                    guard case .success(let url) = result else { return }
+                    Task { await shareImported(url) }
                 }
                 Button { showScanner = true } label: {
                     Label("scan", systemImage: "doc.viewfinder")
                 }
                 .disabled(!DocumentScanner.isSupported)
+                .fullScreenCover(isPresented: $showScanner) {
+                    DocumentScanner { pages in
+                        showScanner = false
+                        if let pages, !pages.isEmpty { Task { await makePDF(pages) } }
+                    }
+                    .ignoresSafeArea()
+                }
             }
             .buttonStyle(TermButtonStyle(fill: true))
             .labelStyle(.titleAndIcon)
@@ -131,17 +144,6 @@ private struct FileShareSection: View {
                     }
                 }
             }
-        }
-        .fullScreenCover(isPresented: $showScanner) {
-            DocumentScanner { pages in
-                showScanner = false
-                if let pages, !pages.isEmpty { Task { await makePDF(pages) } }
-            }
-            .ignoresSafeArea()
-        }
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item]) { result in
-            guard case .success(let url) = result else { return }
-            Task { await shareImported(url) }
         }
         .onChange(of: pickerItem) { _, item in
             guard let item else { return }
