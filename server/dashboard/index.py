@@ -71,8 +71,10 @@ def cached(name, ttl, fn):
 
 def describe(node):
     i = client("ec2", node["region"]).describe_instances(InstanceIds=[node["iid"]])["Reservations"][0]["Instances"][0]
+    # 루트 디스크가 붙은 시각 = 서버를 만든 시각 (LaunchTime은 켤 때마다 바뀜)
+    attached = [b["Ebs"]["AttachTime"] for b in i.get("BlockDeviceMappings", []) if "Ebs" in b]
     return {"state": i["State"]["Name"], "ip": i.get("PublicIpAddress"), "type": i["InstanceType"],
-            "launched": i["LaunchTime"]}
+            "launched": i["LaunchTime"], "created": min(attached) if attached else i["LaunchTime"]}
 
 
 def parse_status(text):
@@ -177,17 +179,17 @@ def collect():
 
 def build(now, descs, stats, mets):
     mstart = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    elapsed_h = (now - mstart).total_seconds() / 3600
     next_month = (mstart + datetime.timedelta(days=32)).replace(day=1)
-    month_frac = (now - mstart) / (next_month - mstart)
 
     nodes, hourly_total, egress_total, fixed = [], {}, 0.0, 0.0
     for n in NODES:
         d, s, m = descs[n["code"]], stats.get(n["code"]), mets[n["code"]]
         hours = m["minutes"] / 60
         price = HOURLY.get("%s@%s" % (d["type"], n["region"]), 0.0)
-        ipv4 = (elapsed_h if n.get("eip") else hours) * IPV4_H
-        disk = DISK_MONTH.get(n["region"], 0.0) * month_frac
+        # 디스크와 고정 IP는 꺼져 있어도 나가지만, 서버를 만들기 전 시간은 빼야 첫 달이 부풀지 않는다
+        exists = max(datetime.timedelta(0), now - max(mstart, d["created"]))
+        ipv4 = (exists.total_seconds() / 3600 if n.get("eip") else hours) * IPV4_H
+        disk = DISK_MONTH.get(n["region"], 0.0) * (exists / (next_month - mstart))
         fixed += disk + (ipv4 if n.get("eip") else 0.0)
         egress = m["month_bytes"] / 1e9
         egress_total += egress
