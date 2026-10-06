@@ -1,6 +1,6 @@
 # NAGO VPN (iOS)
 
-앱 이름은 **NAGO VPN**. 탭 두 개짜리 앱입니다.
+앱 이름은 **NAGO VPN**. 탭 두 개짜리 앱입니다. 화면은 터미널 스타일(GitHub Dark 색, 고정폭 글꼴, `~/vpn $▌` 머리줄)이고 아이콘은 `>_`.
 
 - **와이파이 스캔** 탭: 와이파이 안내 종이를 찍거나 사진을 고르면 ID/PW를 읽어서 바로 연결
 - **VPN** 탭: AWS에 띄운 IKEv2 서버로 연결(공용 와이파이에서 트래픽 보호). 한국·일본·미국·영국 중 나갈 국가를 고를 수 있음
@@ -20,6 +20,7 @@
 - 자체 서명 CA라서 최초 1회 `server/WifiScanVPN.mobileconfig` 설치 + 인증서 신뢰가 필요
   (설정 → 일반 → 정보 → 인증서 신뢰 설정)
 - 비밀번호는 기기 **키체인**에만 저장(소스/저장소에 없음)
+- **비밀번호 내장(선택)**: 레포가 공개라 소스에는 넣지 않는다. 전달용 IPA에만 빌드 후 `Info.plist`에 `NAGOPresetPassword`를 넣으면 입력 칸 없이 연결된다(없으면 입력 칸이 보이고 키체인에 저장)
 - **빠른 모드** 토글(기본 켜짐): 서버 제안(`aes256gcm16`/`ecp256`)에 맞춘 AES-256-GCM + PFS, 터널 MTU 1400(iOS 기본 1280)으로 연결. 하드웨어 AES로 처리돼 iOS 기본값(AES-CBC + HMAC)보다 가볍다. 연결이 안 되면 끄면 기본값으로 돌아감
 
 ## 빌드 방법 A: XcodeGen (추천)
@@ -36,7 +37,7 @@ open WifiScan.xcodeproj
 ## 빌드 방법 B: Xcode에서 직접 만들기
 
 1. File → New → Project → iOS App (Interface: SwiftUI), iOS 17 이상
-2. 템플릿이 만든 `ContentView.swift`, `<이름>App.swift`는 지우고 `WifiScan/` 폴더의 `.swift` 파일 10개를 끌어다 넣기
+2. 템플릿이 만든 `ContentView.swift`, `<이름>App.swift`는 지우고 `WifiScan/` 폴더의 `.swift` 파일 12개와 `Assets.xcassets`(앱 아이콘)를 끌어다 넣기
 3. Signing & Capabilities → 본인 Team 선택 → `+ Capability`로 추가:
    - **Hotspot Configuration**
    - **Access Wi-Fi Information**

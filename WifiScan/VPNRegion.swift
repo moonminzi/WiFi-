@@ -8,21 +8,13 @@ enum VPNRegion: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    var label: String {
+    /// `🇯🇵 tokyo · ap-northeast-1` 처럼 보여 줄 한 줄
+    var detail: String {
         switch self {
-        case .kr: return "🇰🇷 한국 (서울)"
-        case .jp: return "🇯🇵 일본 (도쿄)"
-        case .us: return "🇺🇸 미국 (오리건)"
-        case .uk: return "🇬🇧 영국 (런던)"
-        }
-    }
-
-    var name: String {
-        switch self {
-        case .kr: return "한국"
-        case .jp: return "일본"
-        case .us: return "미국"
-        case .uk: return "영국"
+        case .kr: return "🇰🇷 seoul · ap-northeast-2"
+        case .jp: return "🇯🇵 tokyo · ap-northeast-1"
+        case .us: return "🇺🇸 oregon · us-west-2"
+        case .uk: return "🇬🇧 london · eu-west-2"
         }
     }
 
@@ -51,9 +43,9 @@ enum RegionAPI {
 
         var errorDescription: String? {
             switch self {
-            case .forbidden: return "비밀번호가 맞지 않아요."
-            case .badResponse(let code): return "서버 켜기 API 오류 (HTTP \(code))."
-            case .timeout: return "서버가 4분 안에 켜지지 않았어요. 잠시 뒤 다시 눌러 주세요."
+            case .forbidden: return "403 forbidden: wrong password"
+            case .badResponse(let code): return "api error: http \(code)"
+            case .timeout: return "timeout: server not up after 4m, retry"
             }
         }
     }
@@ -90,8 +82,8 @@ enum RegionAPI {
             }
             waited = true
             progress(s.state == "stopping"
-                     ? "\(region.name) 서버가 꺼지는 중이라 끝나면 다시 켤게요…"
-                     : "\(region.name) 서버 켜는 중… (1~2분)")
+                     ? "\(region.rawValue): stopping, will restart…"
+                     : "\(region.rawValue): booting… (1-2 min)")
             try await Task.sleep(for: .seconds(4))
         }
         throw APIError.timeout

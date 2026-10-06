@@ -5,7 +5,7 @@ struct VPNView: View {
     @State private var vpn = VPNManager()
 
     // 사용자 이름은 공개 정보라 기본값을 넣어 둔다(수정 가능).
-    // 비밀번호는 기기 키체인에만 저장하고 소스에는 넣지 않는다.
+    // 비밀번호는 직접 입력 → 전달용 IPA에 내장된 값(VPNPreset) → 키체인 순으로 쓴다.
     // 서버 주소는 고른 국가에 따라 API로 받아 온다.
     @AppStorage("vpnRegion") private var region: VPNRegion = .kr
     @AppStorage("vpnUsername") private var username = "wifiscan"
@@ -13,124 +13,154 @@ struct VPNView: View {
     @State private var password = ""
 
     @State private var busy = false
-    /// 서버 켜는 중 같은 진행 상황 문구.
+    /// `jp: booting…` 같은 진행 상황 한 줄
     @State private var phase: String?
-    @State private var message: String?
-    @State private var messageIsError = false
+    @State private var errorText: String?
+
+    private let preset = VPNPreset.password
 
     var body: some View {
-        NavigationStack {
-            Form {
-                statusSection
-                serverSection
-                actionSection
-                helpSection
+        TermPage(path: "vpn") {
+            statusBlock
+            exitBlock
+            authBlock
+
+            Toggle(isOn: $fastMode) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("--fast")
+                        .font(Term.mono(13))
+                        .foregroundStyle(Term.muted)
+                    Text("aes-256-gcm · pfs · mtu 1400")
+                        .font(Term.mono(11))
+                        .foregroundStyle(Term.muted.opacity(0.6))
+                }
             }
-            .navigationTitle("VPN")
-            .task { await vpn.reload() }
+            .tint(Term.green)
+            .disabled(busy || vpn.status.isActive)
+
+            connectButton
+
+            TermBlock(label: "first run: trust ca") {
+                Group {
+                    Text("1. open WifiScanVPN.mobileconfig → install")
+                    Text("2. settings › general › about › certificate trust")
+                    Text("3. enable 'WifiScan VPN Root CA'")
+                }
+                .font(Term.mono(12))
+                .foregroundStyle(Term.muted)
+            }
         }
+        .task { await vpn.reload() }
     }
 
     // MARK: - 상태
 
-    private var statusSection: some View {
-        Section {
-            HStack {
-                Label("상태", systemImage: "lock.shield")
-                Spacer()
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(statusColor)
-                        .frame(width: 10, height: 10)
-                    Text(vpn.status.koreanLabel)
-                        .foregroundStyle(.secondary)
+    private var statusBlock: some View {
+        TermBlock(label: "status") {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(statusTag)
+                    .foregroundStyle(statusColor)
+                Text(statusText)
+                    .foregroundStyle(vpn.status == .connected ? Term.text : Term.muted)
+                if vpn.status.isBusy {
+                    ProgressView().controlSize(.mini).tint(Term.muted)
                 }
             }
-        } footer: {
+            .font(Term.mono(14, .semibold))
+
             if let phase {
-                Text(phase).foregroundStyle(.orange)
-            } else if let message {
-                Text(message).foregroundStyle(messageIsError ? .red : .green)
+                StatusLine(kind: .running, text: phase)
+            } else if let errorText {
+                StatusLine(kind: .error, text: errorText)
             }
+        }
+    }
+
+    /// `[ OK ]`, `[ .. ]`, `[DOWN]` 같은 부팅 로그식 상태 꼬리표
+    private var statusTag: String {
+        switch vpn.status {
+        case .connected: return "[ OK ]"
+        case .connecting, .reasserting, .disconnecting: return "[ .. ]"
+        default: return "[DOWN]"
+        }
+    }
+
+    private var statusText: String {
+        switch vpn.status {
+        case .connected: return "up → \(region.rawValue)"
+        case .connecting: return "connecting"
+        case .reasserting: return "reconnecting"
+        case .disconnecting: return "disconnecting"
+        case .invalid: return "not configured"
+        default: return "disconnected"
         }
     }
 
     private var statusColor: Color {
         switch vpn.status {
-        case .connected: return .green
-        case .connecting, .reasserting, .disconnecting: return .orange
-        default: return .secondary
+        case .connected: return Term.green
+        case .connecting, .reasserting, .disconnecting: return Term.amber
+        default: return Term.muted
         }
     }
 
-    // MARK: - 서버 설정
+    // MARK: - 나갈 국가
 
-    private var serverSection: some View {
-        Section {
-            Picker("국가", selection: $region) {
-                ForEach(VPNRegion.allCases) { r in
-                    Text(r.label).tag(r)
+    private var exitBlock: some View {
+        TermBlock(label: "exit node") {
+            TermChoice(options: VPNRegion.allCases.map { (label: $0.rawValue, value: $0) },
+                       selection: $region)
+                .disabled(busy || vpn.status.isActive)
+                .opacity(busy || vpn.status.isActive ? 0.5 : 1)
+            Text(region.detail)
+                .font(Term.mono(12))
+                .foregroundStyle(Term.muted)
+        }
+    }
+
+    // MARK: - 계정
+
+    private var authBlock: some View {
+        TermBlock(label: "auth · ikev2/eap") {
+            TermField(key: "user", text: $username, placeholder: "wifiscan")
+            TermDivider()
+            if preset != nil {
+                HStack(spacing: 10) {
+                    Text("pw")
+                        .foregroundStyle(Term.muted)
+                        .frame(width: 56, alignment: .leading)
+                    Text("•••••••• (built-in)")
+                        .foregroundStyle(Term.muted)
                 }
+                .font(Term.mono(15))
+            } else {
+                TermField(key: "pw", text: $password, placeholder: "saved in keychain", secure: true)
             }
-            .disabled(busy || vpn.status.isActive)
-            LabeledContent("사용자 이름") {
-                TextField("wifiscan", text: $username)
-                    .font(.body.monospaced())
-                    .multilineTextAlignment(.trailing)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-            }
-            SecureField("비밀번호", text: $password)
-                .font(.body.monospaced())
-                .textInputAutocapitalization(.never)
-            Toggle("빠른 모드", isOn: $fastMode)
-                .disabled(vpn.status.isActive)
-        } header: {
-            Text("서버")
-        } footer: {
-            Text("AES-256-GCM(하드웨어 AES)과 큰 패킷(MTU 1400)으로 연결해요. 연결이 안 되면 끄고 다시 연결해 보세요.")
         }
     }
 
-    // MARK: - 동작
+    // MARK: - 연결 버튼
 
-    private var actionSection: some View {
-        Section {
-            Button {
-                Task { await saveAndConnect() }
-            } label: {
-                HStack {
-                    Spacer()
-                    if busy || vpn.status.isBusy {
-                        ProgressView()
-                    } else {
-                        Label(vpn.status.isActive ? "연결 끊기" : "연결",
-                              systemImage: vpn.status.isActive ? "stop.circle" : "bolt.horizontal.circle")
-                            .font(.headline)
-                    }
-                    Spacer()
-                }
+    private var connectButton: some View {
+        Button {
+            Task { await saveAndConnect() }
+        } label: {
+            if busy {
+                ProgressView().tint(Term.bg)
+            } else if vpn.status.isActive {
+                Label("disconnect", systemImage: "stop.circle")
+            } else {
+                Label("connect", systemImage: "bolt.horizontal")
             }
-            .disabled(busy || vpn.status.isBusy || username.isEmpty)
-        } footer: {
-            Text("처음 연결할 때 “VPN 구성 추가” 허용 창이 한 번 뜹니다. 서버가 꺼져 있으면 자동으로 켜서 1~2분 걸려요. 연결하려면 서버의 CA 인증서를 기기가 신뢰해야 해요(아래 참고).")
         }
-    }
-
-    // MARK: - 안내
-
-    private var helpSection: some View {
-        Section("CA 인증서 신뢰 (최초 1회)") {
-            Label("WifiScanVPN.mobileconfig 파일을 아이폰으로 열어 프로파일 설치", systemImage: "1.circle")
-            Label("설정 → 일반 → VPN 및 기기 관리 에서 프로파일 설치 완료", systemImage: "2.circle")
-            Label("설정 → 일반 → 정보 → 인증서 신뢰 설정 에서 'WifiScan VPN Root CA' 스위치 켜기", systemImage: "3.circle")
-        }
+        .buttonStyle(TermButtonStyle(kind: vpn.status.isActive ? .danger : .primary, fill: true))
+        .disabled(busy || vpn.status.isBusy || username.isEmpty)
     }
 
     // MARK: - 로직
 
     private func saveAndConnect() async {
-        message = nil
+        errorText = nil
         if vpn.status.isActive {
             vpn.disconnect()
             return
@@ -141,24 +171,25 @@ struct VPNView: View {
             phase = nil
         }
         let user = trimmed(username)
-        // 비밀번호 칸을 비워 두면 키체인에 저장해 둔 것을 쓴다.
-        guard let key = password.isEmpty ? KeychainHelper.read(account: user) : Optional(password),
-              !key.isEmpty else {
-            show("비밀번호를 입력해 주세요.", isError: true)
+        // 직접 입력한 값 → 내장 값 → 키체인 순으로 쓴다.
+        let key = !password.isEmpty ? password : (preset ?? KeychainHelper.read(account: user) ?? "")
+        guard !key.isEmpty else {
+            errorText = "password required"
             return
         }
         do {
-            phase = "\(region.name) 서버 확인 중…"
+            phase = "\(region.rawValue): checking server…"
             let target = try await resolveTarget(key: key)
             if target.justBooted {
-                phase = "\(region.name) 서버 준비 완료, 연결 중…"
+                phase = "\(region.rawValue): up, waiting for ike…"
                 try await Task.sleep(for: .seconds(5))
             }
+            phase = "\(region.rawValue): connecting \(target.address)"
             try await vpn.save(server: target.address, remoteIdentifier: target.identifier,
                                username: user, password: key, fastMode: fastMode)
             try vpn.connect()
         } catch {
-            show(error.localizedDescription, isError: true)
+            errorText = error.localizedDescription
         }
     }
 
@@ -176,11 +207,6 @@ struct VPNView: View {
 
     private func trimmed(_ s: String) -> String {
         s.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func show(_ text: String, isError: Bool) {
-        message = text
-        messageIsError = isError
     }
 }
 

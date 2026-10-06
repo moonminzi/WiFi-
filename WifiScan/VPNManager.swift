@@ -122,6 +122,18 @@ extension NEVPNStatus {
     }
 }
 
+// MARK: - 내장 비밀번호
+
+/// 전달용 IPA에만 들어가는 비밀번호. 레포가 공개라서 소스에는 두지 않고,
+/// 빌드한 뒤 Info.plist에 `NAGOPresetPassword`를 넣는다. 없으면 직접 입력/키체인을 쓴다.
+enum VPNPreset {
+    static var password: String? {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: "NAGOPresetPassword") as? String,
+              !value.isEmpty else { return nil }
+        return value
+    }
+}
+
 // MARK: - 키체인
 
 /// 비밀번호를 키체인에 저장하고, NEVPNProtocol이 요구하는 persistent reference를 돌려준다.
