@@ -31,6 +31,10 @@ android {
     }
 
     buildTypes {
+        // CI 디버그 APK는 서명 키가 달라서 같은 패키지면 서로 덮어 깔리지 않는다 → 이름을 따로 둔다.
+        debug {
+            applicationIdSuffix = ".debug"
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
