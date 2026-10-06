@@ -29,7 +29,7 @@ targets:
     info:
       path: WifiScan/Info.plist
       properties:
-        CFBundleDisplayName: 와이파이 스캔
+        CFBundleDisplayName: NAGO VPN
         NSCameraUsageDescription: 와이파이 정보가 적힌 종이를 촬영하는 데 카메라를 사용합니다.
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
