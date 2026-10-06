@@ -39,8 +39,8 @@ final class VPNManager {
         status = manager.connection.status
     }
 
-    /// 저장된 설정이 빠른 암호(AES-GCM)를 쓰는지. 토글 값과 다르면 다시 저장해야 한다.
-    var usesFastCipher: Bool {
+    /// 저장된 설정이 빠른 모드(AES-GCM)인지. 토글 값과 다르면 다시 저장해야 한다.
+    var usesFastMode: Bool {
         (manager.protocolConfiguration as? NEVPNProtocolIKEv2)?
             .childSecurityAssociationParameters.encryptionAlgorithm == .algorithmAES256GCM
     }
@@ -49,7 +49,7 @@ final class VPNManager {
     /// 처음 저장할 때 "VPN 구성 추가" 시스템 허용 창이 한 번 뜬다.
     /// 비밀번호는 평문으로 저장하지 않고 키체인에 넣은 뒤 그 참조만 설정에 연결한다.
     /// 비밀번호를 비워 두면 이미 키체인에 저장된 것을 그대로 쓴다.
-    func save(server: String, username: String, password: String, fastCipher: Bool) async throws {
+    func save(server: String, username: String, password: String, fastMode: Bool) async throws {
         try await manager.loadFromPreferences()
 
         let passwordRef: Data
@@ -72,7 +72,7 @@ final class VPNManager {
         proto.deadPeerDetectionRate = .medium
         proto.useConfigurationAttributeInternalIPSubnet = false
 
-        if fastCipher {
+        if fastMode {
             // iOS 기본값(AES-CBC + HMAC)은 암호화와 인증을 따로 두 번 처리한다.
             // AES-256-GCM은 칩의 하드웨어 AES로 한 번에 처리해서 더 빠르다.
             // 서버 제안(ike=aes256gcm16-prfsha256-ecp256, esp=aes256gcm16-ecp256)과 정확히 맞춘다.
@@ -83,6 +83,9 @@ final class VPNManager {
             }
             // 재키(rekey) 때 서버의 esp 제안(ecp256 PFS)과 맞아야 끊기지 않는다.
             proto.enablePFS = true
+            // iOS 기본 터널 MTU는 1280. 최대치 1400으로 올리면 패킷당 실어 나르는 양이 ~10% 늘어난다.
+            // ESP-in-UDP(GCM) 오버헤드 ~65바이트를 더해도 1500 안에 들어간다.
+            proto.mtu = 1400
         }
 
         manager.protocolConfiguration = proto
