@@ -53,7 +53,9 @@ final class ShareStore {
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 600
+        // 데이터가 이만큼 안 오가면 실패로 본다(업로드 중엔 계속 오가므로 큰 파일도 괜찮다).
+        // 너무 길면 막힌 네트워크에서 0%로 몇 분씩 멈춰 있는다.
+        request.timeoutInterval = 45
 
         let delegate = UploadProgressDelegate(onProgress: progress)
         let (data, response) = try await URLSession.shared.upload(for: request, fromFile: bodyURL, delegate: delegate)
@@ -63,11 +65,14 @@ final class ShareStore {
             let status: String
             let data: Payload?
         }
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-              let body = try? JSONDecoder().decode(UploadResponse.self, from: data),
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(code) else {
+            throw ShareError.message("upload failed · http \(code)")
+        }
+        guard let body = try? JSONDecoder().decode(UploadResponse.self, from: data),
               body.status == "success", let link = body.data?.url, let url = URL(string: link)
         else {
-            throw ShareError.message("upload failed · retry")
+            throw ShareError.message("upload failed · bad response")
         }
 
         let file = SharedFile(

@@ -44,14 +44,17 @@ private struct FileShareSection: View {
                 PhotosPicker(selection: $pickerItem, matching: .any(of: [.images, .videos])) {
                     Label("photos", systemImage: "photo.on.rectangle")
                 }
-                // 화면 띄우기(fileImporter/fullScreenCover)를 같은 뷰에 여러 개 달면 SwiftUI가 뒤엣것만
+                // 화면 띄우기(sheet/fullScreenCover)를 같은 뷰에 여러 개 달면 SwiftUI가 뒤엣것만
                 // 띄우거나 아무것도 안 띄우는 경우가 있어서, 버튼마다 하나씩 따로 단다.
                 Button { showImporter = true } label: {
                     Label("files", systemImage: "folder")
                 }
-                .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item]) { result in
-                    guard case .success(let url) = result else { return }
-                    Task { await shareImported(url) }
+                .sheet(isPresented: $showImporter) {
+                    DocumentPicker { url in
+                        showImporter = false
+                        if let url { Task { await shareImported(url) } }
+                    }
+                    .ignoresSafeArea()
                 }
                 Button { showScanner = true } label: {
                     Label("scan", systemImage: "doc.viewfinder")
@@ -214,14 +217,19 @@ private struct FileShareSection: View {
         }
     }
 
+    /// 피커가 앱 임시 폴더(Inbox)에 복사해 준 파일을 업로드용 폴더로 옮겨 올린다.
     private func shareImported(_ url: URL) async {
+        errorMessage = nil
+        progress = 0   // 고르자마자 진행 막대를 보여 준다(큰 파일 복사 중에도 반응이 보이게)
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }
         do {
             let dest = try Self.makeTempDirectory().appendingPathComponent(url.lastPathComponent)
             try FileManager.default.copyItem(at: url, to: dest)
+            try? FileManager.default.removeItem(at: url)   // 피커가 만든 복사본은 바로 지운다
             await share(fileAt: dest, name: url.lastPathComponent)
         } catch {
+            progress = nil
             errorMessage = error.localizedDescription
         }
     }
