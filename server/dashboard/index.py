@@ -21,7 +21,7 @@ TOKEN = os.environ["TOKEN"]
 KEY_SHA = os.environ.get("KEY_SHA256", "")
 # [{"code","city","region","iid","idle_limit","eip"}]
 NODES = json.loads(os.environ["NODES"])
-PEERS = [("1", "10.9.0.2"), ("2", "10.9.0.3"), ("3", "10.9.0.4")]
+PEERS = [("1", "10.9.0.2"), ("2", "10.9.0.3"), ("3", "10.9.0.4"), ("4", "10.9.0.5")]
 
 # 비용 추정용 단가(USD). 리눅스 온디맨드 / 디스크 8GB / 공인 IPv4 / 무료 100GB 초과 송신.
 HOURLY = {
