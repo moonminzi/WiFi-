@@ -20,7 +20,8 @@ enum VPNRegion: String, CaseIterable, Identifiable {
 
     /// API가 안 될 때 바로 붙어 볼 주소/ID. 고정 IP인 한국 서버만 있다.
     var fallback: RegionAPI.Target? {
-        self == .kr ? RegionAPI.Target(address: "3.38.243.135", identifier: "3.38.243.135", justBooted: false) : nil
+        self == .kr ? RegionAPI.Target(address: "3.38.243.135", identifier: "3.38.243.135", justBooted: false,
+                                       wgPub: nil, wgPort: 443) : nil
     }
 }
 
@@ -34,6 +35,9 @@ enum RegionAPI {
         let identifier: String
         /// 이번에 꺼져 있던 서버를 켠 경우. IKE 데몬이 완전히 뜰 때까지 조금 더 기다린다.
         let justBooted: Bool
+        /// 그 서버의 WireGuard 공개키와 포트(443 → 서버에서 51820으로)
+        let wgPub: String?
+        let wgPort: Int
     }
 
     enum APIError: LocalizedError {
@@ -55,6 +59,8 @@ enum RegionAPI {
         let ready: Bool
         let ip: String?
         let id: String
+        let wgPub: String?
+        let wgPort: Int?
     }
 
     private static func status(_ region: VPNRegion, key: String) async throws -> Status {
@@ -82,7 +88,8 @@ enum RegionAPI {
             do {
                 let s = try await status(region, key: key)
                 if s.ready, let ip = s.ip {
-                    return Target(address: ip, identifier: s.id, justBooted: waited)
+                    return Target(address: ip, identifier: s.id, justBooted: waited,
+                                  wgPub: s.wgPub, wgPort: s.wgPort ?? 443)
                 }
                 lastError = nil
                 progress(s.state == "stopping"

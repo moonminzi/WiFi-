@@ -3,6 +3,11 @@ options:
   bundleIdPrefix: com.example
   deploymentTarget:
     iOS: "17.0"
+packages:
+  # WireGuard 터널 엔진(wireguard-go). Go 부분은 아래 WireGuardGoBridgeiOS가 make로 빌드한다.
+  WireGuardKit:
+    url: https://github.com/WireGuard/wireguard-apple
+    exactVersion: 1.0.16-27
 settings:
   base:
     DEVELOPMENT_TEAM: ""          # ← 본인 Team ID (developer.apple.com > Membership)
@@ -19,12 +24,15 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan   # ← 본인 것으로 변경
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "1.5"
-        CURRENT_PROJECT_VERSION: "6"
+        MARKETING_VERSION: "1.6"
+        CURRENT_PROJECT_VERSION: "7"
+    dependencies:
+      - target: WifiScanTunnel
     entitlements:
       path: WifiScan/WifiScan.entitlements
       properties:
         com.apple.developer.networking.vpn.api: [allow-vpn]
+        com.apple.developer.networking.networkextension: [packet-tunnel-provider]
     info:
       path: WifiScan/Info.plist
       properties:
@@ -38,3 +46,41 @@ targets:
           - JetBrainsMono-Bold.ttf
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+
+  # WireGuard 터널 확장. 앱의 PlugIns에 들어간다.
+  WifiScanTunnel:
+    type: app-extension
+    platform: iOS
+    sources: [WifiScanTunnel]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan.tunnel   # 앱 번들 ID + .tunnel
+        TARGETED_DEVICE_FAMILY: "1"
+        MARKETING_VERSION: "1.6"
+        CURRENT_PROJECT_VERSION: "7"
+    dependencies:
+      - target: WireGuardGoBridgeiOS
+      - package: WireGuardKit
+    entitlements:
+      path: WifiScanTunnel/WifiScanTunnel.entitlements
+      properties:
+        com.apple.developer.networking.networkextension: [packet-tunnel-provider]
+    info:
+      path: WifiScanTunnel/Info.plist
+      properties:
+        CFBundleDisplayName: NAGO VPN Tunnel
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+
+  # wireguard-go를 libwg-go.a로 빌드(Go 필요). WireGuardKit 안내대로 External Build System 타깃.
+  WireGuardGoBridgeiOS:
+    type: ""
+    platform: iOS
+    legacy:
+      toolPath: /usr/bin/make
+      arguments: $(ACTION)
+      passSettings: true
+      workingDirectory: ${BUILD_DIR%Build/*}SourcePackages/checkouts/wireguard-apple/Sources/WireGuardKitGo

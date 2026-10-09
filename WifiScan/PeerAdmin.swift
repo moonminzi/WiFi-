@@ -12,6 +12,13 @@ enum PeerAPI {
         let ip: String?
         let serverPub: String?
         let endpoint: String?
+        /// 서버별 WireGuard 공개키/포트(kr/jp/us/uk)
+        let servers: [String: WGServer]?
+    }
+
+    struct WGServer: Codable {
+        let pub: String
+        let port: Int?
     }
 
     enum Failure: LocalizedError {

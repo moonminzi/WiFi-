@@ -2,18 +2,50 @@ import Foundation
 import NetworkExtension
 import Security
 
-/// 아이폰 내장 Personal VPN(IKEv2)을 다루는 얇은 래퍼.
-/// 별도의 Packet Tunnel 확장 없이 `NEVPNManager.shared()`로 IKEv2/EAP-MSCHAPv2 연결을 만든다.
+/// VPN 프로토콜 선택. auto는 IKEv2를 먼저 해 보고 안 붙으면 WireGuard(443)로 넘어간다.
+enum VPNProto: String, CaseIterable, Identifiable {
+    case auto, ikev2, wireguard
+
+    var id: String { rawValue }
+    var label: String { self == .wireguard ? "wg" : rawValue }
+    var detail: String {
+        switch self {
+        case .auto: return "ikev2 first, wireguard if blocked"
+        case .ikev2: return "ios built-in · fastest on iphone"
+        case .wireguard: return "udp 443 · gets through most wi-fi"
+        }
+    }
+}
+
+/// VPN 연결 두 가지를 다룬다.
+/// - IKEv2: 아이폰 내장 Personal VPN(`NEVPNManager.shared()`), EAP-MSCHAPv2
+/// - WireGuard: 앱 확장(WifiScanTunnel, WireGuardKit)을 `NETunnelProviderManager`로 띄움
+/// 아이폰은 VPN을 한 번에 하나만 켜므로, 화면에는 켜져 있는 쪽 상태를 보여 준다.
 @MainActor
 @Observable
 final class VPNManager {
     private let manager = NEVPNManager.shared()
+    private var tunnel: NETunnelProviderManager?
 
-    /// 현재 연결 상태. 뷰는 이 값으로 버튼/문구를 바꾼다.
-    private(set) var status: NEVPNStatus = .invalid
+    private(set) var ikeStatus: NEVPNStatus = .invalid
+    private(set) var wgStatus: NEVPNStatus = .invalid
     /// 설정을 한 번이라도 저장(프로비저닝)했는지.
     private(set) var isConfigured = false
     private(set) var lastError: String?
+
+    /// 현재 연결 상태. 뷰는 이 값으로 버튼/문구를 바꾼다.
+    var status: NEVPNStatus {
+        if wgStatus.isActive || wgStatus == .disconnecting { return wgStatus }
+        if ikeStatus == .invalid, wgStatus != .invalid { return wgStatus }
+        return ikeStatus
+    }
+
+    /// 지금 켜져 있는 프로토콜(꺼져 있으면 nil)
+    var activeProto: VPNProto? {
+        if wgStatus.isActive { return .wireguard }
+        if ikeStatus.isActive { return .ikev2 }
+        return nil
+    }
 
     init() {
         NotificationCenter.default.addObserver(
@@ -28,7 +60,8 @@ final class VPNManager {
     func reload() async {
         do {
             try await manager.loadFromPreferences()
-            isConfigured = manager.protocolConfiguration != nil
+            tunnel = try await NETunnelProviderManager.loadAllFromPreferences().first
+            isConfigured = manager.protocolConfiguration != nil || tunnel != nil
             refreshStatus()
         } catch {
             lastError = error.localizedDescription
@@ -36,7 +69,25 @@ final class VPNManager {
     }
 
     private func refreshStatus() {
-        status = manager.connection.status
+        ikeStatus = manager.connection.status
+        wgStatus = tunnel?.connection.status ?? .invalid
+    }
+
+    /// IKEv2가 연결될 때까지 기다린다. 시간 안에 안 되거나 도중에 끊기면 false.
+    func waitForIKE(seconds: Double) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        var started = false
+        while Date() < deadline {
+            refreshStatus()
+            switch ikeStatus {
+            case .connected: return true
+            case .connecting, .reasserting: started = true
+            case .disconnected, .invalid: if started { return false }
+            default: break
+            }
+            try? await Task.sleep(for: .milliseconds(400))
+        }
+        return false
     }
 
     /// 서버/사용자/비밀번호로 VPN 설정을 저장한다.
@@ -95,8 +146,51 @@ final class VPNManager {
         try manager.connection.startVPNTunnel()
     }
 
+    /// 켜져 있는 쪽(둘 다 가능)을 끈다.
     func disconnect() {
         manager.connection.stopVPNTunnel()
+        tunnel?.connection.stopVPNTunnel()
+    }
+
+    // MARK: WireGuard
+
+    /// 앱에 들어 있는 터널 확장의 번들 ID(재서명하면서 바뀌어도 실제 값을 읽는다)
+    private static var tunnelBundleID: String {
+        if let url = Bundle.main.builtInPlugInsURL?.appendingPathComponent("WifiScanTunnel.appex"),
+           let id = Bundle(url: url)?.bundleIdentifier {
+            return id
+        }
+        return (Bundle.main.bundleIdentifier ?? "com.example.wifiscan") + ".tunnel"
+    }
+
+    /// WireGuard 설정을 저장한다. 처음 한 번은 "VPN 구성 추가" 허용 창이 뜬다.
+    func saveWireGuard(privateKey: String, address: String, serverPub: String, endpoint: String,
+                       dns: [String]) async throws {
+        let tunnel = try await NETunnelProviderManager.loadAllFromPreferences().first ?? NETunnelProviderManager()
+        let proto = NETunnelProviderProtocol()
+        proto.providerBundleIdentifier = Self.tunnelBundleID
+        proto.serverAddress = endpoint
+        proto.providerConfiguration = [
+            "privateKey": privateKey,
+            "address": address,
+            "serverPub": serverPub,
+            "endpoint": endpoint,
+            "dns": dns,
+            "mtu": 1420,
+        ]
+        tunnel.protocolConfiguration = proto
+        tunnel.localizedDescription = "NAGO VPN (WireGuard)"
+        tunnel.isEnabled = true
+        try await tunnel.saveToPreferences()
+        try await tunnel.loadFromPreferences()
+        self.tunnel = tunnel
+        isConfigured = true
+        refreshStatus()
+    }
+
+    func connectWireGuard() throws {
+        guard let tunnel else { throw NEVPNError(.configurationInvalid) }
+        try tunnel.connection.startVPNTunnel()
     }
 }
 

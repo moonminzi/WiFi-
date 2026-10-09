@@ -13,6 +13,7 @@ struct VPNView: View {
     @AppStorage("vpnUsername") private var username = "wifiscan"
     @AppStorage("vpnFastMode") private var fastMode = true
     @AppStorage("vpnAdblock") private var adblock = false
+    @AppStorage("vpnProtocol") private var proto: VPNProto = .auto
     @State private var password = ""
 
     @State private var busy = false
@@ -26,11 +27,12 @@ struct VPNView: View {
         TermPage(path: "vpn") {
             statusBlock
             exitBlock
+            protoBlock
             authBlock
 
             Toggle(isOn: $fastMode) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("--fast")
+                    Text("--fast" + (proto == .wireguard ? " (ikev2 only)" : ""))
                         .font(Term.mono(13))
                         .foregroundStyle(Term.muted)
                     Text("aes-256-gcm · pfs · mtu 1400")
@@ -104,7 +106,7 @@ struct VPNView: View {
 
     private var statusText: String {
         switch vpn.status {
-        case .connected: return "up → \(savedRegion.rawValue)"
+        case .connected: return "up → \(savedRegion.rawValue)" + (vpn.activeProto.map { " · \($0.label)" } ?? "")
         case .connecting: return "connecting"
         case .reasserting: return "reconnecting"
         case .disconnecting: return "disconnecting"
@@ -130,6 +132,20 @@ struct VPNView: View {
                 .disabled(busy || vpn.status.isActive)
                 .opacity(busy || vpn.status.isActive ? 0.5 : 1)
             Text(region.detail)
+                .font(Term.mono(12))
+                .foregroundStyle(Term.muted)
+        }
+    }
+
+    // MARK: - 프로토콜
+
+    private var protoBlock: some View {
+        TermBlock(label: "protocol") {
+            TermChoice(options: VPNProto.allCases.map { (label: $0.label, value: $0) },
+                       selection: $proto)
+                .disabled(busy || vpn.status.isActive)
+                .opacity(busy || vpn.status.isActive ? 0.5 : 1)
+            Text(proto.detail)
                 .font(Term.mono(12))
                 .foregroundStyle(Term.muted)
         }
@@ -201,14 +217,47 @@ struct VPNView: View {
                 phase = "\(region.rawValue): up, waiting for ike…"
                 try await Task.sleep(for: .seconds(5))
             }
-            phase = "\(region.rawValue): connecting \(target.address)"
-            try await vpn.save(server: target.address, remoteIdentifier: target.identifier,
-                               username: user, password: key, fastMode: fastMode, adblock: adblock)
+            switch proto {
+            case .ikev2:
+                try await connectIKE(target, user: user, key: key)
+            case .wireguard:
+                try await connectWG(target, user: user, key: key)
+            case .auto:
+                try await connectIKE(target, user: user, key: key)
+                phase = "\(region.rawValue): ikev2 handshake…"
+                if !(await vpn.waitForIKE(seconds: 12)) {
+                    vpn.disconnect()
+                    phase = "\(region.rawValue): ikev2 blocked here → wireguard"
+                    try await Task.sleep(for: .seconds(1))
+                    try await connectWG(target, user: user, key: key)
+                }
+            }
             savedRegion = region
-            try vpn.connect()
         } catch {
             errorText = error.localizedDescription
         }
+    }
+
+    private func connectIKE(_ target: RegionAPI.Target, user: String, key: String) async throws {
+        phase = "\(region.rawValue): ikev2 → \(target.address)"
+        try await vpn.save(server: target.address, remoteIdentifier: target.identifier,
+                           username: user, password: key, fastMode: fastMode, adblock: adblock)
+        try vpn.connect()
+    }
+
+    /// 이 폰의 WireGuard 키를 (처음이면) 서버에 등록하고, 고른 국가 서버로 터널을 연다.
+    private func connectWG(_ target: RegionAPI.Target, user: String, key: String) async throws {
+        phase = "\(region.rawValue): wireguard key…"
+        let reg = try await WGClient.registration(apiKey: key, name: "\(user) iphone app")
+        guard let serverPub = target.wgPub ?? reg.servers[region.rawValue]?.pub else {
+            throw PeerAPI.Failure.server("no wireguard key for \(region.rawValue)")
+        }
+        let endpoint = "\(target.address):\(target.wgPort)"
+        phase = "\(region.rawValue): wireguard → \(endpoint)"
+        try await vpn.saveWireGuard(privateKey: reg.privateKey, address: reg.address + "/32",
+                                    serverPub: serverPub, endpoint: endpoint,
+                                    dns: adblock ? ["10.53.53.53"] : ["1.1.1.1"])
+        try vpn.connectWireGuard()
     }
 
     /// 고른 국가 서버를 켜고 주소를 받는다. 비밀번호가 틀린 게 아니면 한국 서버는 고정 IP로 대신 시도한다.
