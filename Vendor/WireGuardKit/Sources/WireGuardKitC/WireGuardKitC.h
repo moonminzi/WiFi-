@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright © 2018-2023 WireGuard LLC. All Rights Reserved.
 
+#include <sys/types.h> /* u_int32_t 등: Xcode 16 명시적 모듈에서 필요(원본에 없어서 추가) */
 #include "key.h"
 #include "x25519.h"
 
