@@ -16,12 +16,21 @@
 - **비밀번호 내장(선택)**: 레포가 공개라 소스에는 넣지 않는다. 전달용 IPA에만 빌드 후 `Info.plist`에 `NAGOPresetPassword`를 넣으면 입력 칸 없이 연결된다(없으면 입력 칸이 보이고 키체인에 저장)
 - **빠른 모드** 토글(기본 켜짐): 서버 제안(`aes256gcm16`/`ecp256`)에 맞춘 AES-256-GCM + PFS, 터널 MTU 1400(iOS 기본 1280)으로 연결. 하드웨어 AES로 처리돼 iOS 기본값(AES-CBC + HMAC)보다 가볍다. 연결이 안 되면 끄면 기본값으로 돌아감
 
-## --adblock (광고·추적 차단, IKEv2 앱 전용)
+## protocol (auto / ikev2 / wg)
+
+- **ikev2**: 폰 내장 IKEv2(아이폰 NEVPNManager, 안드로이드 VpnManager). 폰에서 제일 빠름
+- **wg**: 앱 안 WireGuard(iOS는 WifiScanTunnel 확장 + WireGuardKit, 안드로이드는 wireguard-android). udp 443이라 IKEv2가 막힌 와이파이에서도 붙음
+- **auto**: IKEv2를 12초 기다려 안 붙으면 WireGuard로
+- WireGuard 키는 폰에서 처음 한 번 만들고 공개키만 피어 목록(SSM 파라미터 `/nago/wg/peers`)에 등록. 서버 4대 모두 같은 목록으로 맞춰짐(`server/wireguard/setup-wg.sh`, `nago-peer sync`)
+- iOS 빌드: `Vendor/WireGuardKit`(wireguard-apple 1.0.16-27, MIT, Xcode 16용 두 줄 수정) + Go 1.24로 libwg-go.a를 만드는 `WireGuardGoBridgeiOS` 타깃
+- 재서명할 때 확장(`.tunnel`)도 같이 서명돼야 하고, 두 App ID 모두 Network Extensions(packet tunnel) 권한이 필요
+
+## --adblock (광고·추적 차단, 앱 전용)
 
 - vpn 탭(iOS)·안드로이드 앱의 `--adblock`을 켜고 연결하면 서버 DNS(10.53.53.53)가 광고·추적 도메인을 막는다
 - 서버: `server/adblock/setup-adblock.sh` (dnsmasq + OISD big + YousList, 매일 갱신). 모든 서버(kr/jp/us/uk)에 설치됨
 - 구분 방법: IKE ID를 `adblock.nago`로 보내면 strongSwan이 `ikev2-adblock` 연결을 골라 차단 DNS를 준다. 비밀번호 확인(EAP)은 그대로 사용자 이름
-- WireGuard와 보통 연결은 그대로 1.1.1.1. 잘못 막힌 사이트는 서버의 `/etc/nago-dns/allow.conf`에 `server=/도메인/1.1.1.1`
+- 앱 안 WireGuard는 DNS를 10.53.53.53으로 바꾼다. WireGuard 앱(친구 .conf)과 보통 연결은 그대로 1.1.1.1. 잘못 막힌 사이트는 서버의 `/etc/nago-dns/allow.conf`에 `server=/도메인/1.1.1.1`
 
 ## dash 탭 (통합 대시보드)
 
