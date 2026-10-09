@@ -26,6 +26,7 @@ struct DashData: Decodable {
     struct Peer: Decodable {
         let n: String
         let ip: String
+        let name: String?
         let hsAgo: Int?
         let rx: Int64
         let tx: Int64
@@ -78,6 +79,17 @@ struct DashView: View {
     @AppStorage("vpnUsername") private var username = "wifiscan"
     @AppStorage("vpnSavedRegion") private var savedRegion: VPNRegion = .kr
 
+    // 피어 관리
+    @State private var managedPeer: DashData.Peer?
+    @State private var renamePeer: DashData.Peer?
+    @State private var removePeer: DashData.Peer?
+    @State private var showAdd = false
+    @State private var nameInput = ""
+    @State private var newPeer: NewPeer?
+    @State private var actionText: String?
+    @State private var actionOK = true
+    @State private var busy = false
+
     private static let refreshSeconds = 30
 
     var body: some View {
@@ -104,6 +116,96 @@ struct DashView: View {
         .background(Term.bg.ignoresSafeArea())
         .foregroundStyle(Term.text)
         .tint(Term.green)
+        .confirmationDialog(
+            managedPeer.map(peerTitle) ?? "",
+            isPresented: present($managedPeer), titleVisibility: .visible, presenting: managedPeer
+        ) { peer in
+            Button("kick — disconnect 60s") { run("kick", peer, extra: ["seconds": "60"]) }
+            Button("reset usage counters") { run("reset", peer) }
+            Button("rename") {
+                nameInput = peer.name ?? ""
+                renamePeer = peer
+            }
+            Button("remove…", role: .destructive) { removePeer = peer }
+        }
+        .alert("new peer", isPresented: $showAdd) {
+            TextField("name (e.g. friend phone)", text: $nameInput)
+            Button("add") { addPeer() }
+            Button("cancel", role: .cancel) {}
+        } message: {
+            Text("A key is made on this phone and only its public half goes to kr.")
+        }
+        .alert("rename peer", isPresented: present($renamePeer), presenting: renamePeer) { peer in
+            TextField("name", text: $nameInput)
+            Button("save") { run("rename", peer, extra: ["name": nameInput]) }
+            Button("cancel", role: .cancel) {}
+        }
+        .alert("remove peer?", isPresented: present($removePeer), presenting: removePeer) { peer in
+            Button("remove", role: .destructive) { run("remove", peer) }
+            Button("cancel", role: .cancel) {}
+        } message: { peer in
+            Text("\(peer.ip) \(peer.name ?? "") loses access for good. Its config stops working.")
+        }
+        .sheet(item: $newPeer) { PeerConfigSheet(peer: $0) }
+    }
+
+    private func peerTitle(_ peer: DashData.Peer) -> String {
+        var title = "peer \(peer.n) · \(peer.ip)"
+        if let name = peer.name, !name.isEmpty { title += " · " + name }
+        return title
+    }
+
+    private func present<T>(_ value: Binding<T?>) -> Binding<Bool> {
+        Binding(get: { value.wrappedValue != nil }, set: { if !$0 { value.wrappedValue = nil } })
+    }
+
+    // MARK: 피어 관리 동작
+
+    private func report(_ text: String, ok: Bool) {
+        actionText = text
+        actionOK = ok
+    }
+
+    private func run(_ op: String, _ peer: DashData.Peer, extra: [String: String] = [:]) {
+        guard let key = VPNPreset.key(username: username) else {
+            report("✗ password required → save it in the vpn tab", ok: false)
+            return
+        }
+        var body = ["op": op, "ip": peer.ip]
+        body.merge(extra) { $1 }
+        busy = true
+        report("> wg peer \(op) \(peer.ip) …", ok: true)
+        Task {
+            defer { busy = false }
+            do {
+                try await PeerAPI.send(body, key: key)
+                report("✓ \(op) \(peer.ip)" + (op == "kick" ? " · back in 60s" : ""), ok: true)
+                await load()
+            } catch {
+                report("✗ \(op): \(error.localizedDescription)", ok: false)
+            }
+        }
+    }
+
+    private func addPeer() {
+        guard let key = VPNPreset.key(username: username) else {
+            report("✗ password required → save it in the vpn tab", ok: false)
+            return
+        }
+        let name = nameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        busy = true
+        report("> wg peer add \(name) …", ok: true)
+        Task {
+            defer { busy = false }
+            do {
+                let peer = try await NewPeer.create(name: name, key: key)
+                report("✓ added \(peer.ip)", ok: true)
+                newPeer = peer
+                await load()
+            } catch {
+                report("✗ add: \(error.localizedDescription)", ok: false)
+            }
+        }
     }
 
     private func load() async {
@@ -145,10 +247,29 @@ struct DashView: View {
                 }
                 gap
                 section {
-                    command("wg show wg0", note: "kr · since boot")
+                    command("wg show wg0", note: "kr · tap a peer to manage")
                     ForEach(Array(data.peers.enumerated()), id: \.element.n) { index, peer in
                         if index > 0 { gap }
-                        peerLines(peer)
+                        Button { managedPeer = peer } label: {
+                            VStack(alignment: .leading, spacing: 1) { peerLines(peer) }
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(busy)
+                    }
+                    gap
+                    Button {
+                        nameInput = ""
+                        showAdd = true
+                    } label: {
+                        line(Text("$").font(Term.mono(12.5, .bold)).foregroundStyle(Term.green)
+                            + Text(" wg peer add ") + Text("[+ new]").foregroundStyle(Term.key))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(busy)
+                    if let actionText {
+                        line(Text(actionText).foregroundStyle(actionOK ? Term.muted : Term.red))
                     }
                 }
                 gap
@@ -260,7 +381,8 @@ struct DashView: View {
 
     @ViewBuilder
     private func peerLines(_ peer: DashData.Peer) -> some View {
-        let head = Text("[peer \(peer.n)]").foregroundStyle(Term.key) + Text(" \(peer.ip)  ")
+        let head = Text("[peer \(peer.n)]").foregroundStyle(Term.key) + Text(" \(peer.ip) ")
+            + Text(peer.name.map { $0 + " " } ?? "").foregroundStyle(Term.path)
         if let ago = peer.hsAgo {
             let online = ago < 180
             line(head + Text(online ? "● online" : "○ idle").foregroundStyle(online ? Term.green : Term.amber))
@@ -276,7 +398,7 @@ struct DashView: View {
             )
         } else {
             line(head + Text("○ idle").foregroundStyle(Term.muted))
-            line(Text("  no handshake since boot").foregroundStyle(Term.muted))
+            line(Text("  no handshake yet").foregroundStyle(Term.muted))
         }
     }
 

@@ -2,10 +2,12 @@
 
 GET /?t=<TOKEN>                → 터미널 스타일 HTML (브라우저)
 GET /?format=json  + 헤더 x-nago-key: <VPN 비밀번호>  → JSON (앱)
+POST / {op, ...}   + 헤더 x-nago-key                 → 서울 WireGuard 피어 관리 (nago-peer.py)
 
 보여 주는 것: 서버별 상태/IP/가동 시간/유휴 카운터/IKEv2 접속, 서울 WireGuard 피어,
 시간별 송신량(전체 합), 이번 달 송신량과 비용 추정.
 """
+import base64
 import concurrent.futures as cf
 import datetime
 import hashlib
@@ -21,7 +23,9 @@ TOKEN = os.environ["TOKEN"]
 KEY_SHA = os.environ.get("KEY_SHA256", "")
 # [{"code","city","region","iid","idle_limit","eip"}]
 NODES = json.loads(os.environ["NODES"])
-PEERS = [("1", "10.9.0.2"), ("2", "10.9.0.3"), ("3", "10.9.0.4"), ("4", "10.9.0.5")]
+PEER_ADMIN = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "nago-peer.py")).read()
+PEER_OPS = ("add", "kick", "reset", "remove", "rename")
+_last_peers = []   # 서울 서버가 꺼져 있을 때 보여 줄 마지막 피어 목록
 
 # 비용 추정용 단가(USD). 리눅스 온디맨드 / 디스크 8GB / 공인 IPv4 / 무료 100GB 초과 송신.
 HOURLY = {
@@ -48,6 +52,7 @@ echo "LOAD $(cut -d' ' -f1 /proc/loadavg)"
 echo "IKE $(ipsec status 2>/dev/null | grep -c ESTABLISHED)"
 ipsec leases 2>/dev/null | awk '$2=="online"{print "LEASE "$1}'
 if command -v wg >/dev/null 2>&1; then wg show wg0 dump 2>/dev/null | tail -n +2 | sed 's/^/WG /'; fi
+echo "NAMES $(tr -d '\n' < /etc/wireguard/nago-names.json 2>/dev/null || echo '{}')"
 """
 
 
@@ -78,7 +83,7 @@ def describe(node):
 
 
 def parse_status(text):
-    r = {"idle": None, "up": None, "load": None, "ike": 0, "leases": [], "wg": []}
+    r = {"idle": None, "up": None, "load": None, "ike": 0, "leases": [], "wg": [], "names": {}}
     for line in (text or "").splitlines():
         key, _, val = line.partition(" ")
         val = val.strip()
@@ -94,6 +99,9 @@ def parse_status(text):
                 r["ike"] = int(val)
             elif key == "LEASE":
                 r["leases"].append(val)
+            elif key == "NAMES":
+                names = json.loads(val or "{}")
+                r["names"] = names if isinstance(names, dict) else {}
             elif key == "WG":
                 f = val.split("\t")
                 if len(f) >= 7:
@@ -206,18 +214,26 @@ def build(now, descs, stats, mets):
             "usd": round(hours * price + ipv4 + disk, 2),
         })
 
+    global _last_peers
     now_s = int(now.timestamp())
-    wg = {}
+    wg, names, seen = {}, {}, False
     for s in stats.values():
-        for p in (s or {}).get("wg", []):
-            wg[p["ip"]] = p
-    peers = []
-    for num, ip in PEERS:
-        p = wg.get(ip)
-        peers.append({"n": num, "ip": ip,
-                      "hsAgo": (now_s - p["hs"]) if p and p["hs"] > 0 else None,
-                      "rx": p["rx"] if p else 0, "tx": p["tx"] if p else 0,
-                      "ep": (p["ep"].rsplit(":", 1)[0] if p and p["ep"] not in ("", "(none)") else None)})
+        if s and (s.get("wg") or s.get("names")):
+            seen = True
+            names.update(s.get("names") or {})
+            for p in s.get("wg", []):
+                wg[p["ip"]] = p
+    if seen:
+        peers = []
+        for ip in sorted(wg, key=lambda a: tuple(int(x) for x in a.split("."))):
+            p = wg[ip]
+            peers.append({"n": str(int(ip.rsplit(".", 1)[1]) - 1), "ip": ip, "name": names.get(ip),
+                          "hsAgo": (now_s - p["hs"]) if p["hs"] > 0 else None,
+                          "rx": p["rx"], "tx": p["tx"],
+                          "ep": p["ep"].rsplit(":", 1)[0] if p["ep"] not in ("", "(none)") else None})
+        _last_peers = [dict(x, hsAgo=None, rx=0, tx=0) for x in peers]
+    else:
+        peers = _last_peers   # 서울 서버가 꺼져 있으면 마지막으로 본 목록(카운터 0)
 
     cutoff = now.replace(minute=0, second=0, microsecond=0) - datetime.timedelta(hours=7)
     hourly = [{"h": ts.astimezone(KST).strftime("%H"), "gb": round(v / 1e9, 3)}
@@ -298,7 +314,7 @@ def render_html(d):
     nodes = "\n".join(node_lines(x) for x in d["nodes"])
     peers = []
     for p in d["peers"]:
-        head = '%s %s  ' % (span("k", "[peer %s]" % p["n"]), p["ip"])
+        head = '%s %s %s ' % (span("k", "[peer %s]" % p["n"]), p["ip"], span("path", p.get("name") or ""))
         if p["hsAgo"] is None:
             peers.append(head + span("dim", "○ idle") + "\n  " + span("dim", "no handshake since boot"))
             continue
@@ -325,19 +341,99 @@ def render_html(d):
             .replace("{{QUOTA}}", quota).replace("{{BY}}", by).replace("{{COST}}", cost))
 
 
+# ---------------------------------------------------------------- 피어 관리
+
+class PeerError(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
+def peer_admin(req):
+    """서울 서버에서 nago-peer.py를 (설치하며) 실행하고 결과 JSON을 돌려준다."""
+    op = req.get("op")
+    if op not in PEER_OPS:
+        raise PeerError(400, "unknown op")
+    allowed = {"op", "pub", "name", "ip", "seconds"}
+    req = {k: str(v)[:100] for k, v in req.items() if k in allowed}
+    kr = next(n for n in NODES if n["code"] == "kr")
+    d = describe(kr)
+    if d["state"] != "running":
+        raise PeerError(409, "kr is %s - connect once to boot it, then retry" % d["state"])
+    arg = base64.b64encode(json.dumps(req).encode()).decode()
+    script = ("cat > /usr/local/sbin/nago-peer <<'NAGO_PEER_EOF'\n%s\nNAGO_PEER_EOF\n"
+              "chmod 0755 /usr/local/sbin/nago-peer\n/usr/local/sbin/nago-peer %s\n") % (PEER_ADMIN.rstrip("\n"), arg)
+    ssm = client("ssm", kr["region"])
+    cid = ssm.send_command(InstanceIds=[kr["iid"]], DocumentName="AWS-RunShellScript",
+                           Parameters={"commands": [script]}, TimeoutSeconds=30,
+                           Comment="nago-peer " + op)["Command"]["CommandId"]
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        time.sleep(1.0)
+        try:
+            inv = ssm.get_command_invocation(CommandId=cid, InstanceId=kr["iid"])
+        except Exception:
+            continue
+        if inv["Status"] in ("Success", "Failed", "Cancelled", "TimedOut"):
+            lines = (inv.get("StandardOutputContent") or "").strip().splitlines()
+            try:
+                out = json.loads(lines[-1])
+            except (IndexError, ValueError):
+                raise PeerError(502, "server: " + (inv.get("StandardErrorContent") or inv["Status"])[:200])
+            if not out.get("ok"):
+                raise PeerError(400, out.get("error") or "failed")
+            if op == "add":
+                out["endpoint"] = "%s:%s" % (d["ip"], out.get("port", 51820))
+            _cache.pop("live", None)   # 다음 조회에 바로 반영
+            return out
+    raise PeerError(504, "server did not answer in time")
+
+
+def json_response(status, data):
+    return {"statusCode": status, "headers": {"content-type": "application/json", "cache-control": "no-store"},
+            "body": json.dumps(data, ensure_ascii=False)}
+
+
+def key_ok(event):
+    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+    key = headers.get("x-nago-key", "")
+    return bool(KEY_SHA and key) and hmac.compare_digest(hashlib.sha256(key.encode()).hexdigest(), KEY_SHA)
+
+
+def handle_post(event):
+    # 바꾸는 요청은 비밀번호(x-nago-key)로만. 사이트 토큰(?t=)으로는 볼 수만 있다.
+    if not key_ok(event):
+        return json_response(403, {"ok": False, "error": "forbidden"})
+    body = event.get("body") or "{}"
+    if event.get("isBase64Encoded"):
+        body = base64.b64decode(body).decode()
+    try:
+        req = json.loads(body)
+        if not isinstance(req, dict):
+            raise ValueError
+    except ValueError:
+        return json_response(400, {"ok": False, "error": "bad json"})
+    try:
+        return json_response(200, peer_admin(req))
+    except PeerError as e:
+        return json_response(e.status, {"ok": False, "error": str(e)})
+    except Exception as e:
+        return json_response(500, {"ok": False, "error": str(e)[:300]})
+
+
 # ---------------------------------------------------------------- 진입점
 
 def authorized(event):
     q = event.get("queryStringParameters") or {}
     if q.get("t") and hmac.compare_digest(q["t"], TOKEN):
         return True
-    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
-    key = headers.get("x-nago-key", "")
-    return bool(KEY_SHA and key) and hmac.compare_digest(hashlib.sha256(key.encode()).hexdigest(), KEY_SHA)
+    return key_ok(event)
 
 
 def handler(event, context):
     event = event or {}
+    if ((event.get("requestContext") or {}).get("http") or {}).get("method") == "POST":
+        return handle_post(event)
     q = event.get("queryStringParameters") or {}
     want_json = q.get("format") == "json"
     if not authorized(event):

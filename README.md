@@ -21,6 +21,11 @@
 - 서버 쪽 Lambda(`server/dashboard/index.py`)가 모든 리전을 모아 JSON으로 준다. 브라우저용 HTML 사이트도 같은 Lambda가 만든다(`?t=<토큰>`)
 - 앱은 VPN 비밀번호(내장 값 또는 키체인)를 `x-nago-key` 헤더로 보내 인증하고, 보이는 동안 30초마다 새로 받는다(당겨서 새로고침도 됨)
 - 비용은 실행 시간(CloudWatch 5분 데이터 개수) × 온디맨드 단가 + 고정 IP/디스크 + 무료 100GB 초과 송신으로 어림한 값
+- **피어 관리**: WireGuard 피어 줄을 누르면 kick(60초 끊기) · 사용량 초기화 · 이름 바꾸기 · 삭제. `wg peer add [+ new]`로 새 피어를 만든다
+  - 키는 폰에서 만들고(CryptoKit) 공개키만 서버로 보낸다. 개인키는 QR/.conf 화면에만 있고 닫으면 남지 않는다
+  - 서버 쪽은 Lambda가 SSM으로 `server/dashboard/nago-peer.py`를 서울 서버에 설치·실행한다. 이름은 `/etc/wireguard/nago-names.json`
+  - 바꾸는 요청은 VPN 비밀번호(`x-nago-key`)로만 된다. 사이트 토큰으로는 볼 수만 있다
+  - 서울 서버가 꺼져 있으면 관리할 수 없다(kr로 한 번 연결하면 켜짐)
 
 ## 안드로이드 앱 (`android/`)
 
@@ -48,7 +53,7 @@ open WifiScan.xcodeproj
 ## 빌드 방법 B: Xcode에서 직접 만들기
 
 1. File → New → Project → iOS App (Interface: SwiftUI), iOS 17 이상
-2. 템플릿이 만든 `ContentView.swift`, `<이름>App.swift`는 지우고 `WifiScan/` 폴더의 `.swift` 파일 6개, `Assets.xcassets`(앱 아이콘), `Fonts/`를 끌어다 넣기
+2. 템플릿이 만든 `ContentView.swift`, `<이름>App.swift`는 지우고 `WifiScan/` 폴더의 `.swift` 파일 7개, `Assets.xcassets`(앱 아이콘), `Fonts/`를 끌어다 넣기
 3. Info 탭 → `Fonts provided by application`(UIAppFonts)에 `JetBrainsMono-Regular.ttf`, `JetBrainsMono-SemiBold.ttf`, `JetBrainsMono-Bold.ttf` 추가
 4. Signing & Capabilities → 본인 Team 선택 → `+ Capability`로 **Personal VPN** 추가
 5. 아이폰에서 실행
