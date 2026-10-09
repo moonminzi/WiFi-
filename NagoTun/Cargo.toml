@@ -12,7 +12,8 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 # NordVPN이 쓰는 WireGuard 엔진(BoringTun 포크, BSD-3-Clause). 버전 고정.
 neptun = { git = "https://github.com/NordSecurity/NepTUN", rev = "ce185155e1639403cc40e01260d0830065a49555", features = ["device"] }
-libc = "0.2"
+# 0.2.187부터 iOS에서 sockaddr_ctl 등을 macOS 전용으로 막아 nix(neptun 의존성)가 iOS로 안 빌드됨. NepTUN이 쓰는 버전으로 고정.
+libc = "=0.2.186"
 base64 = "0.22"
 
 [profile.release]

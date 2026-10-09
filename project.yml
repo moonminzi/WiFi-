@@ -59,7 +59,7 @@ targets:
         # NepTUN 엔진(NagoTun, Rust 정적 라이브러리)
         SWIFT_OBJC_BRIDGING_HEADER: WifiScanTunnel/WifiScanTunnel-Bridging-Header.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/NagoTun/include
-        OTHER_LDFLAGS: -lnago_tun -framework Security -lresolv
+        OTHER_LDFLAGS: -lnago_tun -framework Security -framework Foundation -lobjc -liconv -lresolv
         MARKETING_VERSION: "1.6"
         CURRENT_PROJECT_VERSION: "7"
     dependencies:
