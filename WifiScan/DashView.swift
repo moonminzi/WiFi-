@@ -79,7 +79,8 @@ struct DashView: View {
     @AppStorage("vpnUsername") private var username = "wifiscan"
     @AppStorage("vpnSavedRegion") private var savedRegion: VPNRegion = .kr
 
-    // 피어 관리
+    // 서버 / 피어 관리
+    @State private var managedNode: DashData.Node?
     @State private var managedPeer: DashData.Peer?
     @State private var renamePeer: DashData.Peer?
     @State private var removePeer: DashData.Peer?
@@ -116,6 +117,24 @@ struct DashView: View {
         .background(Term.bg.ignoresSafeArea())
         .foregroundStyle(Term.text)
         .tint(Term.green)
+        .confirmationDialog(
+            managedNode.map { "\($0.code) · \($0.city) · \($0.state)" } ?? "",
+            isPresented: present($managedNode), titleVisibility: .visible, presenting: managedNode
+        ) { node in
+            if node.state == "stopped" {
+                Button("start") { nodeOp("start", node) }
+            } else if node.state == "running" {
+                Button("reset idle timer (\(node.idle ?? 0)→0m)") { nodeOp("wake", node) }
+                Button("reboot") { nodeOp("reboot", node) }
+                Button("stop", role: .destructive) { nodeOp("stop", node) }
+            }
+        } message: { node in
+            if node.code == "kr", node.state == "running" {
+                Text("stop kr → WireGuard friends drop until someone connects to kr again.")
+            } else if node.state != "running" && node.state != "stopped" {
+                Text("\(node.state)… wait a moment.")
+            }
+        }
         .confirmationDialog(
             managedPeer.map(peerTitle) ?? "",
             isPresented: present($managedPeer), titleVisibility: .visible, presenting: managedPeer
@@ -167,22 +186,46 @@ struct DashView: View {
     }
 
     private func run(_ op: String, _ peer: DashData.Peer, extra: [String: String] = [:]) {
+        var body = ["op": op, "ip": peer.ip]
+        body.merge(extra) { $1 }
+        perform(body, label: "wg peer \(op) \(peer.ip)",
+                done: "\(op) \(peer.ip)" + (op == "kick" ? " · back in 60s" : ""))
+    }
+
+    private func nodeOp(_ op: String, _ node: DashData.Node) {
+        let done: String
+        switch op {
+        case "start": done = "\(node.code) booting · ~1 min"
+        case "stop": done = "\(node.code) stopping"
+        case "reboot": done = "\(node.code) rebooting · ~1 min"
+        default: done = "\(node.code) idle timer reset"
+        }
+        // 켜고 끄는 건 상태가 바뀌는 데 시간이 걸려서 몇 번 더 새로 받는다.
+        perform(["op": op, "node": node.code], label: "node \(op) \(node.code)", done: done,
+                followUps: op == "wake" ? [] : [5, 15, 30, 60])
+    }
+
+    private func perform(_ body: [String: String], label: String, done: String, followUps: [Int] = []) {
         guard let key = VPNPreset.key(username: username) else {
             report("✗ password required → save it in the vpn tab", ok: false)
             return
         }
-        var body = ["op": op, "ip": peer.ip]
-        body.merge(extra) { $1 }
         busy = true
-        report("> wg peer \(op) \(peer.ip) …", ok: true)
+        report("> \(label) …", ok: true)
         Task {
-            defer { busy = false }
             do {
                 try await PeerAPI.send(body, key: key)
-                report("✓ \(op) \(peer.ip)" + (op == "kick" ? " · back in 60s" : ""), ok: true)
-                await load()
+                report("✓ " + done, ok: true)
             } catch {
-                report("✗ \(op): \(error.localizedDescription)", ok: false)
+                busy = false
+                report("✗ \(body["op"] ?? ""): \(error.localizedDescription)", ok: false)
+                return
+            }
+            busy = false
+            await load()
+            for seconds in followUps {
+                try? await Task.sleep(for: .seconds(seconds))
+                await load()
             }
         }
     }
@@ -236,13 +279,21 @@ struct DashView: View {
             if let errorText {
                 line(Text("[FAIL] ").foregroundStyle(Term.red) + Text(errorText).foregroundStyle(Term.muted))
             }
+            if let actionText {
+                line(Text(actionText).foregroundStyle(actionOK ? Term.green : Term.red))
+            }
             if let data {
                 // 블록마다 자식 뷰 수를 적게 유지하려고 구역별로 묶는다.
                 gap
                 section {
-                    command("nodes")
+                    command("nodes", note: "tap to start/stop")
                     ForEach(data.nodes, id: \.code) { node in
-                        nodeLines(node)
+                        Button { managedNode = node } label: {
+                            VStack(alignment: .leading, spacing: 1) { nodeLines(node) }
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(busy)
                     }
                 }
                 gap
@@ -268,9 +319,6 @@ struct DashView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(busy)
-                    if let actionText {
-                        line(Text(actionText).foregroundStyle(actionOK ? Term.muted : Term.red))
-                    }
                 }
                 gap
                 section {

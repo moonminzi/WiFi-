@@ -3,6 +3,7 @@
 GET /?t=<TOKEN>                → 터미널 스타일 HTML (브라우저)
 GET /?format=json  + 헤더 x-nago-key: <VPN 비밀번호>  → JSON (앱)
 POST / {op, ...}   + 헤더 x-nago-key                 → 서울 WireGuard 피어 관리 (nago-peer.py)
+POST / {op: start|stop|reboot|wake, node}             → 서버 켜기/끄기/재부팅/유휴 카운터 0으로
 
 보여 주는 것: 서버별 상태/IP/가동 시간/유휴 카운터/IKEv2 접속, 서울 WireGuard 피어,
 시간별 송신량(전체 합), 이번 달 송신량과 비용 추정.
@@ -25,6 +26,7 @@ KEY_SHA = os.environ.get("KEY_SHA256", "")
 NODES = json.loads(os.environ["NODES"])
 PEER_ADMIN = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "nago-peer.py")).read()
 PEER_OPS = ("add", "kick", "reset", "remove", "rename")
+NODE_OPS = ("start", "stop", "reboot", "wake")
 _last_peers = []   # 서울 서버가 꺼져 있을 때 보여 줄 마지막 피어 목록
 
 # 비용 추정용 단가(USD). 리눅스 온디맨드 / 디스크 8GB / 공인 IPv4 / 무료 100GB 초과 송신.
@@ -343,7 +345,7 @@ def render_html(d):
 
 # ---------------------------------------------------------------- 피어 관리
 
-class PeerError(Exception):
+class ApiError(Exception):
     def __init__(self, status, message):
         super().__init__(message)
         self.status = status
@@ -353,40 +355,77 @@ def peer_admin(req):
     """서울 서버에서 nago-peer.py를 (설치하며) 실행하고 결과 JSON을 돌려준다."""
     op = req.get("op")
     if op not in PEER_OPS:
-        raise PeerError(400, "unknown op")
+        raise ApiError(400, "unknown op")
     allowed = {"op", "pub", "name", "ip", "seconds"}
     req = {k: str(v)[:100] for k, v in req.items() if k in allowed}
     kr = next(n for n in NODES if n["code"] == "kr")
     d = describe(kr)
     if d["state"] != "running":
-        raise PeerError(409, "kr is %s - connect once to boot it, then retry" % d["state"])
+        raise ApiError(409, "kr is %s - connect once to boot it, then retry" % d["state"])
     arg = base64.b64encode(json.dumps(req).encode()).decode()
     script = ("cat > /usr/local/sbin/nago-peer <<'NAGO_PEER_EOF'\n%s\nNAGO_PEER_EOF\n"
               "chmod 0755 /usr/local/sbin/nago-peer\n/usr/local/sbin/nago-peer %s\n") % (PEER_ADMIN.rstrip("\n"), arg)
-    ssm = client("ssm", kr["region"])
-    cid = ssm.send_command(InstanceIds=[kr["iid"]], DocumentName="AWS-RunShellScript",
+    inv = ssm_run(kr, script, "nago-peer " + op)
+    lines = (inv.get("StandardOutputContent") or "").strip().splitlines()
+    try:
+        out = json.loads(lines[-1])
+    except (IndexError, ValueError):
+        raise ApiError(502, "server: " + (inv.get("StandardErrorContent") or inv["Status"])[:200])
+    if not out.get("ok"):
+        raise ApiError(400, out.get("error") or "failed")
+    if op == "add":
+        out["endpoint"] = "%s:%s" % (d["ip"], out.get("port", 51820))
+    _cache.pop("live", None)   # 다음 조회에 바로 반영
+    return out
+
+
+def ssm_run(node, script, comment):
+    ssm = client("ssm", node["region"])
+    cid = ssm.send_command(InstanceIds=[node["iid"]], DocumentName="AWS-RunShellScript",
                            Parameters={"commands": [script]}, TimeoutSeconds=30,
-                           Comment="nago-peer " + op)["Command"]["CommandId"]
+                           Comment=comment)["Command"]["CommandId"]
     deadline = time.time() + 20
     while time.time() < deadline:
         time.sleep(1.0)
         try:
-            inv = ssm.get_command_invocation(CommandId=cid, InstanceId=kr["iid"])
+            inv = ssm.get_command_invocation(CommandId=cid, InstanceId=node["iid"])
         except Exception:
             continue
         if inv["Status"] in ("Success", "Failed", "Cancelled", "TimedOut"):
-            lines = (inv.get("StandardOutputContent") or "").strip().splitlines()
-            try:
-                out = json.loads(lines[-1])
-            except (IndexError, ValueError):
-                raise PeerError(502, "server: " + (inv.get("StandardErrorContent") or inv["Status"])[:200])
-            if not out.get("ok"):
-                raise PeerError(400, out.get("error") or "failed")
-            if op == "add":
-                out["endpoint"] = "%s:%s" % (d["ip"], out.get("port", 51820))
-            _cache.pop("live", None)   # 다음 조회에 바로 반영
-            return out
-    raise PeerError(504, "server did not answer in time")
+            return inv
+    raise ApiError(504, "server did not answer in time")
+
+
+def node_admin(req):
+    """서버 켜기/끄기/재부팅, 유휴 카운터 0으로(wake)."""
+    op = req.get("op")
+    node = next((n for n in NODES if n["code"] == req.get("node")), None)
+    if not node:
+        raise ApiError(400, "unknown node")
+    state = describe(node)["state"]
+    ec2 = client("ec2", node["region"])
+    ids = [node["iid"]]
+    if op == "start":
+        if state == "stopped":
+            ec2.start_instances(InstanceIds=ids)
+            state = "pending"
+        elif state not in ("running", "pending"):
+            raise ApiError(409, "%s is %s - try again in a moment" % (node["code"], state))
+    elif state != "running":
+        if op == "stop" and state in ("stopped", "stopping"):
+            return {"ok": True, "node": node["code"], "state": state}
+        raise ApiError(409, "%s is %s" % (node["code"], state))
+    elif op == "stop":
+        ec2.stop_instances(InstanceIds=ids)
+        state = "stopping"
+    elif op == "reboot":
+        ec2.reboot_instances(InstanceIds=ids)
+    elif op == "wake":
+        inv = ssm_run(node, "mkdir -p /run/nago-idle && echo 0 > /run/nago-idle/idle && echo done", "nago wake")
+        if inv["Status"] != "Success":
+            raise ApiError(502, "server: " + (inv.get("StandardErrorContent") or inv["Status"])[:200])
+    _cache.pop("live", None)
+    return {"ok": True, "node": node["code"], "state": state}
 
 
 def json_response(status, data):
@@ -414,8 +453,10 @@ def handle_post(event):
     except ValueError:
         return json_response(400, {"ok": False, "error": "bad json"})
     try:
+        if req.get("op") in NODE_OPS:
+            return json_response(200, node_admin(req))
         return json_response(200, peer_admin(req))
-    except PeerError as e:
+    except ApiError as e:
         return json_response(e.status, {"ok": False, "error": str(e)})
     except Exception as e:
         return json_response(500, {"ok": False, "error": str(e)[:300]})
