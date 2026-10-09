@@ -8,3 +8,4 @@ WifiScanTunnel/Info.plist
 WifiScanTunnel/WifiScanTunnel.entitlements
 Vendor/WireGuardKit/Sources/WireGuardKitGo/.tmp/
 Vendor/WireGuardKit/Sources/WireGuardKitGo/out/
+NagoTun/target/

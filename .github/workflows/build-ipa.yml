@@ -20,6 +20,10 @@ jobs:
           go-version: "1.24"
           cache: false
 
+      # NepTUN 엔진(NagoTun, Rust)을 iOS용으로 빌드할 때 쓴다
+      - name: Rust iOS target
+        run: rustup target add aarch64-apple-ios
+
       - name: Generate Xcode project
         run: |
           brew install xcodegen

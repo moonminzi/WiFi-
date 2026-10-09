@@ -56,10 +56,15 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan.tunnel   # 앱 번들 ID + .tunnel
         TARGETED_DEVICE_FAMILY: "1"
+        # NepTUN 엔진(NagoTun, Rust 정적 라이브러리)
+        SWIFT_OBJC_BRIDGING_HEADER: WifiScanTunnel/WifiScanTunnel-Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(SRCROOT)/NagoTun/include
+        OTHER_LDFLAGS: -lnago_tun -framework Security -lresolv
         MARKETING_VERSION: "1.6"
         CURRENT_PROJECT_VERSION: "7"
     dependencies:
       - target: WireGuardGoBridgeiOS
+      - target: NagoTunRust
       - package: WireGuardKit
     entitlements:
       path: WifiScanTunnel/WifiScanTunnel.entitlements
@@ -84,3 +89,13 @@ targets:
       arguments: $(ACTION)
       passSettings: true
       workingDirectory: $(SRCROOT)/Vendor/WireGuardKit/Sources/WireGuardKitGo
+
+  # NepTUN(NordVPN의 Rust WireGuard 엔진, BSD-3)을 libnago_tun.a로 빌드(Rust 필요)
+  NagoTunRust:
+    type: ""
+    platform: iOS
+    legacy:
+      toolPath: /bin/sh
+      arguments: $(SRCROOT)/NagoTun/build-ios.sh
+      passSettings: true
+      workingDirectory: $(SRCROOT)/NagoTun

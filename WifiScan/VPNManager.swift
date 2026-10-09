@@ -164,8 +164,9 @@ final class VPNManager {
     }
 
     /// WireGuard 설정을 저장한다. 처음 한 번은 "VPN 구성 추가" 허용 창이 뜬다.
+    /// - engine: "neptun"(Rust, NordVPN 엔진) 또는 "go"(wireguard-go, 공식 앱과 같은 엔진)
     func saveWireGuard(privateKey: String, address: String, serverPub: String, endpoint: String,
-                       dns: [String]) async throws {
+                       dns: [String], engine: String) async throws {
         let tunnel = try await NETunnelProviderManager.loadAllFromPreferences().first ?? NETunnelProviderManager()
         let proto = NETunnelProviderProtocol()
         proto.providerBundleIdentifier = Self.tunnelBundleID
@@ -177,6 +178,7 @@ final class VPNManager {
             "endpoint": endpoint,
             "dns": dns,
             "mtu": 1420,
+            "engine": engine,
         ]
         tunnel.protocolConfiguration = proto
         tunnel.localizedDescription = "NAGO VPN (WireGuard)"

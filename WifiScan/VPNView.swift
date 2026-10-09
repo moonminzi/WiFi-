@@ -14,6 +14,8 @@ struct VPNView: View {
     @AppStorage("vpnFastMode") private var fastMode = true
     @AppStorage("vpnAdblock") private var adblock = false
     @AppStorage("vpnProtocol") private var proto: VPNProto = .auto
+    /// 앱 안 WireGuard 엔진: neptun(Rust, NordVPN 엔진) / go(공식 WireGuard 앱과 같은 엔진)
+    @AppStorage("wgEngine") private var wgEngine = "neptun"
     @State private var password = ""
 
     @State private var busy = false
@@ -148,6 +150,22 @@ struct VPNView: View {
             Text(proto.detail)
                 .font(Term.mono(12))
                 .foregroundStyle(Term.muted)
+            if proto != .ikev2 {
+                TermDivider()
+                HStack(spacing: 10) {
+                    Text("wg engine")
+                        .font(Term.mono(13))
+                        .foregroundStyle(Term.muted)
+                    TermChoice(options: [(label: "neptun", value: "neptun"), (label: "go", value: "go")],
+                               selection: $wgEngine)
+                        .disabled(busy || vpn.status.isActive)
+                        .opacity(busy || vpn.status.isActive ? 0.5 : 1)
+                }
+                Text(wgEngine == "go" ? "wireguard-go · same as the official app"
+                                      : "rust · nordvpn's engine (nordlynx)")
+                    .font(Term.mono(12))
+                    .foregroundStyle(Term.muted)
+            }
         }
     }
 
@@ -253,10 +271,10 @@ struct VPNView: View {
             throw PeerAPI.Failure.server("no wireguard key for \(region.rawValue)")
         }
         let endpoint = "\(target.address):\(target.wgPort)"
-        phase = "\(region.rawValue): wireguard → \(endpoint)"
+        phase = "\(region.rawValue): wireguard(\(wgEngine)) → \(endpoint)"
         try await vpn.saveWireGuard(privateKey: reg.privateKey, address: reg.address + "/32",
                                     serverPub: serverPub, endpoint: endpoint,
-                                    dns: adblock ? ["10.53.53.53"] : ["1.1.1.1"])
+                                    dns: adblock ? ["10.53.53.53"] : ["1.1.1.1"], engine: wgEngine)
         try vpn.connectWireGuard()
     }
 
