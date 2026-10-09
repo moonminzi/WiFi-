@@ -16,6 +16,10 @@ neptun = { git = "https://github.com/NordSecurity/NepTUN", rev = "ce185155e16394
 libc = "=0.2.186"
 base64 = "0.22"
 
+# 안드로이드 앱(Kotlin)에서 부르는 JNI 함수용(src/android.rs)
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21", default-features = false }
+
 [profile.release]
 lto = true
 codegen-units = 1

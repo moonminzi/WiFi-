@@ -83,6 +83,8 @@ class MainActivity : ComponentActivity() {
     private data class Options(
         val user: String,
         val proto: VpnProto,
+        /** 앱 안 WireGuard 엔진: neptun(Rust, NordVPN 엔진) / go(wireguard-go, 공식 앱과 같은 엔진) */
+        val engine: String,
         val adblock: Boolean,
         val dns: List<String>?,
         val allowLan: Boolean,
@@ -94,6 +96,7 @@ class MainActivity : ComponentActivity() {
     private fun options() = Options(
         user = (prefs.getString("user", "wifiscan") ?: "wifiscan").trim(),
         proto = runCatching { VpnProto.valueOf(prefs.getString("proto", "auto") ?: "auto") }.getOrDefault(VpnProto.auto),
+        engine = if (prefs.getString("engine", "neptun") == "go") "go" else "neptun",
         adblock = prefs.getBoolean("adblock", false),
         dns = parseDns(prefs.getString("dns", "") ?: ""),
         allowLan = prefs.getBoolean("allowLan", false),
@@ -140,6 +143,7 @@ class MainActivity : ComponentActivity() {
         region: VpnRegion, target: Target, password: String, o: Options, onPhase: (String?) -> Unit,
     ) {
         WgVpn.down(this)
+        if (NeptunVpnService.up.value) NeptunVpnService.stop(this)
         onPhase("${region.name}: ikev2 → ${target.address}")
         val profile = NagoVpn.profile(this, target, o.user, password, o.adblock, o.allowLan)
         vpnManager.provisionVpnProfile(profile)?.let { intent ->
@@ -174,8 +178,27 @@ class MainActivity : ComponentActivity() {
         val serverPub = target.wgPub ?: reg.servers[region.name]
             ?: throw IllegalStateException("no wireguard key for ${region.name}")
         val endpoint = "${target.address}:${target.wgPort}"
-        onPhase("${region.name}: wg → $endpoint")
-        WgVpn.up(this, WgVpn.config(reg, serverPub, endpoint, o.wgDns, o.allowLan))
+        onPhase("${region.name}: wg/${o.engine} → $endpoint")
+        if (o.engine == "go") {
+            if (NeptunVpnService.up.value) NeptunVpnService.stop(this)
+            WgVpn.up(this, WgVpn.config(reg, serverPub, endpoint, o.wgDns, o.allowLan))
+        } else {
+            WgVpn.down(this)
+            NeptunVpnService.start(
+                this,
+                NeptunVpnService.Session(
+                    privateKey = reg.keyPair.privateKey.toBase64(),
+                    address = reg.address,
+                    serverPub = serverPub,
+                    endpoint = endpoint,
+                    dns = o.wgDns,
+                    allowLan = o.allowLan,
+                    region = region.name,
+                    apiKey = password,
+                ),
+            )
+            NeptunVpnService.awaitUp(10_000)
+        }
     }
 
     private fun stateName(state: Int?) = when (state) {
@@ -190,6 +213,7 @@ class MainActivity : ComponentActivity() {
     private fun App() {
         var tab by remember { mutableStateOf("vpn") }
         val wgState by WgVpn.state.collectAsState()
+        val neptunUp by NeptunVpnService.up.collectAsState()
         var ike by remember { mutableStateOf<Int?>(null) }
 
         // 시스템 VPN(IKEv2) 상태를 1초마다 읽는다(다른 앱/설정에서 끊어도 반영되게). 바뀌면 로그에 남긴다.
@@ -204,7 +228,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        val wgUp = wgState == Tunnel.State.UP
+        val wgUp = wgState == Tunnel.State.UP || neptunUp
         val active = wgUp || ike == VpnProfileState.STATE_CONNECTED || ike == VpnProfileState.STATE_CONNECTING
 
         Column(Modifier.fillMaxSize().background(Term.bg).safeDrawingPadding()) {
@@ -296,6 +320,7 @@ class MainActivity : ComponentActivity() {
                 if (active) {
                     NagoLog.add("disconnect")
                     vpnManager.stopProvisionedVpnProfile()
+                    if (NeptunVpnService.up.value) NeptunVpnService.stop(this@MainActivity)
                     scope.launch { WgVpn.down(this@MainActivity) }
                     return@TermButton
                 }
@@ -325,7 +350,7 @@ class MainActivity : ComponentActivity() {
 
     /** `auto · adblock · allow-lan` 처럼 지금 설정 한 줄 */
     private fun flags(o: Options) = buildList {
-        add(o.proto.label)
+        add(if (o.proto == VpnProto.wg) "wg/${o.engine}" else o.proto.label)
         when {
             o.adblock -> add("adblock")
             o.proto != VpnProto.ikev2 && o.dns != null -> add("dns " + o.dns.joinToString(","))
@@ -338,6 +363,7 @@ class MainActivity : ComponentActivity() {
         var user by remember { mutableStateOf(prefs.getString("user", "wifiscan") ?: "wifiscan") }
         var password by remember { mutableStateOf(prefs.getString("pw", "") ?: "") }
         var proto by remember { mutableStateOf(options().proto) }
+        var engine by remember { mutableStateOf(options().engine) }
         var adblock by remember { mutableStateOf(prefs.getBoolean("adblock", false)) }
         var dns by remember { mutableStateOf(prefs.getString("dns", "") ?: "") }
         var allowLan by remember { mutableStateOf(prefs.getBoolean("allowLan", false)) }
@@ -375,6 +401,16 @@ class MainActivity : ComponentActivity() {
                 TermChoice(VpnProto.entries.map { it.label to it }, proto, enabled) {
                     proto = it
                     prefs.edit().putString("proto", it.name).apply()
+                }
+                if (proto != VpnProto.ikev2) {
+                    TermDivider()
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("engine", style = Term.mono(15.sp, color = Term.muted), modifier = Modifier.weight(1f))
+                        TermChoice(listOf("neptun" to "neptun", "go" to "go"), engine, enabled) {
+                            engine = it
+                            prefs.edit().putString("engine", it).apply()
+                        }
+                    }
                 }
             }
 
@@ -435,7 +471,7 @@ class MainActivity : ComponentActivity() {
             TermBlock("about") {
                 val version = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull() ?: "?"
                 Text("nago vpn $version", style = Term.mono(13.sp))
-                Text("wireguard-go 1.0.20230706 · ikev2 android built-in", style = Term.mono(13.sp, color = Term.muted))
+                Text("neptun ce18515 · wireguard-go 1.0.20230706", style = Term.mono(13.sp, color = Term.muted))
             }
         }
     }

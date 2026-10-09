@@ -21,6 +21,16 @@
             </intent-filter>
         </activity>
 
+        <!-- 앱 안 WireGuard의 NepTUN 엔진(NeptunVpnService). go 엔진은 wireguard-android 라이브러리의 서비스를 쓴다 -->
+        <service
+            android:name=".NeptunVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
         <!-- 시스템 VPN(IKEv2)이 연결 실패/해제 이유를 알려 주는 이벤트 -->
         <receiver
             android:name=".VpnEventReceiver"

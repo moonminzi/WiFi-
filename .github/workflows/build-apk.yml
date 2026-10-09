@@ -3,7 +3,7 @@ name: Build Android APK
 on:
   push:
     branches: [main]
-    paths: ['android/**', '.github/workflows/build-apk.yml']
+    paths: ['android/**', 'NagoTun/**', '.github/workflows/build-apk.yml']
   workflow_dispatch:
 
 jobs:
@@ -20,6 +20,12 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.14.3'
+
+      # NepTUN 엔진(NagoTun, Rust)을 안드로이드용 .so로 빌드한다(러너의 rustup + Android NDK 사용)
+      - name: Rust Android targets
+        run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi
+          echo "NDK: ${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-none}}"
 
       # 공개 레포라 비밀번호를 넣지 않은 디버그 APK만 만든다(앱에서 비밀번호 입력).
       - name: Build debug APK

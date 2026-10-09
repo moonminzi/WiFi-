@@ -1,6 +1,6 @@
-//! NAGO VPN — NepTUN(WireGuard) 엔진을 iOS 터널 확장(Swift)에서 부르기 위한 C 인터페이스.
+//! NAGO VPN — NepTUN(WireGuard) 엔진을 iOS 터널 확장(Swift)과 안드로이드 앱(JNI, src/android.rs)에서 부르기 위한 C 인터페이스.
 //!
-//! iOS가 만든 utun 파일 디스크립터를 그대로 넘겨받아 NepTUN 장치를 띄우고,
+//! OS가 만든 터널(iOS utun, 안드로이드 VpnService TUN) 파일 디스크립터를 그대로 넘겨받아 NepTUN 장치를 띄우고,
 //! 설정은 WireGuard UAPI 문자열(set=1 …)로 넣는다. 패킷 처리는 NepTUN의 스레드들이 utun과 UDP를 직접 읽고 쓴다.
 
 use std::ffi::{c_char, c_int, CStr};
@@ -11,6 +11,9 @@ use base64::Engine;
 
 use neptun::device::tun::TunSocket;
 use neptun::device::{DeviceConfig, DeviceHandle, MakeExternalNeptunNoop};
+
+#[cfg(target_os = "android")]
+mod android;
 
 /// Swift 쪽에서는 불투명 포인터로만 다룬다.
 pub struct NagoTun {
@@ -63,9 +66,9 @@ fn errno_of(response: &str) -> c_int {
 }
 
 /// 터널을 시작한다. 실패하면 NULL.
-/// - `tun_fd`: iOS NEPacketTunnelProvider의 utun 디스크립터(네트워크 설정을 적용한 뒤에 넘겨야 MTU가 맞다)
+/// - `tun_fd`: iOS utun 또는 안드로이드 TUN 디스크립터(네트워크 설정을 적용한 뒤에 넘겨야 MTU가 맞다). 엔진이 닫는다
 /// - `uapi`: "set=1\nprivate_key=…\npublic_key=…\nendpoint=…\nallowed_ip=…\n\n"
-/// - `threads`: 이벤트 루프 스레드 수(아이폰은 코어 수에 맞춰 2~4)
+/// - `threads`: 이벤트 루프 스레드 수(NordVPN과 같게 아이폰 1, 안드로이드 4)
 #[no_mangle]
 pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u32) -> *mut NagoTun {
     let Some(cmd) = text(uapi).map(|c| normalize(&c)) else {
@@ -77,7 +80,8 @@ pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u3
     };
     let config = DeviceConfig {
         n_threads: threads.clamp(1, 8) as usize,
-        use_connected_socket: false,
+        // NordVPN(libtelio)과 같게: 애플은 끄고, 안드로이드는 서버마다 connect한 소켓을 쓴다
+        use_connected_socket: cfg!(target_os = "android"),
         #[cfg(target_os = "linux")]
         use_multi_queue: false,
         open_uapi_socket: false,

@@ -39,6 +39,8 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
   - 터널 확장은 핸드셰이크가 170초 넘게 없으면(서버 유휴 종료, 재부팅으로 IP 변경) 국가 API로 서버를 켜고 주소가 바뀌었으면 피어를 바꾼다. 확장 자신의 통신은 킬 스위치에도 막히지 않는다
 - **custom dns** (wg만): `1.1.1.1, 8.8.8.8`처럼. --adblock이 켜져 있으면 광고 차단 DNS가 우선. IKEv2 DNS는 서버가 준다
 - **안드로이드**: `--allow-lan`(IKEv2 `setLocalRoutesExcluded`, wg는 사설망·멀티캐스트 대역을 AllowedIPs에서 뺌), 항상 켜기·킬 스위치는 시스템 VPN 설정(`system ›`)에서
+- **안드로이드 wg engine**: `neptun`(기본) — iOS와 같은 NepTUN을 `NagoTun/build-android.sh`(NDK)로 libnago_tun.so로 빌드해 JNI(`NagoTun/src/android.rs`, `NeptunNative.kt`)로 부른다. `NeptunVpnService`가 TUN을 만들고 엔진에 넘김. NordVPN과 같게 이벤트 루프 4개 + 서버마다 connect한 UDP 소켓. 앱 자신은 VPN에서 빼서(`addDisallowedApplication`) 엔진 소켓과 국가 API 요청이 터널 밖으로 나간다. 핸드셰이크가 끊기면 iOS처럼 서버를 깨우고 새 주소로 바꾼다 / `go` — wireguard-android GoBackend
+  - 빌드에 Rust와 Android NDK가 필요(Gradle `preBuild` 앞에 `buildNagoTun`이 돈다. NDK는 `ANDROID_NDK_HOME` 또는 `<SDK>/ndk/<버전>`)
 - **logs**: 진행 단계·오류·VPN 상태 변화(끊긴 이유 포함). iOS는 wg가 켜져 있으면 터널 확장의 로그와 핸드셰이크·주고받은 양도 같이 보여 준다
 - **server**: 가속(TCP 분할)은 4대 모두 IKEv2·WireGuard TCP에 켜져 있음
 
