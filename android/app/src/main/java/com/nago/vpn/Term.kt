@@ -86,8 +86,11 @@ fun TermBlock(label: String, content: @Composable ColumnScope.() -> Unit) {
 
 /** `user  wifiscan` 처럼 왼쪽에 키, 오른쪽에 값 */
 @Composable
-fun TermField(key: String, value: String, onChange: (String) -> Unit, placeholder: String, secure: Boolean = false) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+fun TermField(
+    key: String, value: String, onChange: (String) -> Unit, placeholder: String,
+    secure: Boolean = false, enabled: Boolean = true,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.alpha(if (enabled) 1f else 0.5f)) {
         Text(key, style = Term.mono(15.sp, color = Term.muted), modifier = Modifier.width(56.dp))
         Box(Modifier.fillMaxWidth()) {
             if (value.isEmpty()) {
@@ -96,6 +99,7 @@ fun TermField(key: String, value: String, onChange: (String) -> Unit, placeholde
             BasicTextField(
                 value = value,
                 onValueChange = onChange,
+                enabled = enabled,
                 singleLine = true,
                 textStyle = Term.mono(15.sp),
                 cursorBrush = SolidColor(Term.green),
@@ -143,6 +147,20 @@ fun StatusLine(kind: Char, text: String) {
         Text(kind.toString(), style = Term.mono(13.sp, color = color))
         Text(text, style = Term.mono(13.sp, color = if (kind == '>') Term.muted else color))
     }
+}
+
+/** `[ copy ]` 같은 작은 테두리 버튼 */
+@Composable
+fun TermSmallButton(label: String, danger: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
+    Text(
+        label,
+        style = Term.mono(13.sp, color = if (danger) Term.red else Term.text),
+        modifier = Modifier
+            .alpha(if (enabled) 1f else 0.4f)
+            .border(1.dp, Term.border, RoundedCornerShape(5.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    )
 }
 
 /** 초록 꽉 찬 버튼(위험한 동작이면 빨간 테두리) */

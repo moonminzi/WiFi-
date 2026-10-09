@@ -41,7 +41,9 @@ object NagoVpn {
         else IkeFqdnIdentification(id)
     }
 
-    fun profile(context: Context, target: Target, user: String, password: String, adblock: Boolean): Ikev2VpnProfile {
+    fun profile(
+        context: Context, target: Target, user: String, password: String, adblock: Boolean, allowLan: Boolean,
+    ): Ikev2VpnProfile {
         // IKE(제어용): 서버 제안 aes256-sha256-modp2048과 맞춘다(안드로이드 IKE는 ECP 그룹이 없음).
         val ikeSa = IkeSaProposal.Builder()
             .addEncryptionAlgorithm(SaProposal.ENCRYPTION_ALGORITHM_AES_CBC, SaProposal.KEY_LEN_AES_256)
@@ -81,6 +83,8 @@ object NagoVpn {
         return Ikev2VpnProfile.Builder(IkeTunnelConnectionParams(ike, child))
             .setMaxMtu(1400)
             .setBypassable(false)
+            // --allow-lan: 프린터·크롬캐스트 같은 같은 망 기기는 VPN 밖으로
+            .setLocalRoutesExcluded(allowLan)
             .build()
     }
 }

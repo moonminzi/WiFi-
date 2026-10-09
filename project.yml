@@ -24,8 +24,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan   # ← 본인 것으로 변경
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "1.6.1"
-        CURRENT_PROJECT_VERSION: "8"
+        MARKETING_VERSION: "1.7"
+        CURRENT_PROJECT_VERSION: "9"
     dependencies:
       - target: WifiScanTunnel
     entitlements:
@@ -51,7 +51,10 @@ targets:
   WifiScanTunnel:
     type: app-extension
     platform: iOS
-    sources: [WifiScanTunnel]
+    sources:
+      - WifiScanTunnel
+      # 핸드셰이크가 끊기면 확장이 직접 국가 API로 서버를 깨우고 새 주소를 받는다(앱과 같은 코드)
+      - path: WifiScan/VPNRegion.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan.tunnel   # 앱 번들 ID + .tunnel
@@ -60,8 +63,8 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: WifiScanTunnel/WifiScanTunnel-Bridging-Header.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/NagoTun/include
         OTHER_LDFLAGS: -lnago_tun -framework Security -framework Foundation -lobjc -liconv -lresolv
-        MARKETING_VERSION: "1.6.1"
-        CURRENT_PROJECT_VERSION: "8"
+        MARKETING_VERSION: "1.7"
+        CURRENT_PROJECT_VERSION: "9"
     dependencies:
       - target: WireGuardGoBridgeiOS
       - target: NagoTunRust

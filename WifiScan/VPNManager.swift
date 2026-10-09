@@ -10,6 +10,31 @@ enum VPNProto: String, CaseIterable, Identifiable {
     var label: String { self == .wireguard ? "wg" : rawValue }
 }
 
+/// 자동 연결(On Demand). 꺼진 서버를 깨우고 바뀐 IP를 따라가는 건 우리 터널만 할 수 있어서 wg로 연결한다.
+enum VPNAutoConnect: String, CaseIterable, Identifiable {
+    case off, always, wifi
+
+    var id: String { rawValue }
+    var label: String { self == .wifi ? "wi-fi" : rawValue }
+
+    var rules: [NEOnDemandRule] {
+        switch self {
+        case .off:
+            return []
+        case .always:
+            let any = NEOnDemandRuleConnect()
+            any.interfaceTypeMatch = .any
+            return [any]
+        case .wifi:
+            let wifi = NEOnDemandRuleConnect()
+            wifi.interfaceTypeMatch = .wiFi
+            let cellular = NEOnDemandRuleDisconnect()
+            cellular.interfaceTypeMatch = .cellular
+            return [wifi, cellular]
+        }
+    }
+}
+
 /// VPN 연결 두 가지를 다룬다.
 /// - IKEv2: 아이폰 내장 Personal VPN(`NEVPNManager.shared()`), EAP-MSCHAPv2
 /// - WireGuard: 앱 확장(WifiScanTunnel, WireGuardKit)을 `NETunnelProviderManager`로 띄움
@@ -139,8 +164,13 @@ final class VPNManager {
         try manager.connection.startVPNTunnel()
     }
 
-    /// 켜져 있는 쪽(둘 다 가능)을 끈다.
-    func disconnect() {
+    /// 켜져 있는 쪽(둘 다 가능)을 끈다. 자동 연결이 켜져 있으면 바로 다시 붙으므로 먼저 끈다.
+    func disconnect() async {
+        if let saved = try? await NETunnelProviderManager.loadAllFromPreferences().first, saved.isOnDemandEnabled {
+            saved.isOnDemandEnabled = false
+            try? await saved.saveToPreferences()
+            tunnel = saved
+        }
         manager.connection.stopVPNTunnel()
         tunnel?.connection.stopVPNTunnel()
     }
@@ -158,8 +188,13 @@ final class VPNManager {
 
     /// WireGuard 설정을 저장한다. 처음 한 번은 "VPN 구성 추가" 허용 창이 뜬다.
     /// - engine: "neptun"(Rust, NordVPN 엔진) 또는 "go"(wireguard-go, 공식 앱과 같은 엔진)
+    /// - region, apiKey: 터널 확장이 핸드셰이크가 끊기면 국가 API로 서버를 깨우고 새 주소로 바꿀 때 쓴다.
+    /// - killSwitch: 터널이 끊긴 동안 다른 트래픽을 막는다(includeAllNetworks). 확장 자신의 통신은 막히지 않는다.
+    /// - allowLAN: 킬 스위치를 켠 상태에서 프린터·AirPlay 같은 같은 망 기기는 터널 밖으로 보낸다.
+    ///   킬 스위치가 꺼져 있으면 iOS가 원래 같은 망 트래픽을 터널에 넣지 않는다.
     func saveWireGuard(privateKey: String, address: String, serverPub: String, endpoint: String,
-                       dns: [String], engine: String) async throws {
+                       dns: [String], engine: String, region: String, apiKey: String,
+                       autoConnect: VPNAutoConnect, killSwitch: Bool, allowLAN: Bool) async throws {
         let tunnel = try await NETunnelProviderManager.loadAllFromPreferences().first ?? NETunnelProviderManager()
         let proto = NETunnelProviderProtocol()
         proto.providerBundleIdentifier = Self.tunnelBundleID
@@ -172,10 +207,16 @@ final class VPNManager {
             "dns": dns,
             "mtu": 1420,
             "engine": engine,
+            "region": region,
+            "apiKey": apiKey,
         ]
+        proto.includeAllNetworks = killSwitch
+        proto.excludeLocalNetworks = killSwitch && allowLAN
         tunnel.protocolConfiguration = proto
         tunnel.localizedDescription = "NAGO VPN (WireGuard)"
         tunnel.isEnabled = true
+        tunnel.onDemandRules = autoConnect.rules
+        tunnel.isOnDemandEnabled = autoConnect != .off
         try await tunnel.saveToPreferences()
         try await tunnel.loadFromPreferences()
         self.tunnel = tunnel
@@ -183,9 +224,31 @@ final class VPNManager {
         refreshStatus()
     }
 
+    /// 자동 연결을 켜서 저장하면 iOS가 먼저 붙이기 시작할 수 있어서, 이미 시작됐으면 그대로 둔다.
+    /// source=app이면 확장은 앱이 방금 받은 주소를 믿고, 없으면(자동 연결) 서버 상태부터 빨리 확인한다.
     func connectWireGuard() throws {
         guard let tunnel else { throw NEVPNError(.configurationInvalid) }
-        try tunnel.connection.startVPNTunnel()
+        guard !tunnel.connection.status.isActive else { return }
+        try tunnel.connection.startVPNTunnel(options: ["source": "app" as NSString])
+    }
+
+    struct TunnelReport: Decodable {
+        let lines: [String]
+        let stats: String?
+    }
+
+    /// 켜져 있는 터널 확장의 로그와 상태(핸드셰이크, 주고받은 양). wg가 켜져 있을 때만 온다.
+    func tunnelReport() async -> TunnelReport? {
+        guard wgStatus.isActive, let session = tunnel?.connection as? NETunnelProviderSession else { return nil }
+        return await withCheckedContinuation { continuation in
+            do {
+                try session.sendProviderMessage(Data("log".utf8)) { data in
+                    continuation.resume(returning: data.flatMap { try? JSONDecoder().decode(TunnelReport.self, from: $0) })
+                }
+            } catch {
+                continuation.resume(returning: nil)
+            }
+        }
     }
 }
 

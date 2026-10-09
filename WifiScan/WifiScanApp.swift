@@ -17,6 +17,8 @@ struct WifiScanApp: App {
         }
         UITabBar.appearance().standardAppearance = appearance
         UITabBar.appearance().scrollEdgeAppearance = appearance
+
+        NagoLog.shared.observeVPN()
     }
 
     var body: some Scene {
@@ -27,6 +29,9 @@ struct WifiScanApp: App {
 
                 DashView()
                     .tabItem { Label("dash", systemImage: "chart.bar.xaxis") }
+
+                SettingsView()
+                    .tabItem { Label("settings", systemImage: "gearshape") }
             }
             .tint(Term.green)
             .preferredColorScheme(.dark)

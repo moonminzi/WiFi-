@@ -41,9 +41,25 @@ object WgVpn {
     private val tunnel = object : Tunnel {
         override fun getName() = "nago"
         override fun onStateChange(newState: Tunnel.State) {
+            if (state.value != newState) NagoLog.add("wg: ${newState.name.lowercase()}")
             state.value = newState
         }
     }
+
+    /**
+     * --allow-lan일 때 터널로 보낼 IPv4: 전체에서 사설망(10/8, 172.16/12, 192.168/16), 링크 로컬(169.254/16),
+     * 멀티캐스트 이상(224/3)을 뺀 것. 서버 쪽 주소(피어망 10.9.0.0/24, 광고 차단 DNS 10.53.53.53)는 다시 넣는다.
+     */
+    private val PUBLIC_V4 = listOf(
+        "0.0.0.0/5", "8.0.0.0/7", "11.0.0.0/8", "12.0.0.0/6", "16.0.0.0/4", "32.0.0.0/3", "64.0.0.0/2",
+        "128.0.0.0/3", "160.0.0.0/5", "168.0.0.0/8", "169.0.0.0/9", "169.128.0.0/10", "169.192.0.0/11",
+        "169.224.0.0/12", "169.240.0.0/13", "169.248.0.0/14", "169.252.0.0/15", "169.255.0.0/16", "170.0.0.0/7",
+        "172.0.0.0/12", "172.32.0.0/11", "172.64.0.0/10", "172.128.0.0/9", "173.0.0.0/8", "174.0.0.0/7",
+        "176.0.0.0/4", "192.0.0.0/9", "192.128.0.0/11", "192.160.0.0/13", "192.169.0.0/16", "192.170.0.0/15",
+        "192.172.0.0/14", "192.176.0.0/12", "192.192.0.0/10", "193.0.0.0/8", "194.0.0.0/7", "196.0.0.0/6",
+        "200.0.0.0/5", "208.0.0.0/4",
+        "10.9.0.0/24", "10.53.53.53/32",
+    )
 
     private fun backend(context: Context) =
         backend ?: GoBackend(context.applicationContext).also { backend = it }
@@ -105,13 +121,13 @@ object WgVpn {
             }
         }
 
-    fun config(reg: Registration, serverPub: String, endpoint: String, adblock: Boolean): Config =
+    fun config(reg: Registration, serverPub: String, endpoint: String, dns: List<String>, allowLan: Boolean): Config =
         Config.Builder()
             .setInterface(
                 Interface.Builder()
                     .setKeyPair(reg.keyPair)
                     .addAddress(InetNetwork.parse("${reg.address}/32"))
-                    .addDnsServer(InetAddress.getByName(if (adblock) "10.53.53.53" else "1.1.1.1"))
+                    .addDnsServers(dns.map { InetAddress.getByName(it) })
                     .setMtu(1420)
                     .build()
             )
@@ -119,7 +135,7 @@ object WgVpn {
                 Peer.Builder()
                     .setPublicKey(Key.fromBase64(serverPub))
                     .parseEndpoint(endpoint)
-                    .addAllowedIp(InetNetwork.parse("0.0.0.0/0"))
+                    .addAllowedIps((if (allowLan) PUBLIC_V4 else listOf("0.0.0.0/0")).map(InetNetwork::parse))
                     // IPv6도 터널로 보내서(서버엔 IPv6가 없으니 막힘) 진짜 IP가 IPv6로 새지 않게 한다
                     .addAllowedIp(InetNetwork.parse("::/0"))
                     .setPersistentKeepalive(25)

@@ -13,21 +13,25 @@ final class NeptunEngine {
     private var lastInterfaces: [String]?
     private let queue = DispatchQueue(label: "nago.neptun")
 
+    /// 서버(피어) 하나짜리 UAPI 설정. privateKey가 없으면 피어만 바꾼다.
+    private static func uapi(privateKey: String?, serverPub: String, endpoint: String) -> String {
+        var lines = ["set=1"]
+        if let privateKey { lines.append("private_key=\(privateKey)") }
+        lines += [
+            "replace_peers=true",
+            "public_key=\(serverPub)",
+            "endpoint=\(endpoint)",
+            "persistent_keepalive_interval=25",
+            "replace_allowed_ips=true",
+            "allowed_ip=0.0.0.0/0",
+            "allowed_ip=::/0",
+        ]
+        return lines.joined(separator: "\n") + "\n\n"
+    }
+
     /// 엔진 시작. 실패하면 이유를 던진다.
     func start(tunFD: Int32, privateKey: String, serverPub: String, endpoint: String) throws {
-        let uapi = """
-            set=1
-            private_key=\(privateKey)
-            replace_peers=true
-            public_key=\(serverPub)
-            endpoint=\(endpoint)
-            persistent_keepalive_interval=25
-            replace_allowed_ips=true
-            allowed_ip=0.0.0.0/0
-            allowed_ip=::/0
-
-
-            """
+        let uapi = Self.uapi(privateKey: privateKey, serverPub: serverPub, endpoint: endpoint)
         // NordVPN(libtelio)과 같은 설정: 애플 기기에선 이벤트 루프 1개(성능 코어 하나)가 가장 빠르다.
         // 암호화/전송은 엔진의 작업 스레드들이 코어 수만큼 나눠 한다.
         let threads: UInt32 = 1
@@ -62,6 +66,30 @@ final class NeptunEngine {
                 nago_tun_stop(tun)
             }
             tun = nil
+        }
+    }
+
+    /// 서버 주소(또는 키)가 바뀌었을 때 피어를 새로 넣는다. 새 핸드셰이크부터 다시 한다.
+    func replacePeer(serverPub: String, endpoint: String) throws {
+        try queue.sync {
+            guard let tun else { throw NSError(domain: "nago.neptun", code: 3,
+                                               userInfo: [NSLocalizedDescriptionKey: "neptun: not running"]) }
+            let rc = Self.uapi(privateKey: nil, serverPub: serverPub, endpoint: endpoint)
+                .withCString { nago_tun_set(tun, $0) }
+            if rc != 0 {
+                throw NSError(domain: "nago.neptun", code: Int(rc),
+                              userInfo: [NSLocalizedDescriptionKey: "neptun: uapi set errno \(rc)"])
+            }
+        }
+    }
+
+    /// UAPI get=1 응답(last_handshake_time_sec, rx_bytes, tx_bytes …)
+    func runtime() -> String? {
+        queue.sync {
+            guard let tun else { return nil }
+            var buf = [CChar](repeating: 0, count: 4096)
+            _ = nago_tun_get(tun, &buf, buf.count)
+            return String(cString: buf)
         }
     }
 

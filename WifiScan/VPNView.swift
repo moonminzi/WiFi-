@@ -4,9 +4,8 @@ import SwiftUI
 struct VPNView: View {
     @State private var vpn = VPNManager()
 
-    // 사용자 이름은 공개 정보라 기본값을 넣어 둔다(수정 가능).
-    // 비밀번호는 직접 입력 → 전달용 IPA에 내장된 값(VPNPreset) → 키체인 순으로 쓴다.
-    // 서버 주소는 고른 국가에 따라 API로 받아 온다.
+    // 서버 주소는 고른 국가에 따라 API로 받아 온다. 나머지 설정은 settings 탭(같은 키)에 있다.
+    // 비밀번호는 전달용 IPA에 내장된 값(VPNPreset) → 키체인 순으로 쓴다.
     @AppStorage("vpnRegion") private var region: VPNRegion = .kr
     /// 시스템 VPN 설정에 실제로 저장된(= 연결되는) 국가. 선택 줄과 다를 수 있다.
     @AppStorage("vpnSavedRegion") private var savedRegion: VPNRegion = .kr
@@ -14,43 +13,42 @@ struct VPNView: View {
     @AppStorage("vpnFastMode") private var fastMode = true
     @AppStorage("vpnAdblock") private var adblock = false
     @AppStorage("vpnProtocol") private var proto: VPNProto = .auto
-    /// 앱 안 WireGuard 엔진: neptun(Rust, NordVPN 엔진) / go(공식 WireGuard 앱과 같은 엔진)
     @AppStorage("wgEngine") private var wgEngine = "neptun"
-    @State private var password = ""
+    @AppStorage("vpnAutoConnect") private var autoConnect: VPNAutoConnect = .off
+    @AppStorage("vpnKillSwitch") private var killSwitch = false
+    @AppStorage("vpnAllowLAN") private var allowLAN = true
+    @AppStorage("vpnCustomDNS") private var customDNS = ""
 
     @State private var busy = false
     /// `jp: booting…` 같은 진행 상황 한 줄
     @State private var phase: String?
     @State private var errorText: String?
 
-    private let preset = VPNPreset.password
-
     var body: some View {
         TermPage(path: "vpn") {
             statusBlock
             exitBlock
-            protoBlock
-            authBlock
-
-            Toggle(isOn: $fastMode) {
-                Text("--fast")
-                    .font(Term.mono(13))
-                    .foregroundStyle(Term.muted)
-            }
-            .tint(Term.green)
-            .disabled(busy || vpn.status.isActive || proto == .wireguard)
-
-            Toggle(isOn: $adblock) {
-                Text("--adblock")
-                    .font(Term.mono(13))
-                    .foregroundStyle(Term.muted)
-            }
-            .tint(Term.green)
-            .disabled(busy || vpn.status.isActive)
-
             connectButton
         }
         .task { await vpn.reload() }
+    }
+
+    /// 자동 연결·킬 스위치는 우리 터널(wg)로만 한다(서버 깨우기, IP 추적).
+    private var effectiveProto: VPNProto {
+        autoConnect != .off || killSwitch ? .wireguard : proto
+    }
+
+    /// `wg/neptun · adblock · kill-switch` 처럼 지금 설정 한 줄
+    private var flags: String {
+        var parts = [effectiveProto == .wireguard ? "wg/\(wgEngine)" : effectiveProto.label]
+        if adblock {
+            parts.append("adblock")
+        } else if effectiveProto != .ikev2, let dns = DNSList.parse(customDNS) {
+            parts.append("dns " + dns.joined(separator: ","))
+        }
+        if killSwitch { parts.append("kill-switch") }
+        if autoConnect != .off { parts.append("auto:\(autoConnect.label)") }
+        return parts.joined(separator: " · ")
     }
 
     // MARK: - 상태
@@ -67,6 +65,10 @@ struct VPNView: View {
                 }
             }
             .font(Term.mono(14, .semibold))
+
+            Text(flags)
+                .font(Term.mono(12))
+                .foregroundStyle(Term.muted)
 
             if let phase {
                 StatusLine(kind: .running, text: phase)
@@ -118,50 +120,6 @@ struct VPNView: View {
         }
     }
 
-    // MARK: - 프로토콜
-
-    private var protoBlock: some View {
-        TermBlock(label: "protocol") {
-            TermChoice(options: VPNProto.allCases.map { (label: $0.label, value: $0) },
-                       selection: $proto)
-                .disabled(busy || vpn.status.isActive)
-                .opacity(busy || vpn.status.isActive ? 0.5 : 1)
-            if proto != .ikev2 {
-                TermDivider()
-                HStack(spacing: 10) {
-                    Text("engine")
-                        .font(Term.mono(13))
-                        .foregroundStyle(Term.muted)
-                    TermChoice(options: [(label: "neptun", value: "neptun"), (label: "go", value: "go")],
-                               selection: $wgEngine)
-                        .disabled(busy || vpn.status.isActive)
-                        .opacity(busy || vpn.status.isActive ? 0.5 : 1)
-                }
-            }
-        }
-    }
-
-    // MARK: - 계정
-
-    private var authBlock: some View {
-        TermBlock(label: "auth") {
-            TermField(key: "user", text: $username, placeholder: "wifiscan")
-            TermDivider()
-            if preset != nil {
-                HStack(spacing: 10) {
-                    Text("pw")
-                        .foregroundStyle(Term.muted)
-                        .frame(width: 56, alignment: .leading)
-                    Text("••••••••")
-                        .foregroundStyle(Term.muted)
-                }
-                .font(Term.mono(15))
-            } else {
-                TermField(key: "pw", text: $password, placeholder: "saved in keychain", secure: true)
-            }
-        }
-    }
-
     // MARK: - 연결 버튼
 
     private var connectButton: some View {
@@ -185,7 +143,8 @@ struct VPNView: View {
     private func saveAndConnect() async {
         errorText = nil
         if vpn.status.isActive {
-            vpn.disconnect()
+            NagoLog.add("disconnect")
+            await vpn.disconnect()
             return
         }
         busy = true
@@ -194,42 +153,50 @@ struct VPNView: View {
             phase = nil
         }
         let user = trimmed(username)
-        // 내장 값이 있으면 입력 칸이 없으니 그걸 쓰고, 없으면 입력한 값 → 키체인 순으로 쓴다.
-        let key = !password.isEmpty ? password : (preset ?? KeychainHelper.read(account: user) ?? "")
-        guard !key.isEmpty else {
-            errorText = "password required"
+        guard let key = VPNPreset.key(username: user) else {
+            fail("password required → settings")
             return
         }
         do {
-            phase = "\(region.rawValue): checking server…"
+            step("\(region.rawValue): checking server…")
             let target = try await resolveTarget(key: key)
             if target.justBooted {
-                phase = "\(region.rawValue): up, waiting for ike…"
+                step("\(region.rawValue): up, waiting for ike…")
                 try await Task.sleep(for: .seconds(5))
             }
-            switch proto {
+            switch effectiveProto {
             case .ikev2:
                 try await connectIKE(target, user: user, key: key)
             case .wireguard:
                 try await connectWG(target, user: user, key: key)
             case .auto:
                 try await connectIKE(target, user: user, key: key)
-                phase = "\(region.rawValue): ikev2 handshake…"
+                step("\(region.rawValue): ikev2 handshake…")
                 if !(await vpn.waitForIKE(seconds: 12)) {
-                    vpn.disconnect()
-                    phase = "\(region.rawValue): ikev2 timeout → wg"
+                    await vpn.disconnect()
+                    step("\(region.rawValue): ikev2 timeout → wg")
                     try await Task.sleep(for: .seconds(1))
                     try await connectWG(target, user: user, key: key)
                 }
             }
             savedRegion = region
         } catch {
-            errorText = error.localizedDescription
+            fail(error.localizedDescription)
         }
     }
 
+    private func step(_ text: String) {
+        phase = text
+        NagoLog.add(text)
+    }
+
+    private func fail(_ message: String) {
+        errorText = message
+        NagoLog.add("✗ \(message)")
+    }
+
     private func connectIKE(_ target: RegionAPI.Target, user: String, key: String) async throws {
-        phase = "\(region.rawValue): ikev2 → \(target.address)"
+        step("\(region.rawValue): ikev2 → \(target.address)")
         try await vpn.save(server: target.address, remoteIdentifier: target.identifier,
                            username: user, password: key, fastMode: fastMode, adblock: adblock)
         try vpn.connect()
@@ -237,23 +204,30 @@ struct VPNView: View {
 
     /// 이 폰의 WireGuard 키를 (처음이면) 서버에 등록하고, 고른 국가 서버로 터널을 연다.
     private func connectWG(_ target: RegionAPI.Target, user: String, key: String) async throws {
-        phase = "\(region.rawValue): wg register…"
+        step("\(region.rawValue): wg register…")
         let reg = try await WGClient.registration(apiKey: key, name: "\(user) iphone app")
         guard let serverPub = target.wgPub ?? reg.servers[region.rawValue]?.pub else {
             throw PeerAPI.Failure.server("no wireguard key for \(region.rawValue)")
         }
         let endpoint = "\(target.address):\(target.wgPort)"
-        phase = "\(region.rawValue): wg/\(wgEngine) → \(endpoint)"
+        step("\(region.rawValue): wg/\(wgEngine) → \(endpoint)")
         try await vpn.saveWireGuard(privateKey: reg.privateKey, address: reg.address + "/32",
-                                    serverPub: serverPub, endpoint: endpoint,
-                                    dns: adblock ? ["10.53.53.53"] : ["1.1.1.1"], engine: wgEngine)
+                                    serverPub: serverPub, endpoint: endpoint, dns: wgDNS, engine: wgEngine,
+                                    region: region.rawValue, apiKey: key,
+                                    autoConnect: autoConnect, killSwitch: killSwitch, allowLAN: allowLAN)
         try vpn.connectWireGuard()
+    }
+
+    /// 광고 차단 DNS → 직접 넣은 DNS → 1.1.1.1
+    private var wgDNS: [String] {
+        if adblock { return ["10.53.53.53"] }
+        return DNSList.parse(customDNS) ?? ["1.1.1.1"]
     }
 
     /// 고른 국가 서버를 켜고 주소를 받는다. 비밀번호가 틀린 게 아니면 한국 서버는 고정 IP로 대신 시도한다.
     private func resolveTarget(key: String) async throws -> RegionAPI.Target {
         do {
-            return try await RegionAPI.waitUntilReady(region, key: key) { phase = $0 }
+            return try await RegionAPI.waitUntilReady(region, key: key) { step($0) }
         } catch RegionAPI.APIError.forbidden {
             throw RegionAPI.APIError.forbidden
         } catch {

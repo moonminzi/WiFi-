@@ -28,6 +28,20 @@
 - iOS 빌드: `Vendor/WireGuardKit`(wireguard-apple 1.0.16-27, MIT, Xcode 16용 두 줄 수정) + Go 1.24로 libwg-go.a를 만드는 `WireGuardGoBridgeiOS` 타깃
 - 재서명할 때 확장(`.tunnel`)도 같이 서명돼야 하고, 두 App ID 모두 Network Extensions(packet tunnel) 권한이 필요
 
+## settings 탭
+
+vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings 탭에 있다(연결 중에는 잠김, 다음 연결부터 적용).
+
+- **account / protocol / --fast / --adblock**: 예전 vpn 탭에 있던 것
+- **auto-connect** (iOS: `off / always / wi-fi`): On Demand 규칙. wi-fi는 와이파이에서만 붙고 셀룰러에선 끊음. 앱에서 disconnect를 누르면 자동 연결도 같이 꺼진다
+- **--kill-switch** (iOS): `includeAllNetworks`. 터널이 끊긴 동안 다른 트래픽을 막는다. `--allow-lan`을 켜면 같은 망 기기(프린터·AirPlay)는 터널 밖(`excludeLocalNetworks`). 켠 채 앱을 다시 설치하면 iOS가 모든 통신을 막아 버리는 문제가 있어서 업데이트 전에 끈다
+- auto-connect·kill-switch를 켜면 프로토콜이 wg로 고정된다. 서버를 깨우고 바뀐 IP를 따라가는 건 우리 터널 확장만 할 수 있어서다
+  - 터널 확장은 핸드셰이크가 170초 넘게 없으면(서버 유휴 종료, 재부팅으로 IP 변경) 국가 API로 서버를 켜고 주소가 바뀌었으면 피어를 바꾼다. 확장 자신의 통신은 킬 스위치에도 막히지 않는다
+- **custom dns** (wg만): `1.1.1.1, 8.8.8.8`처럼. --adblock이 켜져 있으면 광고 차단 DNS가 우선. IKEv2 DNS는 서버가 준다
+- **안드로이드**: `--allow-lan`(IKEv2 `setLocalRoutesExcluded`, wg는 사설망·멀티캐스트 대역을 AllowedIPs에서 뺌), 항상 켜기·킬 스위치는 시스템 VPN 설정(`system ›`)에서
+- **logs**: 진행 단계·오류·VPN 상태 변화(끊긴 이유 포함). iOS는 wg가 켜져 있으면 터널 확장의 로그와 핸드셰이크·주고받은 양도 같이 보여 준다
+- **server**: 가속(TCP 분할)은 4대 모두 IKEv2·WireGuard TCP에 켜져 있음
+
 ## --adblock (광고·추적 차단, 앱 전용)
 
 - vpn 탭(iOS)·안드로이드 앱의 `--adblock`을 켜고 연결하면 서버 DNS(10.53.53.53)가 광고·추적 도메인을 막는다
