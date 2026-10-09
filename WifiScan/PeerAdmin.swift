@@ -97,9 +97,7 @@ struct PeerConfigSheet: View {
         ScrollView {
             TermWindow(title: "wg peer add — \(peer.name)") {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("✓ added \(peer.ip) on kr").foregroundStyle(Term.green)
-                    Text("# WireGuard app → + → scan QR, or share the .conf")
-                        .foregroundStyle(Term.muted)
+                    Text("✓ added \(peer.ip)").foregroundStyle(Term.green)
                     if let image = Self.qr(peer.config) {
                         Image(uiImage: image)
                             .interpolation(.none)
@@ -110,9 +108,7 @@ struct PeerConfigSheet: View {
                             .frame(maxWidth: 320)
                             .frame(maxWidth: .infinity)
                     }
-                    Text("! the private key exists only here. close = gone.")
-                        .foregroundStyle(Term.amber)
-                    Text("! one config = one device.")
+                    Text("! key shown once")
                         .foregroundStyle(Term.amber)
                     ShareLink(item: peer.file) {
                         Text("share .conf")

@@ -33,43 +33,22 @@ struct VPNView: View {
             authBlock
 
             Toggle(isOn: $fastMode) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("--fast" + (proto == .wireguard ? " (ikev2 only)" : ""))
-                        .font(Term.mono(13))
-                        .foregroundStyle(Term.muted)
-                    Text("aes-256-gcm · pfs · mtu 1400")
-                        .font(Term.mono(11))
-                        .foregroundStyle(Term.muted.opacity(0.6))
-                }
+                Text("--fast")
+                    .font(Term.mono(13))
+                    .foregroundStyle(Term.muted)
             }
             .tint(Term.green)
-            .disabled(busy || vpn.status.isActive)
+            .disabled(busy || vpn.status.isActive || proto == .wireguard)
 
             Toggle(isOn: $adblock) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("--adblock")
-                        .font(Term.mono(13))
-                        .foregroundStyle(Term.muted)
-                    Text("ads · trackers blocked by server dns")
-                        .font(Term.mono(11))
-                        .foregroundStyle(Term.muted.opacity(0.6))
-                }
+                Text("--adblock")
+                    .font(Term.mono(13))
+                    .foregroundStyle(Term.muted)
             }
             .tint(Term.green)
             .disabled(busy || vpn.status.isActive)
 
             connectButton
-
-            TermBlock(label: "first run: trust ca") {
-                Group {
-                    Text("1. open WifiScanVPN.mobileconfig → install")
-                    Text("2. settings › general › about › certificate trust")
-                    Text("3. enable 'WifiScan VPN Root CA'")
-                    Text("# jp/us/uk ip changes every boot → connect from this app")
-                }
-                .font(Term.mono(12))
-                .foregroundStyle(Term.muted)
-            }
         }
         .task { await vpn.reload() }
     }
@@ -147,13 +126,10 @@ struct VPNView: View {
                        selection: $proto)
                 .disabled(busy || vpn.status.isActive)
                 .opacity(busy || vpn.status.isActive ? 0.5 : 1)
-            Text(proto.detail)
-                .font(Term.mono(12))
-                .foregroundStyle(Term.muted)
             if proto != .ikev2 {
                 TermDivider()
                 HStack(spacing: 10) {
-                    Text("wg engine")
+                    Text("engine")
                         .font(Term.mono(13))
                         .foregroundStyle(Term.muted)
                     TermChoice(options: [(label: "neptun", value: "neptun"), (label: "go", value: "go")],
@@ -161,10 +137,6 @@ struct VPNView: View {
                         .disabled(busy || vpn.status.isActive)
                         .opacity(busy || vpn.status.isActive ? 0.5 : 1)
                 }
-                Text(wgEngine == "go" ? "wireguard-go · same as the official app"
-                                      : "rust · nordvpn's engine (nordlynx)")
-                    .font(Term.mono(12))
-                    .foregroundStyle(Term.muted)
             }
         }
     }
@@ -172,7 +144,7 @@ struct VPNView: View {
     // MARK: - 계정
 
     private var authBlock: some View {
-        TermBlock(label: "auth · ikev2/eap") {
+        TermBlock(label: "auth") {
             TermField(key: "user", text: $username, placeholder: "wifiscan")
             TermDivider()
             if preset != nil {
@@ -180,7 +152,7 @@ struct VPNView: View {
                     Text("pw")
                         .foregroundStyle(Term.muted)
                         .frame(width: 56, alignment: .leading)
-                    Text("•••••••• (built-in)")
+                    Text("••••••••")
                         .foregroundStyle(Term.muted)
                 }
                 .font(Term.mono(15))
@@ -245,7 +217,7 @@ struct VPNView: View {
                 phase = "\(region.rawValue): ikev2 handshake…"
                 if !(await vpn.waitForIKE(seconds: 12)) {
                     vpn.disconnect()
-                    phase = "\(region.rawValue): ikev2 blocked here → wireguard"
+                    phase = "\(region.rawValue): ikev2 timeout → wg"
                     try await Task.sleep(for: .seconds(1))
                     try await connectWG(target, user: user, key: key)
                 }
@@ -265,13 +237,13 @@ struct VPNView: View {
 
     /// 이 폰의 WireGuard 키를 (처음이면) 서버에 등록하고, 고른 국가 서버로 터널을 연다.
     private func connectWG(_ target: RegionAPI.Target, user: String, key: String) async throws {
-        phase = "\(region.rawValue): wireguard key…"
+        phase = "\(region.rawValue): wg register…"
         let reg = try await WGClient.registration(apiKey: key, name: "\(user) iphone app")
         guard let serverPub = target.wgPub ?? reg.servers[region.rawValue]?.pub else {
             throw PeerAPI.Failure.server("no wireguard key for \(region.rawValue)")
         }
         let endpoint = "\(target.address):\(target.wgPort)"
-        phase = "\(region.rawValue): wireguard(\(wgEngine)) → \(endpoint)"
+        phase = "\(region.rawValue): wg/\(wgEngine) → \(endpoint)"
         try await vpn.saveWireGuard(privateKey: reg.privateKey, address: reg.address + "/32",
                                     serverPub: serverPub, endpoint: endpoint,
                                     dns: adblock ? ["10.53.53.53"] : ["1.1.1.1"], engine: wgEngine)

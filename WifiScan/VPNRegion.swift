@@ -93,8 +93,8 @@ enum RegionAPI {
                 }
                 lastError = nil
                 progress(s.state == "stopping"
-                         ? "\(region.rawValue): stopping, will restart…"
-                         : "\(region.rawValue): booting… (1-2 min)")
+                         ? "\(region.rawValue): stopping → restart…"
+                         : "\(region.rawValue): booting…")
             } catch APIError.forbidden {
                 throw APIError.forbidden
             } catch APIError.badResponse(let code) where (400..<500).contains(code) && code != 429 {

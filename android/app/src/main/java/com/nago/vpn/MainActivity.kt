@@ -85,7 +85,7 @@ class MainActivity : ComponentActivity() {
                 onPhase("${region.name}: ikev2 handshake…")
                 if (!waitForIke(12_000)) {
                     vpnManager.stopProvisionedVpnProfile()
-                    onPhase("${region.name}: ikev2 blocked here → wireguard")
+                    onPhase("${region.name}: ikev2 timeout → wg")
                     delay(1_000)
                     connectWg(region, target, user, password, adblock, onPhase)
                 }
@@ -133,12 +133,12 @@ class MainActivity : ComponentActivity() {
     ) {
         vpnManager.stopProvisionedVpnProfile()
         VpnService.prepare(this)?.let { askConsent(it) }
-        onPhase("${region.name}: wireguard key…")
+        onPhase("${region.name}: wg register…")
         val reg = WgVpn.registration(prefs, password, "$user android app")
         val serverPub = target.wgPub ?: reg.servers[region.name]
             ?: throw IllegalStateException("no wireguard key for ${region.name}")
         val endpoint = "${target.address}:${target.wgPort}"
-        onPhase("${region.name}: wireguard → $endpoint")
+        onPhase("${region.name}: wg → $endpoint")
         WgVpn.up(this, WgVpn.config(reg, serverPub, endpoint, adblock))
     }
 
@@ -215,13 +215,13 @@ class MainActivity : ComponentActivity() {
                 Text(region.detail, style = Term.mono(12.sp, color = Term.muted))
             }
 
-            TermBlock("auth · ikev2/eap") {
+            TermBlock("auth") {
                 TermField("user", user, { user = it; prefs.edit().putString("user", it).apply() }, "wifiscan")
                 TermDivider()
                 if (preset != null) {
                     Row {
                         Text("pw", style = Term.mono(15.sp, color = Term.muted), modifier = Modifier.width(56.dp))
-                        Text("•••••••• (built-in)", style = Term.mono(15.sp, color = Term.muted))
+                        Text("••••••••", style = Term.mono(15.sp, color = Term.muted))
                     }
                 } else {
                     TermField("pw", password, { password = it; prefs.edit().putString("pw", it).apply() }, "password", secure = true)
@@ -237,7 +237,6 @@ class MainActivity : ComponentActivity() {
                     proto = it
                     prefs.edit().putString("proto", it.name).apply()
                 }
-                Text(proto.detail, style = Term.mono(12.sp, color = Term.muted))
             }
 
             TermBlock("dns") {
@@ -252,7 +251,6 @@ class MainActivity : ComponentActivity() {
                         prefs.edit().putBoolean("adblock", it).apply()
                     }
                 }
-                Text("# ads · trackers blocked by server dns", style = Term.mono(12.sp, color = Term.muted))
             }
 
             TermButton(
@@ -286,13 +284,6 @@ class MainActivity : ComponentActivity() {
                         phase = null
                     }
                 }
-            }
-
-            TermBlock("notes") {
-                Text("# ikev2 · aes-256-gcm · ca built in", style = Term.mono(12.sp, color = Term.muted))
-                Text("# wireguard · own key per phone, registered on first use", style = Term.mono(12.sp, color = Term.muted))
-                Text("# jp/us/uk boot on connect (1-2 min), stop after 30m idle", style = Term.mono(12.sp, color = Term.muted))
-                Text("# android 13+", style = Term.mono(12.sp, color = Term.muted))
             }
         }
     }

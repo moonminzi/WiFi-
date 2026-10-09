@@ -84,8 +84,8 @@ object RegionApi {
                 if (s.ready && s.ip != null) return Target(s.ip, s.id, waited, s.wgPub, s.wgPort)
                 lastError = null
                 progress(
-                    if (s.state == "stopping") "${region.name}: stopping, will restart…"
-                    else "${region.name}: booting… (1-2 min)"
+                    if (s.state == "stopping") "${region.name}: stopping → restart…"
+                    else "${region.name}: booting…"
                 )
             } catch (e: ApiError.Forbidden) {
                 throw e

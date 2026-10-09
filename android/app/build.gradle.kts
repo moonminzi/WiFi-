@@ -13,8 +13,8 @@ android {
         // IkeTunnelConnectionParams로 IKEv2 프로필을 만들려면 Android 13(API 33) 이상이 필요하다.
         minSdk = 33
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.2.1"
         // 친구 폰은 다 ARM이라 WireGuard 엔진(libwg-go)은 ARM용만 넣는다(APK 크기 절반 이하)
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }

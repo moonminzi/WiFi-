@@ -17,14 +17,14 @@ class VpnEventReceiver : BroadcastReceiver() {
         val cats = intent.categories ?: emptySet()
         val code = intent.getIntExtra(VpnManager.EXTRA_ERROR_CODE, -1)
         VpnEvents.lastEvent.value = when {
-            VpnManager.CATEGORY_EVENT_IKE_ERROR in cats -> "ike error $code (auth/cert/proposal)"
+            VpnManager.CATEGORY_EVENT_IKE_ERROR in cats -> "ike error $code"
             VpnManager.CATEGORY_EVENT_NETWORK_ERROR in cats -> when (code) {
-                VpnManager.ERROR_CODE_NETWORK_PROTOCOL_TIMEOUT -> "network: server not answering"
+                VpnManager.ERROR_CODE_NETWORK_PROTOCOL_TIMEOUT -> "network: timeout"
                 VpnManager.ERROR_CODE_NETWORK_LOST -> "network: lost"
                 VpnManager.ERROR_CODE_NETWORK_UNKNOWN_HOST -> "network: unknown host"
                 else -> "network error $code"
             }
-            VpnManager.CATEGORY_EVENT_DEACTIVATED_BY_USER in cats -> "stopped by system/user"
+            VpnManager.CATEGORY_EVENT_DEACTIVATED_BY_USER in cats -> "stopped"
             VpnManager.CATEGORY_EVENT_ALWAYS_ON_STATE_CHANGED in cats -> null
             else -> null
         }

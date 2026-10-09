@@ -95,14 +95,8 @@ struct DashView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                TermWindow(title: "nago@vpn: ~ — all nodes — live") {
-                    terminal
-                }
-                Text("↻ pull to refresh · auto \(Self.refreshSeconds)s")
-                    .font(Term.mono(11.5))
-                    .foregroundStyle(Term.muted)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+            TermWindow(title: "nago@vpn: ~") {
+                terminal
             }
             .padding(16)
         }
@@ -124,23 +118,17 @@ struct DashView: View {
             if node.state == "stopped" {
                 Button("start") { nodeOp("start", node) }
             } else if node.state == "running" {
-                Button("reset idle timer (\(node.idle ?? 0)→0m)") { nodeOp("wake", node) }
+                Button("reset idle (\(node.idle ?? 0)m)") { nodeOp("wake", node) }
                 Button("reboot") { nodeOp("reboot", node) }
                 Button("stop", role: .destructive) { nodeOp("stop", node) }
-            }
-        } message: { node in
-            if node.code == "kr", node.state == "running" {
-                Text("stop kr → WireGuard friends drop until someone connects to kr again.")
-            } else if node.state != "running" && node.state != "stopped" {
-                Text("\(node.state)… wait a moment.")
             }
         }
         .confirmationDialog(
             managedPeer.map(peerTitle) ?? "",
             isPresented: present($managedPeer), titleVisibility: .visible, presenting: managedPeer
         ) { peer in
-            Button("kick — disconnect 60s") { run("kick", peer, extra: ["seconds": "60"]) }
-            Button("reset usage counters") { run("reset", peer) }
+            Button("kick 60s") { run("kick", peer, extra: ["seconds": "60"]) }
+            Button("reset usage") { run("reset", peer) }
             Button("rename") {
                 nameInput = peer.name ?? ""
                 renamePeer = peer
@@ -148,11 +136,9 @@ struct DashView: View {
             Button("remove…", role: .destructive) { removePeer = peer }
         }
         .alert("new peer", isPresented: $showAdd) {
-            TextField("name (e.g. friend phone)", text: $nameInput)
+            TextField("name", text: $nameInput)
             Button("add") { addPeer() }
             Button("cancel", role: .cancel) {}
-        } message: {
-            Text("A key is made on this phone and only its public half goes to kr.")
         }
         .alert("rename peer", isPresented: present($renamePeer), presenting: renamePeer) { peer in
             TextField("name", text: $nameInput)
@@ -163,7 +149,7 @@ struct DashView: View {
             Button("remove", role: .destructive) { run("remove", peer) }
             Button("cancel", role: .cancel) {}
         } message: { peer in
-            Text("\(peer.ip) \(peer.name ?? "") loses access for good. Its config stops working.")
+            Text("\(peer.ip) \(peer.name ?? "")")
         }
         .sheet(item: $newPeer) { PeerConfigSheet(peer: $0) }
     }
@@ -286,7 +272,7 @@ struct DashView: View {
                 // 블록마다 자식 뷰 수를 적게 유지하려고 구역별로 묶는다.
                 gap
                 section {
-                    command("nodes", note: "tap to start/stop")
+                    command("nodes")
                     ForEach(data.nodes, id: \.code) { node in
                         Button { managedNode = node } label: {
                             VStack(alignment: .leading, spacing: 1) { nodeLines(node) }
@@ -298,7 +284,7 @@ struct DashView: View {
                 }
                 gap
                 section {
-                    command("wg show wg0", note: "kr · tap a peer to manage")
+                    command("wg show")
                     ForEach(Array(data.peers.enumerated()), id: \.element.n) { index, peer in
                         if index > 0 { gap }
                         Button { managedPeer = peer } label: {
@@ -322,7 +308,7 @@ struct DashView: View {
                 }
                 gap
                 section {
-                    command("cw netout --hourly --tz=KST", note: "all nodes")
+                    command("cw netout --hourly --tz=KST")
                     hourlyLines(data.hourly)
                 }
                 gap
@@ -336,7 +322,7 @@ struct DashView: View {
                     costLines(data)
                 }
             } else if loading || errorText == nil {
-                line(Text("# fetching… (servers answer in ~5s)").foregroundStyle(Term.muted))
+                line(Text("# fetching…").foregroundStyle(Term.muted))
             }
             gap
             HStack(spacing: 0) {
@@ -385,12 +371,8 @@ struct DashView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func command(_ cmd: String, note: String? = nil) -> some View {
-        var t = Text("$").font(Term.mono(12.5, .bold)).foregroundStyle(Term.green) + Text(" " + cmd)
-        if let note {
-            t = t + Text(" # " + note).foregroundStyle(Term.muted)
-        }
-        return line(t)
+    private func command(_ cmd: String) -> some View {
+        line(Text("$").font(Term.mono(12.5, .bold)).foregroundStyle(Term.green) + Text(" " + cmd))
     }
 
     // MARK: 서버

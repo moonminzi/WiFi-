@@ -8,13 +8,6 @@ enum VPNProto: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
     var label: String { self == .wireguard ? "wg" : rawValue }
-    var detail: String {
-        switch self {
-        case .auto: return "ikev2 first, wireguard if blocked"
-        case .ikev2: return "ios built-in · fastest on iphone"
-        case .wireguard: return "udp 443 · gets through most wi-fi"
-        }
-    }
 }
 
 /// VPN 연결 두 가지를 다룬다.

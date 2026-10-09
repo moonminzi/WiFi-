@@ -21,10 +21,10 @@ import java.net.InetAddress
 import java.net.URL
 
 /** 프로토콜 선택. auto는 IKEv2를 먼저 해 보고 안 붙으면 WireGuard(udp 443)로 넘어간다. */
-enum class VpnProto(val label: String, val detail: String) {
-    auto("auto", "ikev2 first, wireguard if blocked"),
-    ikev2("ikev2", "android built-in · hardware aes"),
-    wg("wg", "udp 443 · gets through most wi-fi"),
+enum class VpnProto(val label: String) {
+    auto("auto"),
+    ikev2("ikev2"),
+    wg("wg"),
 }
 
 /**
