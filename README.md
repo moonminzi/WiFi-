@@ -22,6 +22,9 @@
 - **wg**: 앱 안 WireGuard(iOS는 WifiScanTunnel 확장 + WireGuardKit, 안드로이드는 wireguard-android). udp 443이라 IKEv2가 막힌 와이파이에서도 붙음
 - **auto**: IKEv2를 12초 기다려 안 붙으면 WireGuard로
 - WireGuard 키는 폰에서 처음 한 번 만들고 공개키만 피어 목록(SSM 파라미터 `/nago/wg/peers`)에 등록. 서버 4대 모두 같은 목록으로 맞춰짐(`server/wireguard/setup-wg.sh`, `nago-peer sync`)
+- **wg engine**(iOS): `neptun`(기본) — NordVPN이 쓰는 Rust 엔진 NepTUN(BSD-3)을 `NagoTun/`(C 인터페이스)으로 감쌈. utun fd를 엔진 스레드가 직접 읽고 씀 / `go` — WireGuardKit(공식 WireGuard 앱과 같은 wireguard-go)
+  - 리눅스 검증(서울→도쿄): NepTUN 다운 약 250~290Mbps, 커널 WireGuard 약 270Mbps로 같은 급. `NagoTun/examples/linux_tun.rs`로 서버에서 재현 가능
+  - iOS 빌드 때 `NagoTunRust` 타깃이 `NagoTun/build-ios.sh`로 `cargo build --target aarch64-apple-ios`(Rust 필요)
 - iOS 빌드: `Vendor/WireGuardKit`(wireguard-apple 1.0.16-27, MIT, Xcode 16용 두 줄 수정) + Go 1.24로 libwg-go.a를 만드는 `WireGuardGoBridgeiOS` 타깃
 - 재서명할 때 확장(`.tunnel`)도 같이 서명돼야 하고, 두 App ID 모두 Network Extensions(packet tunnel) 권한이 필요
 
