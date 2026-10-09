@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""서울 서버 WireGuard 피어 관리. 대시보드 Lambda가 SSM으로 설치하고 부른다.
+"""WireGuard 피어 관리(서버 4대 공통). 대시보드/국가 Lambda가 SSM으로 설치하고 부른다.
 
     nago-peer <base64(JSON)>      → 결과 JSON 한 줄
     nago-peer restore <ip>        → kick 뒤 되살리기(systemd 타이머가 부름)
@@ -10,6 +10,8 @@ JSON op:
     reset   {ip}                사용량 카운터만 0으로(키·설정 그대로)
     remove  {ip}                영구 삭제(wg0.conf에서도 지움)
     rename  {ip, name}
+    sync    {peers: [{pub, ip}]}  피어 목록(SSM 파라미터 /nago/wg/peers)에 맞춘다. 바뀐 것만 건드려서
+                                  붙어 있는 사람은 끊기지 않는다
 """
 import base64
 import ipaddress
@@ -125,6 +127,25 @@ def conf_ips():
             if a.endswith("/32"):
                 ips.add(a[:-3])
     return ips
+
+
+def conf_peers():
+    """wg0.conf의 {공개키: ip}"""
+    out = {}
+    for s in conf_sections():
+        if s and s[0].strip().lower() == "[peer]":
+            pub = section_value(s, "PublicKey")
+            ip = next((a.strip()[:-3] for a in (section_value(s, "AllowedIPs") or "").split(",")
+                       if a.strip().endswith("/32")), None)
+            if pub:
+                out[pub] = ip
+    return out
+
+
+def conf_add(pub, ip):
+    with open(CONF) as fh:
+        text = fh.read()
+    write_atomic(CONF, text.rstrip("\n") + "\n\n[Peer]\nPublicKey = %s\nAllowedIPs = %s/32\n" % (pub, ip))
 
 
 def conf_remove(pub):
@@ -251,7 +272,33 @@ def op_rename(req):
     return {"ip": ip, "name": names[ip]}
 
 
-OPS = {"add": op_add, "kick": op_kick, "reset": op_reset, "remove": op_remove, "rename": op_rename}
+def op_sync(req):
+    want = {}
+    for p in req.get("peers") or []:
+        pub = str(p.get("pub", ""))
+        if not KEY_RE.match(pub):
+            raise Fail("bad key in list")
+        want[pub] = check_ip(p.get("ip"))
+    live = {p["pub"]: ip for ip, p in live_peers().items()}
+    conf = conf_peers()
+    added = removed = 0
+    for pub, ip in want.items():
+        if live.get(pub) != ip:
+            wg("set", IFACE, "peer", pub, "allowed-ips", ip + "/32")
+            added += 1
+        if conf.get(pub) != ip:
+            if pub in conf:
+                conf_remove(pub)
+            conf_add(pub, ip)
+    for pub in set(live) - set(want):
+        wg("set", IFACE, "peer", pub, "remove")
+        removed += 1
+    for pub in set(conf) - set(want):
+        conf_remove(pub)
+    return {"added": added, "removed": removed, "total": len(want)}
+
+
+OPS = {"add": op_add, "sync": op_sync, "kick": op_kick, "reset": op_reset, "remove": op_remove, "rename": op_rename}
 
 
 def main(argv):

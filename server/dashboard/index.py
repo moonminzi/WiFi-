@@ -5,6 +5,10 @@ GET /?format=json  + 헤더 x-nago-key: <VPN 비밀번호>  → JSON (앱)
 POST / {op, ...}   + 헤더 x-nago-key                 → 서울 WireGuard 피어 관리 (nago-peer.py)
 POST / {op: start|stop|reboot|wake, node}             → 서버 켜기/끄기/재부팅/유휴 카운터 0으로
 
+WireGuard 피어 목록의 기준은 SSM 파라미터 /nago/wg/peers({"peers":[{pub, ip, name}]}).
+추가/삭제하면 켜져 있는 서버에 nago-peer sync를 보내고, 꺼진 서버는 국가 API로 켤 때 맞춘다.
+서버별 WireGuard 공개키/포트는 /nago/wg/servers.
+
 보여 주는 것: 서버별 상태/IP/가동 시간/유휴 카운터/IKEv2 접속, 서울 WireGuard 피어,
 시간별 송신량(전체 합), 이번 달 송신량과 비용 추정.
 """
@@ -19,6 +23,7 @@ import os
 import time
 
 import boto3
+from botocore.exceptions import ClientError
 
 TOKEN = os.environ["TOKEN"]
 KEY_SHA = os.environ.get("KEY_SHA256", "")
@@ -26,8 +31,12 @@ KEY_SHA = os.environ.get("KEY_SHA256", "")
 NODES = json.loads(os.environ["NODES"])
 PEER_ADMIN = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "nago-peer.py")).read()
 PEER_OPS = ("add", "kick", "reset", "remove", "rename")
+PARAM_REGION = "ap-northeast-2"
+WG_PEERS = "/nago/wg/peers"
+WG_SERVERS = "/nago/wg/servers"
+WG_NET = "10.9.0."
+KEY_RE = __import__("re").compile(r"^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$")
 NODE_OPS = ("start", "stop", "reboot", "wake")
-_last_peers = []   # 서울 서버가 꺼져 있을 때 보여 줄 마지막 피어 목록
 
 # 비용 추정용 단가(USD). 리눅스 온디맨드 / 디스크 8GB / 공인 IPv4 / 무료 100GB 초과 송신.
 HOURLY = {
@@ -107,7 +116,7 @@ def parse_status(text):
             elif key == "WG":
                 f = val.split("\t")
                 if len(f) >= 7:
-                    r["wg"].append({"ip": f[3].split("/")[0], "ep": f[2], "hs": int(f[4] or 0),
+                    r["wg"].append({"pub": f[0], "ip": f[3].split("/")[0], "ep": f[2], "hs": int(f[4] or 0),
                                     "rx": int(f[5] or 0), "tx": int(f[6] or 0)})
         except ValueError:
             continue
@@ -216,26 +225,23 @@ def build(now, descs, stats, mets):
             "usd": round(hours * price + ipv4 + disk, 2),
         })
 
-    global _last_peers
     now_s = int(now.timestamp())
-    wg, names, seen = {}, {}, False
-    for s in stats.values():
-        if s and (s.get("wg") or s.get("names")):
-            seen = True
-            names.update(s.get("names") or {})
-            for p in s.get("wg", []):
-                wg[p["ip"]] = p
-    if seen:
-        peers = []
-        for ip in sorted(wg, key=lambda a: tuple(int(x) for x in a.split("."))):
-            p = wg[ip]
-            peers.append({"n": str(int(ip.rsplit(".", 1)[1]) - 1), "ip": ip, "name": names.get(ip),
-                          "hsAgo": (now_s - p["hs"]) if p["hs"] > 0 else None,
-                          "rx": p["rx"], "tx": p["tx"],
-                          "ep": p["ep"].rsplit(":", 1)[0] if p["ep"] not in ("", "(none)") else None})
-        _last_peers = [dict(x, hsAgo=None, rx=0, tx=0) for x in peers]
-    else:
-        peers = _last_peers   # 서울 서버가 꺼져 있으면 마지막으로 본 목록(카운터 0)
+    # 같은 피어가 여러 서버에 붙을 수 있으니 서버별 카운터를 더하고, 가장 최근 핸드셰이크 서버를 표시한다
+    agg = {}
+    for code, s in stats.items():
+        for p in (s or {}).get("wg", []):
+            a = agg.setdefault(p["pub"], {"rx": 0, "tx": 0, "hs": 0, "ep": None, "node": None})
+            a["rx"] += p["rx"]
+            a["tx"] += p["tx"]
+            if p["hs"] > a["hs"]:
+                a.update(hs=p["hs"], node=code,
+                         ep=p["ep"].rsplit(":", 1)[0] if p["ep"] not in ("", "(none)") else None)
+    peers = []
+    for x in sorted(wg_peers(), key=lambda x: int(x["ip"].rsplit(".", 1)[1])):
+        a = agg.get(x["pub"], {"rx": 0, "tx": 0, "hs": 0, "ep": None, "node": None})
+        peers.append({"n": str(int(x["ip"].rsplit(".", 1)[1]) - 1), "ip": x["ip"], "name": x.get("name"),
+                      "hsAgo": (now_s - a["hs"]) if a["hs"] > 0 else None,
+                      "rx": a["rx"], "tx": a["tx"], "ep": a["ep"], "node": a["node"]})
 
     cutoff = now.replace(minute=0, second=0, microsecond=0) - datetime.timedelta(hours=7)
     hourly = [{"h": ts.astimezone(KST).strftime("%H"), "gb": round(v / 1e9, 3)}
@@ -323,7 +329,8 @@ def render_html(d):
         st = span("ok", "● online") if p["hsAgo"] < 180 else span("warn", "○ idle")
         peers.append(head + st + "\n  " + span("dim", "↓ tx") + " " + span("num", hb(p["tx"]).rjust(10)) +
                      "   " + span("dim", "↑ rx") + " " + span("num", hb(p["rx"]).rjust(9)) + "\n  " +
-                     span("dim", "hs") + " " + ago(p["hsAgo"]) + " " + span("dim", "· ep") + " " + (p["ep"] or "-"))
+                     span("dim", "hs") + " " + ago(p["hsAgo"]) + " " + span("dim", "· ep") + " " + (p["ep"] or "-") +
+                     (" " + span("k", "@" + p["node"]) if p.get("node") else ""))
     hourly = d["hourly"]
     mx = max([h["gb"] for h in hourly] or [0]) or 1.0
     bars = "\n".join("%s:00 %s %s" % (h["h"], span("num", "%6.2f GB" % h["gb"]), bar(h["gb"], mx, 22))
@@ -351,21 +358,111 @@ class ApiError(Exception):
         self.status = status
 
 
+def get_param(name, default):
+    try:
+        value = client("ssm", PARAM_REGION).get_parameter(Name=name)["Parameter"]["Value"]
+        return json.loads(value)
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "ParameterNotFound":
+            return default
+        raise
+
+
+def put_param(name, value):
+    client("ssm", PARAM_REGION).put_parameter(
+        Name=name, Type="String", Overwrite=True,
+        Value=json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    _cache.pop("param:" + name, None)
+
+
+def wg_peers():
+    return cached("param:" + WG_PEERS, 30, lambda: get_param(WG_PEERS, {"peers": []}))["peers"]
+
+
+def wg_servers():
+    return cached("param:" + WG_SERVERS, 300, lambda: get_param(WG_SERVERS, {}))
+
+
+def peer_script(req):
+    """nago-peer.py를 서버에 깔고 req를 실행하는 셸 스크립트"""
+    arg = base64.b64encode(json.dumps(req).encode()).decode()
+    return ("cat > /usr/local/sbin/nago-peer <<'NAGO_PEER_EOF'\n%s\nNAGO_PEER_EOF\n"
+            "chmod 0755 /usr/local/sbin/nago-peer\n/usr/local/sbin/nago-peer %s\n") % (PEER_ADMIN.rstrip("\n"), arg)
+
+
+def push_sync(codes=None):
+    """켜져 있는 서버의 WireGuard 피어를 파라미터 목록에 맞춘다(기다리지 않음)."""
+    req = {"op": "sync", "peers": [{"pub": x["pub"], "ip": x["ip"]} for x in get_param(WG_PEERS, {"peers": []})["peers"]]}
+    script = peer_script(req)
+    pushed = []
+    for n in NODES:
+        if codes and n["code"] not in codes:
+            continue
+        try:
+            if describe(n)["state"] != "running":
+                continue
+            client("ssm", n["region"]).send_command(
+                InstanceIds=[n["iid"]], DocumentName="AWS-RunShellScript",
+                Parameters={"commands": [script]}, TimeoutSeconds=60, Comment="nago-peer sync")
+            pushed.append(n["code"])
+        except Exception:
+            pass   # 막 켜져서 SSM이 아직 안 붙은 경우 등: 다음 동기화 때 맞춰진다
+    return pushed
+
+
+def peer_list_admin(op, req):
+    data = get_param(WG_PEERS, {"peers": []})
+    peers = data["peers"]
+    name = "".join(ch for ch in str(req.get("name") or "") if ch.isprintable()).strip()[:20]
+    if op == "add":
+        pub = str(req.get("pub") or "")
+        if not KEY_RE.match(pub):
+            raise ApiError(400, "bad public key")
+        mine = next((x for x in peers if x["pub"] == pub), None)
+        if mine is None:
+            used = {x["ip"] for x in peers}
+            ip = next((WG_NET + str(i) for i in range(2, 255) if WG_NET + str(i) not in used), None)
+            if not ip:
+                raise ApiError(409, "no free address")
+            mine = {"pub": pub, "ip": ip, "name": name or "peer %d" % (int(ip.rsplit(".", 1)[1]) - 1)}
+            peers.append(mine)
+            put_param(WG_PEERS, data)
+            push_sync()
+        servers = wg_servers()
+        kr = next(n for n in NODES if n["code"] == "kr")
+        kr_srv = servers.get("kr", {})
+        return {"ok": True, "ip": mine["ip"], "name": mine.get("name"), "servers": servers,
+                "serverPub": kr_srv.get("pub"),
+                "endpoint": "%s:%s" % (describe(kr).get("ip") or kr.get("addr", ""), kr_srv.get("port", 51820))}
+    ip = str(req.get("ip") or "")
+    mine = next((x for x in peers if x["ip"] == ip), None)
+    if mine is None:
+        raise ApiError(404, "no peer at %s" % ip)
+    if op == "remove":
+        peers.remove(mine)
+        put_param(WG_PEERS, data)
+        return {"ok": True, "ip": ip, "pushed": push_sync()}
+    mine["name"] = name or "peer %d" % (int(ip.rsplit(".", 1)[1]) - 1)
+    put_param(WG_PEERS, data)
+    return {"ok": True, "ip": ip, "name": mine["name"]}
+
+
 def peer_admin(req):
-    """서울 서버에서 nago-peer.py를 (설치하며) 실행하고 결과 JSON을 돌려준다."""
+    """add/remove/rename은 피어 목록(파라미터), kick/reset은 서울 서버에서 nago-peer로."""
     op = req.get("op")
     if op not in PEER_OPS:
         raise ApiError(400, "unknown op")
     allowed = {"op", "pub", "name", "ip", "seconds"}
     req = {k: str(v)[:100] for k, v in req.items() if k in allowed}
+    if op in ("add", "remove", "rename"):
+        out = peer_list_admin(op, req)
+        _cache.pop("live", None)
+        return out
     kr = next(n for n in NODES if n["code"] == "kr")
     d = describe(kr)
     if d["state"] != "running":
         raise ApiError(409, "kr is %s - connect once to boot it, then retry" % d["state"])
-    arg = base64.b64encode(json.dumps(req).encode()).decode()
-    script = ("cat > /usr/local/sbin/nago-peer <<'NAGO_PEER_EOF'\n%s\nNAGO_PEER_EOF\n"
-              "chmod 0755 /usr/local/sbin/nago-peer\n/usr/local/sbin/nago-peer %s\n") % (PEER_ADMIN.rstrip("\n"), arg)
-    inv = ssm_run(kr, script, "nago-peer " + op)
+    inv = ssm_run(kr, peer_script(req), "nago-peer " + op)
     lines = (inv.get("StandardOutputContent") or "").strip().splitlines()
     try:
         out = json.loads(lines[-1])
@@ -373,8 +470,6 @@ def peer_admin(req):
         raise ApiError(502, "server: " + (inv.get("StandardErrorContent") or inv["Status"])[:200])
     if not out.get("ok"):
         raise ApiError(400, out.get("error") or "failed")
-    if op == "add":
-        out["endpoint"] = "%s:%s" % (d["ip"], out.get("port", 51820))
     _cache.pop("live", None)   # 다음 조회에 바로 반영
     return out
 
@@ -473,6 +568,8 @@ def authorized(event):
 
 def handler(event, context):
     event = event or {}
+    if event.get("nago_internal") == "sync":   # 국가 Lambda가 직접 호출(API Gateway로는 이 모양이 안 옴)
+        return {"pushed": push_sync([event.get("node")] if event.get("node") else None)}
     if ((event.get("requestContext") or {}).get("http") or {}).get("method") == "POST":
         return handle_post(event)
     q = event.get("queryStringParameters") or {}
@@ -533,7 +630,7 @@ pre.term{margin:0;padding:14px 14px 18px;white-space:pre;overflow-x:auto;font:in
 <span class="p">$</span> nodes
 {{NODES}}
 
-<span class="p">$</span> wg show wg0 <span class="dim"># kr · since boot</span>
+<span class="p">$</span> wg show wg0 <span class="dim"># all nodes · since boot</span>
 {{PEERS}}
 
 <span class="p">$</span> cw netout --hourly --tz=KST <span class="dim"># all nodes</span>

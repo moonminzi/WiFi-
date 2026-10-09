@@ -3,8 +3,11 @@
 GET /region?r=<kr|jp|us|uk>  (헤더 x-nago-key: VPN 비밀번호)
 → 꺼져 있으면 켜고, {"state", "ready", "ip", "id"}를 돌려준다.
 앱은 ready가 true가 될 때까지 몇 초마다 다시 부르고, ip/id로 IKEv2 설정을 만든다.
+WireGuard용으로 그 서버의 공개키/포트(wgPub, wgPort)도 준다. 서버가 준비되면 대시보드 Lambda에
+피어 동기화를 부탁한다(꺼져 있는 동안 바뀐 피어 목록을 맞춤).
 """
 import datetime
+import time
 import hashlib
 import hmac
 import json
@@ -16,6 +19,9 @@ REGIONS = json.loads(os.environ["REGIONS"])
 KEY_SHA = os.environ["KEY_SHA256"]
 # 켜진 지 이만큼 지나면 SSM 확인 없이도 준비된 걸로 본다.
 BOOT_GRACE_SEC = 100
+WG_PORT = 443          # 서버에서 51820으로 넘겨 준다. 잘 안 막히는 포트
+DASH_FUNCTION = os.environ.get("DASH_FUNCTION", "nago-dash")
+_wg = {"t": 0, "v": {}}
 
 _clients = {}
 
@@ -33,6 +39,25 @@ def resp(code, body):
         "headers": {"content-type": "application/json; charset=utf-8", "cache-control": "no-store"},
         "body": json.dumps(body, ensure_ascii=False),
     }
+
+
+def wg_servers():
+    if time.time() - _wg["t"] > 300:
+        try:
+            value = client("ssm", "ap-northeast-2").get_parameter(Name="/nago/wg/servers")["Parameter"]["Value"]
+            _wg.update(t=time.time(), v=json.loads(value))
+        except Exception:
+            pass
+    return _wg["v"]
+
+
+def request_sync(code):
+    try:
+        client("lambda", "ap-northeast-2").invoke(
+            FunctionName=DASH_FUNCTION, InvocationType="Event",
+            Payload=json.dumps({"nago_internal": "sync", "node": code}).encode())
+    except Exception:
+        pass
 
 
 def is_ready(cfg, inst):
@@ -69,10 +94,14 @@ def handler(event, context):
         state = "pending"
 
     ready = state == "running" and is_ready(cfg, inst)
+    if ready:
+        request_sync(code)
     return resp(200, {
         "region": code,
         "state": state,
         "ready": ready,
         "ip": inst.get("PublicIpAddress") if state == "running" else None,
         "id": cfg["id"],
+        "wgPub": wg_servers().get(code, {}).get("pub"),
+        "wgPort": WG_PORT,
     })
