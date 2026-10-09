@@ -85,7 +85,9 @@ pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u3
         firewall_process_inbound_callback: None,
         firewall_process_outbound_callback: None,
         skt_buffer_size: None,
-        inter_thread_channel_size: None,
+        // 기본 500묶음(묶음당 최대 50패킷)이면 밀릴 때 채널 하나가 40MB까지 커진다.
+        // iOS 터널 확장은 메모리 50MB를 넘으면 강제 종료되므로 64묶음(약 5MB)으로 묶어 둔다.
+        inter_thread_channel_size: Some(64),
         max_inter_thread_batched_pkts: None,
     };
     let handle = match DeviceHandle::new_with_tun(tun, config) {

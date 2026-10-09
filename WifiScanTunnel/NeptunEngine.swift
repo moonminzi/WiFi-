@@ -28,8 +28,9 @@ final class NeptunEngine {
 
 
             """
-        // 아이폰은 고성능 코어 2개 + 효율 코어 4개. 이벤트 루프를 코어 수에 맞추되 4개까지.
-        let threads = UInt32(min(max(ProcessInfo.processInfo.activeProcessorCount, 2), 4))
+        // NordVPN(libtelio)과 같은 설정: 애플 기기에선 이벤트 루프 1개(성능 코어 하나)가 가장 빠르다.
+        // 암호화/전송은 엔진의 작업 스레드들이 코어 수만큼 나눠 한다.
+        let threads: UInt32 = 1
         guard let handle = uapi.withCString({ nago_tun_start(tunFD, $0, threads) }) else {
             throw NSError(domain: "nago.neptun", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "neptun: \(Self.lastError())"])
@@ -53,12 +54,15 @@ final class NeptunEngine {
     }
 
     func stop() {
-        monitor?.cancel()
-        monitor = nil
-        if let tun {
-            nago_tun_stop(tun)
+        // 네트워크 전환 처리(queue)와 겹치면 해제된 엔진을 건드릴 수 있어서 같은 큐에서 멈춘다.
+        queue.sync {
+            monitor?.cancel()
+            monitor = nil
+            if let tun {
+                nago_tun_stop(tun)
+            }
+            tun = nil
         }
-        tun = nil
     }
 
     private static func lastError() -> String {
