@@ -26,6 +26,9 @@ import java.security.cert.X509Certificate
  * "접속은 IP로, 인증서 확인은 FQDN으로" 한다(Android 13+).
  */
 object NagoVpn {
+    /** 이 IKE ID로 접속하면 서버가 광고·추적 차단 DNS(10.53.53.53)를 준다. 비밀번호 확인은 그대로 사용자 이름. */
+    const val ADBLOCK_ID = "adblock.nago"
+
     /** 서버 인증서를 서명한 CA. 앱에 들어 있어서 기기에 CA를 설치할 필요가 없다. */
     fun caCert(context: Context): X509Certificate =
         context.resources.openRawResource(R.raw.nago_ca).use {
@@ -38,7 +41,7 @@ object NagoVpn {
         else IkeFqdnIdentification(id)
     }
 
-    fun profile(context: Context, target: Target, user: String, password: String): Ikev2VpnProfile {
+    fun profile(context: Context, target: Target, user: String, password: String, adblock: Boolean): Ikev2VpnProfile {
         // IKE(제어용): 서버 제안 aes256-sha256-modp2048과 맞춘다(안드로이드 IKE는 ECP 그룹이 없음).
         val ikeSa = IkeSaProposal.Builder()
             .addEncryptionAlgorithm(SaProposal.ENCRYPTION_ALGORITHM_AES_CBC, SaProposal.KEY_LEN_AES_256)
@@ -55,7 +58,7 @@ object NagoVpn {
         val ike = IkeSessionParams.Builder()
             .setServerHostname(target.address)
             .setRemoteIdentification(identification(target.identifier))
-            .setLocalIdentification(IkeFqdnIdentification(user))
+            .setLocalIdentification(IkeFqdnIdentification(if (adblock) ADBLOCK_ID else user))
             .setAuthEap(caCert(context), eap)
             .addIkeSaProposal(ikeSa)
             .build()

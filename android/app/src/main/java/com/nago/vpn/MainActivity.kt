@@ -28,6 +28,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -59,7 +60,7 @@ class MainActivity : ComponentActivity() {
             .getOrNull()?.takeIf { it.isNotEmpty() }
     }
 
-    private suspend fun connect(region: VpnRegion, user: String, password: String, onPhase: (String?) -> Unit) {
+    private suspend fun connect(region: VpnRegion, user: String, password: String, adblock: Boolean, onPhase: (String?) -> Unit) {
         onPhase("${region.name}: checking server…")
         val target = try {
             RegionApi.waitUntilReady(region, password) { onPhase(it) }
@@ -73,7 +74,7 @@ class MainActivity : ComponentActivity() {
             delay(5_000)
         }
         onPhase("${region.name}: connecting ${target.address}")
-        val profile = NagoVpn.profile(this, target, user, password)
+        val profile = NagoVpn.profile(this, target, user, password, adblock)
         vpnManager.provisionVpnProfile(profile)?.let { intent ->
             val waiter = CompletableDeferred<Boolean>().also { consent = it }
             consentLauncher.launch(intent)
@@ -91,6 +92,7 @@ class MainActivity : ComponentActivity() {
         var region by remember { mutableStateOf(VpnRegion.valueOf(prefs.getString("region", "kr") ?: "kr")) }
         var user by remember { mutableStateOf(prefs.getString("user", "wifiscan") ?: "wifiscan") }
         var password by remember { mutableStateOf(prefs.getString("pw", "") ?: "") }
+        var adblock by remember { mutableStateOf(prefs.getBoolean("adblock", false)) }
         var busy by remember { mutableStateOf(false) }
         var phase by remember { mutableStateOf<String?>(null) }
         var error by remember { mutableStateOf<String?>(null) }
@@ -165,6 +167,21 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            TermBlock("dns") {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("--adblock", style = Term.mono(15.sp, color = Term.muted))
+                    TermChoice(
+                        options = listOf("off" to false, "on" to true),
+                        selected = adblock,
+                        enabled = !busy && !active,
+                    ) {
+                        adblock = it
+                        prefs.edit().putBoolean("adblock", it).apply()
+                    }
+                }
+                Text("# ads · trackers blocked by server dns", style = Term.mono(12.sp, color = Term.muted))
+            }
+
             TermButton(
                 label = when {
                     busy -> "working…"
@@ -187,7 +204,7 @@ class MainActivity : ComponentActivity() {
                 busy = true
                 scope.launch {
                     try {
-                        connect(region, user.trim(), key) { phase = it }
+                        connect(region, user.trim(), key, adblock) { phase = it }
                     } catch (e: Exception) {
                         error = e.message ?: e.javaClass.simpleName
                     } finally {

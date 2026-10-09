@@ -16,6 +16,13 @@
 - **비밀번호 내장(선택)**: 레포가 공개라 소스에는 넣지 않는다. 전달용 IPA에만 빌드 후 `Info.plist`에 `NAGOPresetPassword`를 넣으면 입력 칸 없이 연결된다(없으면 입력 칸이 보이고 키체인에 저장)
 - **빠른 모드** 토글(기본 켜짐): 서버 제안(`aes256gcm16`/`ecp256`)에 맞춘 AES-256-GCM + PFS, 터널 MTU 1400(iOS 기본 1280)으로 연결. 하드웨어 AES로 처리돼 iOS 기본값(AES-CBC + HMAC)보다 가볍다. 연결이 안 되면 끄면 기본값으로 돌아감
 
+## --adblock (광고·추적 차단, IKEv2 앱 전용)
+
+- vpn 탭(iOS)·안드로이드 앱의 `--adblock`을 켜고 연결하면 서버 DNS(10.53.53.53)가 광고·추적 도메인을 막는다
+- 서버: `server/adblock/setup-adblock.sh` (dnsmasq + OISD big + YousList, 매일 갱신). 모든 서버(kr/jp/us/uk)에 설치됨
+- 구분 방법: IKE ID를 `adblock.nago`로 보내면 strongSwan이 `ikev2-adblock` 연결을 골라 차단 DNS를 준다. 비밀번호 확인(EAP)은 그대로 사용자 이름
+- WireGuard와 보통 연결은 그대로 1.1.1.1. 잘못 막힌 사이트는 서버의 `/etc/nago-dns/allow.conf`에 `server=/도메인/1.1.1.1`
+
 ## dash 탭 (통합 대시보드)
 
 - 서버 쪽 Lambda(`server/dashboard/index.py`)가 모든 리전을 모아 JSON으로 준다. 브라우저용 HTML 사이트도 같은 Lambda가 만든다(`?t=<토큰>`)

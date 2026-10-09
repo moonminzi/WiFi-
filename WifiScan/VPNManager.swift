@@ -45,14 +45,16 @@ final class VPNManager {
     /// - Parameters:
     ///   - server: 접속할 주소(IP).
     ///   - remoteIdentifier: 서버 인증서의 SAN과 같아야 하는 ID. 한국 서버는 IP, 해외 서버는 FQDN.
+    ///   - adblock: IKE ID를 adblock.nago로 보내면 서버가 광고·추적 차단 DNS(10.53.53.53)를 준다.
+    ///     비밀번호 확인(EAP)은 그대로 사용자 이름으로 한다.
     func save(server: String, remoteIdentifier: String, username: String, password: String,
-              fastMode: Bool) async throws {
+              fastMode: Bool, adblock: Bool) async throws {
         try await manager.loadFromPreferences()
 
         let proto = NEVPNProtocolIKEv2()
         proto.serverAddress = server
         proto.remoteIdentifier = remoteIdentifier
-        proto.localIdentifier = username
+        proto.localIdentifier = adblock ? VPNPreset.adblockIdentity : username
         proto.authenticationMethod = .none          // EAP(사용자 이름/비밀번호)
         proto.useExtendedAuthentication = true
         proto.username = username
@@ -134,6 +136,9 @@ enum VPNPreset {
     }
 
     /// 서버 API(국가 선택, 대시보드)에 쓸 비밀번호: 내장 값 → 키체인 순.
+    /// 이 IKE ID로 접속하면 서버가 광고 차단 DNS를 준다(server/adblock/setup-adblock.sh)
+    static let adblockIdentity = "adblock.nago"
+
     static func key(username: String) -> String? {
         if let preset = password { return preset }
         let user = username.trimmingCharacters(in: .whitespacesAndNewlines)

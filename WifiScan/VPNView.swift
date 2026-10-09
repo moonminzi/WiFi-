@@ -12,6 +12,7 @@ struct VPNView: View {
     @AppStorage("vpnSavedRegion") private var savedRegion: VPNRegion = .kr
     @AppStorage("vpnUsername") private var username = "wifiscan"
     @AppStorage("vpnFastMode") private var fastMode = true
+    @AppStorage("vpnAdblock") private var adblock = false
     @State private var password = ""
 
     @State private var busy = false
@@ -33,6 +34,19 @@ struct VPNView: View {
                         .font(Term.mono(13))
                         .foregroundStyle(Term.muted)
                     Text("aes-256-gcm · pfs · mtu 1400")
+                        .font(Term.mono(11))
+                        .foregroundStyle(Term.muted.opacity(0.6))
+                }
+            }
+            .tint(Term.green)
+            .disabled(busy || vpn.status.isActive)
+
+            Toggle(isOn: $adblock) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("--adblock")
+                        .font(Term.mono(13))
+                        .foregroundStyle(Term.muted)
+                    Text("ads · trackers blocked by server dns")
                         .font(Term.mono(11))
                         .foregroundStyle(Term.muted.opacity(0.6))
                 }
@@ -189,7 +203,7 @@ struct VPNView: View {
             }
             phase = "\(region.rawValue): connecting \(target.address)"
             try await vpn.save(server: target.address, remoteIdentifier: target.identifier,
-                               username: user, password: key, fastMode: fastMode)
+                               username: user, password: key, fastMode: fastMode, adblock: adblock)
             savedRegion = region
             try vpn.connect()
         } catch {

@@ -19,8 +19,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan   # ← 본인 것으로 변경
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "1.4"
-        CURRENT_PROJECT_VERSION: "5"
+        MARKETING_VERSION: "1.5"
+        CURRENT_PROJECT_VERSION: "6"
     entitlements:
       path: WifiScan/WifiScan.entitlements
       properties:

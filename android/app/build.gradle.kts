@@ -13,8 +13,8 @@ android {
         // IkeTunnelConnectionParams로 IKEv2 프로필을 만들려면 Android 13(API 33) 이상이 필요하다.
         minSdk = 33
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
     // 전달용 서명: 환경변수로 키스토어를 주면 release를 서명한다(키스토어는 레포에 두지 않음).
