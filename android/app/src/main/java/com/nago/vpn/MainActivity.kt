@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.net.VpnManager
 import android.net.VpnProfileState
+import android.net.VpnService
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -33,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.wireguard.android.backend.Tunnel
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -60,7 +62,9 @@ class MainActivity : ComponentActivity() {
             .getOrNull()?.takeIf { it.isNotEmpty() }
     }
 
-    private suspend fun connect(region: VpnRegion, user: String, password: String, adblock: Boolean, onPhase: (String?) -> Unit) {
+    private suspend fun connect(
+        region: VpnRegion, user: String, password: String, adblock: Boolean, proto: VpnProto, onPhase: (String?) -> Unit,
+    ) {
         onPhase("${region.name}: checking server…")
         val target = try {
             RegionApi.waitUntilReady(region, password) { onPhase(it) }
@@ -73,17 +77,69 @@ class MainActivity : ComponentActivity() {
             onPhase("${region.name}: up, waiting for ike…")
             delay(5_000)
         }
-        onPhase("${region.name}: connecting ${target.address}")
+        when (proto) {
+            VpnProto.ikev2 -> connectIke(region, target, user, password, adblock, onPhase)
+            VpnProto.wg -> connectWg(region, target, user, password, adblock, onPhase)
+            VpnProto.auto -> {
+                connectIke(region, target, user, password, adblock, onPhase)
+                onPhase("${region.name}: ikev2 handshake…")
+                if (!waitForIke(12_000)) {
+                    vpnManager.stopProvisionedVpnProfile()
+                    onPhase("${region.name}: ikev2 blocked here → wireguard")
+                    delay(1_000)
+                    connectWg(region, target, user, password, adblock, onPhase)
+                }
+            }
+        }
+        prefs.edit().putString("savedRegion", region.name).apply()
+    }
+
+    private suspend fun askConsent(intent: android.content.Intent) {
+        val waiter = CompletableDeferred<Boolean>().also { consent = it }
+        consentLauncher.launch(intent)
+        if (!waiter.await()) throw IllegalStateException("vpn permission denied")
+    }
+
+    private suspend fun connectIke(
+        region: VpnRegion, target: Target, user: String, password: String, adblock: Boolean, onPhase: (String?) -> Unit,
+    ) {
+        WgVpn.down(this)
+        onPhase("${region.name}: ikev2 → ${target.address}")
         val profile = NagoVpn.profile(this, target, user, password, adblock)
         vpnManager.provisionVpnProfile(profile)?.let { intent ->
-            val waiter = CompletableDeferred<Boolean>().also { consent = it }
-            consentLauncher.launch(intent)
-            if (!waiter.await()) throw IllegalStateException("vpn permission denied")
+            askConsent(intent)
             vpnManager.provisionVpnProfile(profile)
         }
         VpnEvents.lastEvent.value = null
         vpnManager.startProvisionedVpnProfileSession()
-        prefs.edit().putString("savedRegion", region.name).apply()
+    }
+
+    /** IKEv2가 연결될 때까지 기다린다. 시간 안에 안 되거나 실패하면 false. */
+    private suspend fun waitForIke(timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            when (runCatching { vpnManager.provisionedVpnProfileState?.state }.getOrNull()) {
+                VpnProfileState.STATE_CONNECTED -> return true
+                VpnProfileState.STATE_FAILED -> return false
+            }
+            delay(400)
+        }
+        return false
+    }
+
+    /** 이 폰의 WireGuard 키를 (처음이면) 서버에 등록하고, 고른 국가 서버로 터널을 연다. */
+    private suspend fun connectWg(
+        region: VpnRegion, target: Target, user: String, password: String, adblock: Boolean, onPhase: (String?) -> Unit,
+    ) {
+        vpnManager.stopProvisionedVpnProfile()
+        VpnService.prepare(this)?.let { askConsent(it) }
+        onPhase("${region.name}: wireguard key…")
+        val reg = WgVpn.registration(prefs, password, "$user android app")
+        val serverPub = target.wgPub ?: reg.servers[region.name]
+            ?: throw IllegalStateException("no wireguard key for ${region.name}")
+        val endpoint = "${target.address}:${target.wgPort}"
+        onPhase("${region.name}: wireguard → $endpoint")
+        WgVpn.up(this, WgVpn.config(reg, serverPub, endpoint, adblock))
     }
 
     @Composable
@@ -93,6 +149,10 @@ class MainActivity : ComponentActivity() {
         var user by remember { mutableStateOf(prefs.getString("user", "wifiscan") ?: "wifiscan") }
         var password by remember { mutableStateOf(prefs.getString("pw", "") ?: "") }
         var adblock by remember { mutableStateOf(prefs.getBoolean("adblock", false)) }
+        var proto by remember {
+            mutableStateOf(runCatching { VpnProto.valueOf(prefs.getString("proto", "auto") ?: "auto") }.getOrDefault(VpnProto.auto))
+        }
+        val wgState by WgVpn.state.collectAsState()
         var busy by remember { mutableStateOf(false) }
         var phase by remember { mutableStateOf<String?>(null) }
         var error by remember { mutableStateOf<String?>(null) }
@@ -108,7 +168,8 @@ class MainActivity : ComponentActivity() {
         }
 
         val s = state?.state
-        val active = s == VpnProfileState.STATE_CONNECTED || s == VpnProfileState.STATE_CONNECTING
+        val wgUp = wgState == Tunnel.State.UP
+        val active = wgUp || s == VpnProfileState.STATE_CONNECTED || s == VpnProfileState.STATE_CONNECTING
         val savedRegion = prefs.getString("savedRegion", "kr") ?: "kr"
 
         Column(
@@ -124,8 +185,8 @@ class MainActivity : ComponentActivity() {
             TermHeader("vpn")
 
             TermBlock("status") {
-                val (tag, color, text) = when (s) {
-                    VpnProfileState.STATE_CONNECTED -> Triple("[ OK ]", Term.green, "up → $savedRegion")
+                val (tag, color, text) = if (wgUp) Triple("[ OK ]", Term.green, "up → $savedRegion · wg") else when (s) {
+                    VpnProfileState.STATE_CONNECTED -> Triple("[ OK ]", Term.green, "up → $savedRegion · ikev2")
                     VpnProfileState.STATE_CONNECTING -> Triple("[ .. ]", Term.amber, "connecting")
                     VpnProfileState.STATE_FAILED -> Triple("[FAIL]", Term.red, "failed")
                     VpnProfileState.STATE_DISCONNECTED -> Triple("[DOWN]", Term.muted, "disconnected")
@@ -133,7 +194,7 @@ class MainActivity : ComponentActivity() {
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(tag, style = Term.mono(14.sp, FontWeight.SemiBold, color))
-                    Text(text, style = Term.mono(14.sp, FontWeight.SemiBold, if (s == VpnProfileState.STATE_CONNECTED) Term.text else Term.muted))
+                    Text(text, style = Term.mono(14.sp, FontWeight.SemiBold, if (wgUp || s == VpnProfileState.STATE_CONNECTED) Term.text else Term.muted))
                 }
                 when {
                     phase != null -> StatusLine('>', phase!!)
@@ -167,6 +228,18 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            TermBlock("protocol") {
+                TermChoice(
+                    options = VpnProto.entries.map { it.label to it },
+                    selected = proto,
+                    enabled = !busy && !active,
+                ) {
+                    proto = it
+                    prefs.edit().putString("proto", it.name).apply()
+                }
+                Text(proto.detail, style = Term.mono(12.sp, color = Term.muted))
+            }
+
             TermBlock("dns") {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("--adblock", style = Term.mono(15.sp, color = Term.muted))
@@ -194,6 +267,7 @@ class MainActivity : ComponentActivity() {
                 error = null
                 if (active) {
                     vpnManager.stopProvisionedVpnProfile()
+                    scope.launch { WgVpn.down(this@MainActivity) }
                     return@TermButton
                 }
                 val key = preset ?: password
@@ -204,7 +278,7 @@ class MainActivity : ComponentActivity() {
                 busy = true
                 scope.launch {
                     try {
-                        connect(region, user.trim(), key, adblock) { phase = it }
+                        connect(region, user.trim(), key, adblock, proto) { phase = it }
                     } catch (e: Exception) {
                         error = e.message ?: e.javaClass.simpleName
                     } finally {
@@ -216,6 +290,7 @@ class MainActivity : ComponentActivity() {
 
             TermBlock("notes") {
                 Text("# ikev2 · aes-256-gcm · ca built in", style = Term.mono(12.sp, color = Term.muted))
+                Text("# wireguard · own key per phone, registered on first use", style = Term.mono(12.sp, color = Term.muted))
                 Text("# jp/us/uk boot on connect (1-2 min), stop after 30m idle", style = Term.mono(12.sp, color = Term.muted))
                 Text("# android 13+", style = Term.mono(12.sp, color = Term.muted))
             }

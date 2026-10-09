@@ -19,8 +19,17 @@ enum class VpnRegion(val detail: String) {
         get() = if (this == kr) Target("3.38.243.135", "3.38.243.135", justBooted = false) else null
 }
 
-/** 접속할 서버. [identifier]는 서버 인증서의 ID(한국은 IP, 해외는 jp.nago.vpn 같은 FQDN). */
-data class Target(val address: String, val identifier: String, val justBooted: Boolean)
+/**
+ * 접속할 서버. [identifier]는 서버 인증서의 ID(한국은 IP, 해외는 jp.nago.vpn 같은 FQDN).
+ * [wgPub]/[wgPort]는 그 서버의 WireGuard 공개키와 포트(443 → 서버에서 51820으로).
+ */
+data class Target(
+    val address: String,
+    val identifier: String,
+    val justBooted: Boolean,
+    val wgPub: String? = null,
+    val wgPort: Int = 443,
+)
 
 sealed class ApiError(message: String) : Exception(message) {
     object Forbidden : ApiError("403 forbidden: wrong password")
@@ -32,7 +41,10 @@ sealed class ApiError(message: String) : Exception(message) {
 object RegionApi {
     private const val ENDPOINT = "https://wqzk1bnms3.execute-api.ap-northeast-2.amazonaws.com/region"
 
-    private class Status(val state: String, val ready: Boolean, val ip: String?, val id: String)
+    private class Status(
+        val state: String, val ready: Boolean, val ip: String?, val id: String,
+        val wgPub: String?, val wgPort: Int,
+    )
 
     private suspend fun status(region: VpnRegion, key: String): Status = withContext(Dispatchers.IO) {
         val conn = URL("$ENDPOINT?r=${region.name}").openConnection() as HttpURLConnection
@@ -49,6 +61,8 @@ object RegionApi {
                 ready = json.getBoolean("ready"),
                 ip = if (json.isNull("ip")) null else json.getString("ip"),
                 id = json.getString("id"),
+                wgPub = if (json.isNull("wgPub")) null else json.optString("wgPub").takeIf { it.isNotEmpty() },
+                wgPort = json.optInt("wgPort", 443),
             )
         } finally {
             conn.disconnect()
@@ -67,7 +81,7 @@ object RegionApi {
         while (true) {
             try {
                 val s = status(region, key)
-                if (s.ready && s.ip != null) return Target(s.ip, s.id, justBooted = waited)
+                if (s.ready && s.ip != null) return Target(s.ip, s.id, waited, s.wgPub, s.wgPort)
                 lastError = null
                 progress(
                     if (s.state == "stopping") "${region.name}: stopping, will restart…"
