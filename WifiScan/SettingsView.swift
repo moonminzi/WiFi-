@@ -26,6 +26,8 @@ struct SettingsView: View {
     @AppStorage(UnicornSettings.Key.resolver) private var uniResolver: UnicornSettings.Resolver = .cloudflare
 
     @State private var password = ""
+    /// 키체인에 비밀번호가 들어 있는지. 들어 있으면 입력칸 대신 ●●●● 로 보여 준다.
+    @State private var savedPassword = false
     @State private var showLogs = false
 
     private let preset = VPNPreset.password
@@ -55,7 +57,11 @@ struct SettingsView: View {
             logsBlock
             aboutBlock
         }
-        .task { await vpn.reload() }
+        .task {
+            await vpn.reload()
+            savedPassword = hasKeychainPassword
+        }
+        .onChange(of: username) { _, _ in savedPassword = hasKeychainPassword }
         .onChange(of: forcedWG) { _, forced in
             if forced { proto = .wireguard }
         }
@@ -72,13 +78,22 @@ struct SettingsView: View {
         TermBlock(label: "account") {
             TermField(key: "user", text: $username, placeholder: "wifiscan")
             TermDivider()
-            if preset != nil {
+            if preset != nil || savedPassword {
                 HStack(spacing: 10) {
                     Text("pw")
                         .foregroundStyle(Term.muted)
                         .frame(width: 56, alignment: .leading)
                     Text("••••••••")
                         .foregroundStyle(Term.muted)
+                    Text(preset != nil ? "built-in" : "keychain")
+                        .font(Term.mono(11))
+                        .foregroundStyle(Term.muted)
+                    Spacer()
+                    // 내장 비밀번호는 못 바꾸지만, 키체인에 넣은 건 다시 입력할 수 있게 둔다.
+                    if preset == nil {
+                        Button("change") { savedPassword = false }
+                            .buttonStyle(.term)
+                    }
                 }
                 .font(Term.mono(15))
             } else {
@@ -246,12 +261,19 @@ struct SettingsView: View {
         customDNS.trimmingCharacters(in: .whitespaces).isEmpty || DNSList.parse(customDNS) != nil
     }
 
+    private var hasKeychainPassword: Bool {
+        let user = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !user.isEmpty else { return false }
+        return KeychainHelper.read(account: user)?.isEmpty == false
+    }
+
     /// 내장 비밀번호가 없는 IPA에서 입력한 비밀번호를 키체인에 둔다(연결 때 VPNPreset.key가 읽음).
     private func savePassword() {
         let user = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard preset == nil, !password.isEmpty, !user.isEmpty else { return }
         _ = try? KeychainHelper.store(password: password, account: user)
         password = ""
+        savedPassword = true
     }
 
     private static var version: String {
