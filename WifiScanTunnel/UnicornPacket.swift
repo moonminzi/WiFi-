@@ -264,10 +264,13 @@ struct TCPSegment {
     func serialized(source: IPAddr, destination: IPAddr) -> [UInt8] {
         var options: [UInt8] = []
         if let mss = maximumSegmentSize {
-            options += [2, 4]
+            options += [2, 4]           // kind 2, 길이 4 — 이것만으로 딱 4바이트다
             appendBE(&options, mss)
-            options += [0, 0]   // 4바이트 경계 맞추기(End of options + padding)
         }
+        // TCP 헤더는 4바이트의 배수여야 하고, 헤더 길이 필드도 4로 나눈 값이다.
+        // 옵션 길이가 어긋나면 End of Option List(0)로 채운다. 안 맞추면 헤더 길이가
+        // 실제보다 작게 들어가고, 남은 옵션 바이트가 데이터로 읽혀 스트림이 깨진다.
+        while options.count % 4 != 0 { options.append(0) }
 
         var header: [UInt8] = []
         appendBE(&header, sourcePort)

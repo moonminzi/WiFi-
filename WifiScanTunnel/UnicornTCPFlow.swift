@@ -55,7 +55,10 @@ final class UnicornTCPFlow {
     private let onClose: (Key) -> Void
     private let onFragment: (String?) -> Void
 
-    private let maximumSegment: Int
+    /// 우리가 한 번에 받을 수 있다고 단말에 알리는 크기(SYN/ACK의 MSS 옵션)
+    private let receiveSegment: Int
+    /// 단말로 보낼 때 쓰는 크기. 단말이 더 작은 MSS를 알려 주면 그걸 따른다.
+    private var sendSegment: Int
 
     // 단말 쪽 TCP 상태
     private var initialSendSequence: UInt32 = 0
@@ -103,7 +106,9 @@ final class UnicornTCPFlow {
         self.emit = emit
         self.onFragment = onFragment
         self.onClose = onClose
-        self.maximumSegment = key.source.isIPv6 ? 1440 : 1460
+        // MTU 1500에서 헤더(IP 20/40 + TCP 20)를 뺀 값
+        self.receiveSegment = key.source.isIPv6 ? 1440 : 1460
+        self.sendSegment = key.source.isIPv6 ? 1440 : 1460
         self.watchingHello =
             settings.strategy != .off && (settings.allPorts || key.destinationPort == 443)
     }
@@ -129,10 +134,13 @@ final class UnicornTCPFlow {
                 handshakeDone = true
                 startUpstream()
             }
+            if let peer = segment.maximumSegmentSize, peer >= 536 {
+                sendSegment = min(sendSegment, Int(peer))
+            }
             // 재전송된 SYN에도 같은 SYN/ACK로 답한다.
             emitSegment(
                 flags: [.syn, .ack], sequence: initialSendSequence, payload: [],
-                mss: UInt16(maximumSegment)
+                mss: UInt16(receiveSegment)
             )
             return
         }
@@ -337,7 +345,7 @@ final class UnicornTCPFlow {
             let inFlight = Int(sendNext &- sendUnacked)
             let room = Int(clientWindow) - inFlight
             guard room > 0 else { break }
-            let count = min(room, maximumSegment, toClient.count)
+            let count = min(room, sendSegment, toClient.count)
             emitSegment(flags: [.ack, .psh], sequence: sendNext, payload: Array(toClient[0..<count]))
             sendNext = sendNext &+ UInt32(count)
             toClient.removeFirst(count)
