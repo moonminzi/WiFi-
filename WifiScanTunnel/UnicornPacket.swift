@@ -42,6 +42,19 @@ struct IPAddr: Hashable, CustomStringConvertible {
 
     var isIPv6: Bool { bytes.count == 16 }
 
+    /// "1.1.1.1", "fd00::2" 같은 문자열에서 만든다.
+    static func parse(_ text: String) -> IPAddr? {
+        var v4 = in_addr()
+        if inet_pton(AF_INET, text, &v4) == 1 {
+            return IPAddr(withUnsafeBytes(of: v4.s_addr) { [UInt8]($0) })
+        }
+        var v6 = in6_addr()
+        if inet_pton(AF_INET6, text, &v6) == 1 {
+            return IPAddr(withUnsafeBytes(of: v6) { [UInt8]($0) })
+        }
+        return nil
+    }
+
     var description: String {
         if bytes.count == 4 {
             return bytes.map(String.init).joined(separator: ".")

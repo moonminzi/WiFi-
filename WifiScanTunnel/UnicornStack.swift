@@ -22,6 +22,11 @@ final class UnicornStack {
     private let resolver: UnicornDoH
     private let counters = Counters()
 
+    /// 터널 설정에서 단말에 알려 준 가짜 DNS 주소
+    private let sentinelDNS: [IPAddr]
+    /// DoH가 막혔을 때 쓰는 실제 DNS 서버
+    private let plainDNS: IPAddr?
+
     private var tcpFlows: [UnicornTCPFlow.Key: UnicornTCPFlow] = [:]
     private var udpFlows: [UnicornUDPFlow.Key: UnicornUDPFlow] = [:]
     private var reaper: DispatchSourceTimer?
@@ -42,6 +47,9 @@ final class UnicornStack {
         self.queue = queue
         self.log = log
         self.write = write
+        self.sentinelDNS = [UnicornSettings.Tunnel.dnsIPv4, UnicornSettings.Tunnel.dnsIPv6]
+            .compactMap(IPAddr.parse)
+        self.plainDNS = IPAddr.parse(settings.plainDNSAddress)
         self.resolver = UnicornDoH(settings: settings, queue: queue)
         self.resolver.onFailure = { [weak self] reason in self?.noteDoHFailure(reason) }
         startReaper()
@@ -83,8 +91,20 @@ final class UnicornStack {
             return
         }
 
+        // 응답이 잘리면 단말이 DNS를 TCP로 다시 물어본다. 우리가 알려 준 가짜 DNS 주소로는
+        // 아무도 답하지 않으니 실제 DNS 서버로 보낸다.
+        var connectTo: IPAddr?
+        if segment.destinationPort == 53, sentinelDNS.contains(datagram.destination) {
+            guard let plainDNS else {
+                sendReset(for: datagram, segment)
+                return
+            }
+            connectTo = plainDNS
+        }
+
         let flow = UnicornTCPFlow(
             key: key,
+            connectTo: connectTo,
             settings: settings,
             queue: queue,
             emit: { [weak self] packet, family in self?.write([packet], [family]) },

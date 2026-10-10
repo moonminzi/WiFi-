@@ -45,6 +45,10 @@ final class UnicornTCPFlow {
     let key: Key
     private(set) var lastActivity = Date()
 
+    /// 실제로 연결할 주소. 보통 key.destination과 같지만, 우리가 알려 준 가짜 DNS 주소로
+    /// 들어온 TCP 질의는 실제 DNS 서버로 보낸다(단말에는 계속 가짜 주소에서 온 것처럼 보인다).
+    private let upstreamAddress: IPAddr
+
     private let settings: UnicornSettings
     private let queue: DispatchQueue
     private let emit: (Data, NSNumber) -> Void
@@ -85,6 +89,7 @@ final class UnicornTCPFlow {
 
     init(
         key: Key,
+        connectTo: IPAddr? = nil,
         settings: UnicornSettings,
         queue: DispatchQueue,
         emit: @escaping (Data, NSNumber) -> Void,
@@ -92,6 +97,7 @@ final class UnicornTCPFlow {
         onClose: @escaping (Key) -> Void
     ) {
         self.key = key
+        self.upstreamAddress = connectTo ?? key.destination
         self.settings = settings
         self.queue = queue
         self.emit = emit
@@ -227,7 +233,7 @@ final class UnicornTCPFlow {
     }
 
     private func startUpstream() {
-        guard let host = key.destination.networkHost,
+        guard let host = upstreamAddress.networkHost,
               let port = NWEndpoint.Port(rawValue: key.destinationPort)
         else {
             teardown(sendReset: true)

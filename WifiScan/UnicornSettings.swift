@@ -144,6 +144,18 @@ struct UnicornSettings: Codable, Equatable {
 
     // MARK: - 확장으로 넘기기
 
+    /// 터널 안에서만 쓰는 주소. 실제로 쓰이지 않는 벤치마크 대역(198.18/15)과
+    /// 사설 IPv6에서 골랐다. DNS 주소는 질의를 터널로 끌어오기 위한 가짜 주소이고,
+    /// 응답은 UnicornDoH가 만들어 돌려준다.
+    enum Tunnel {
+        static let ipv4 = "198.18.0.1"
+        static let ipv4Mask = "255.255.255.0"
+        static let dnsIPv4 = "198.18.0.2"
+        static let ipv6 = "fd6e:a1c0:fe0d::1"
+        static let ipv6Prefix = 64
+        static let dnsIPv6 = "fd6e:a1c0:fe0d::2"
+    }
+
     /// providerConfiguration에서 쓰는 키
     static let configurationKey = "unicorn"
     /// providerConfiguration["mode"]가 이 값이면 WireGuard 대신 유니콘 HTTPS로 뜬다

@@ -208,7 +208,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let network = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
         network.mtu = 1500
 
-        let v4 = NEIPv4Settings(addresses: ["198.18.0.1"], subnetMasks: ["255.255.255.0"])
+        let v4 = NEIPv4Settings(addresses: [UnicornSettings.Tunnel.ipv4],
+                                subnetMasks: [UnicornSettings.Tunnel.ipv4Mask])
         v4.includedRoutes = [NEIPv4Route.default()]
         var excluded: [NEIPv4Route] = [
             NEIPv4Route(destinationAddress: "10.0.0.0", subnetMask: "255.0.0.0"),
@@ -226,7 +227,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         network.ipv4Settings = v4
 
         if s.handleIPv6 {
-            let v6 = NEIPv6Settings(addresses: ["fd6e:a1c0:fe0d::1"], networkPrefixLengths: [64])
+            let v6 = NEIPv6Settings(addresses: [UnicornSettings.Tunnel.ipv6],
+                                    networkPrefixLengths: [NSNumber(value: UnicornSettings.Tunnel.ipv6Prefix)])
             v6.includedRoutes = [NEIPv6Route.default()]
             v6.excludedRoutes = [
                 NEIPv6Route(destinationAddress: "fe80::", networkPrefixLength: 10),
@@ -235,8 +237,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             network.ipv6Settings = v6
         }
 
-        var servers = ["198.18.0.2"]
-        if s.handleIPv6 { servers.append("fd6e:a1c0:fe0d::2") }
+        var servers = [UnicornSettings.Tunnel.dnsIPv4]
+        if s.handleIPv6 { servers.append(UnicornSettings.Tunnel.dnsIPv6) }
         let dns = NEDNSSettings(servers: servers)
         dns.matchDomains = [""]     // 모든 도메인
         network.dnsSettings = dns
