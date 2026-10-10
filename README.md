@@ -16,17 +16,57 @@
 - **비밀번호 내장(선택)**: 레포가 공개라 소스에는 넣지 않는다. 전달용 IPA에만 빌드 후 `Info.plist`에 `NAGOPresetPassword`를 넣으면 입력 칸 없이 연결된다(없으면 입력 칸이 보이고 키체인에 저장)
 - **빠른 모드** 토글(기본 켜짐): 서버 제안(`aes256gcm16`/`ecp256`)에 맞춘 AES-256-GCM + PFS, 터널 MTU 1400(iOS 기본 1280)으로 연결. 하드웨어 AES로 처리돼 iOS 기본값(AES-CBC + HMAC)보다 가볍다. 연결이 안 되면 끄면 기본값으로 돌아감
 
-## protocol (auto / ikev2 / wg)
+## protocol (auto / ikev2 / wg / unicorn)
 
 - **ikev2**: 폰 내장 IKEv2(아이폰 NEVPNManager, 안드로이드 VpnManager). 폰에서 제일 빠름
 - **wg**: 앱 안 WireGuard(iOS는 WifiScanTunnel 확장 + WireGuardKit, 안드로이드는 wireguard-android). udp 443이라 IKEv2가 막힌 와이파이에서도 붙음
 - **auto**: IKEv2를 12초 기다려 안 붙으면 WireGuard로
+- **unicorn**(iOS): 서버로 안 나간다. SNI 차단만 우회한다 — 아래 참고
 - WireGuard 키는 폰에서 처음 한 번 만들고 공개키만 피어 목록(SSM 파라미터 `/nago/wg/peers`)에 등록. 서버 4대 모두 같은 목록으로 맞춰짐(`server/wireguard/setup-wg.sh`, `nago-peer sync`)
 - **wg engine**(iOS): `neptun`(기본) — NordVPN이 쓰는 Rust 엔진 NepTUN(BSD-3)을 `NagoTun/`(C 인터페이스)으로 감쌈. utun fd를 엔진 스레드가 직접 읽고 씀 / `go` — WireGuardKit(공식 WireGuard 앱과 같은 wireguard-go)
   - 리눅스 검증(서울→도쿄): NepTUN 다운 약 250~290Mbps, 커널 WireGuard 약 270Mbps로 같은 급. `NagoTun/examples/linux_tun.rs`로 서버에서 재현 가능
   - iOS 빌드 때 `NagoTunRust` 타깃이 `NagoTun/build-ios.sh`로 `cargo build --target aarch64-apple-ios`(Rust 필요)
 - iOS 빌드: `Vendor/WireGuardKit`(wireguard-apple 1.0.16-27, MIT, Xcode 16용 두 줄 수정) + Go 1.24로 libwg-go.a를 만드는 `WireGuardGoBridgeiOS` 타깃
 - 재서명할 때 확장(`.tunnel`)도 같이 서명돼야 하고, 두 App ID 모두 Network Extensions(packet tunnel) 권한이 필요
+
+## unicorn (SNI 차단 우회, iOS)
+
+HTTPS 접속 차단을 지나간다. 다른 프로토콜과 달리 **서버로 나가지 않는다**. 기기 안에서만 도는 터널을
+하나 만들고, 지나가는 트래픽 중 TLS 첫 패킷만 손봐서 평소 회선으로 그대로 내보낸다. 중계 서버가
+없으니 속도가 거의 그대로고, 트래픽이 어디에 남지도 않는다. 같은 터널 확장(`WifiScanTunnel`)을 쓰고
+`providerConfiguration["mode"]`가 `unicorn`이면 WireGuard 대신 이 스택이 뜬다.
+
+하는 일은 세 가지다.
+
+- **ClientHello 분할**: HTTPS 접속의 첫 패킷에는 접속할 도메인 이름(SNI)이 평문으로 들어 있고,
+  차단 장비는 이걸 읽고 연결을 끊는다. 그 이름 **글자 사이**를 끊어 여러 조각으로 나눠 보내면
+  한 덩어리로 보이지 않아 검사를 통과한다.
+  - `record`: TLS 레코드를 여러 개로 나눔(핸드셰이크 메시지가 여러 레코드에 걸쳐도 되는 건
+    TLS 규격에 있어서 서버가 그대로 받아 준다). 호환성이 가장 좋다
+  - `segment`: 레코드는 하나로 두고 TCP 패킷을 나눔(Nagle을 끄고 `send()` 사이를 4ms 띄운다)
+  - `both`(기본): 둘 다. `pieces`로 2~5조각까지
+- **암호화 DNS(DoH)**: SNI 차단은 DNS 변조와 같이 오는 경우가 많다. 질의를 Cloudflare/Google/Quad9에
+  HTTPS로 보내 응답이 바뀌는 걸 막는다(`doh` 선택, `off`면 settings의 custom dns로 평문 질의).
+  DoH가 막히면 두 번 시도한 뒤 평문 DNS로 떨어진다
+- **QUIC 차단**: HTTP/3(QUIC, UDP 443)은 암호화 방식이 달라 같은 수법을 쓸 수 없다. 기본으로 버리면
+  앱이 알아서 TLS over TCP로 내려오고, 그때 분할이 걸린다
+
+구현은 `WifiScanTunnel/Unicorn*.swift`. tun으로 들어온 IP 패킷을 직접 읽고
+([`UnicornPacket.swift`](WifiScanTunnel/UnicornPacket.swift)), TCP는 기기 안에서 끝낸 뒤
+([`UnicornTCPFlow.swift`](WifiScanTunnel/UnicornTCPFlow.swift)) 실제 목적지로는 `NWConnection`으로
+다시 연결한다. 내보내기 직전에 ClientHello를 쪼개는 건
+[`UnicornClientHello.swift`](WifiScanTunnel/UnicornClientHello.swift)가 한다.
+터널 반대쪽은 같은 기기의 TCP 스택이라 패킷이 사라지지 않으니, 재전송 큐 없이 순서가 맞는 세그먼트만
+받아 바로 ACK하고 윈도만 지킨다. 확장이 만드는 연결은 모두 `prohibitedInterfaceTypes = [.other]`로
+자기 터널을 피하고, DoH 서버 IP는 경로에서 빼 둔다(안 그러면 서로를 기다리며 멈춘다).
+
+- 설정은 settings 탭의 `unicorn https` 블록. 분할 방식·조각 수·`--sni-cut`(이름 안쪽에서 끊기)·
+  `--all-ports`(443 외 포트도)·`--block-quic`·`--ipv6`·`doh`
+- 나갈 국가(exit node)·사용자 이름·비밀번호가 필요 없다
+- **킬 스위치와 같이 못 쓴다**: 확장이 DoH로 직접 나가야 하는데 `includeAllNetworks`가 모든 통신을
+  터널로 밀어 넣으면 멈출 수 있어서, 킬 스위치를 켜면 프로토콜이 wg로 고정된다. 자동 연결은 된다
+- 공용 와이파이 로그인 창(캡티브 포털)이 떠야 할 때는 잠깐 꺼야 한다
+- 쪼갠 횟수·DNS 질의 수는 settings → logs에서 볼 수 있다(`split 12 · tcp 31 · open 7 · dns 40`)
 
 ## settings 탭
 
@@ -35,13 +75,14 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
 - **account / protocol / --fast / --adblock**: 예전 vpn 탭에 있던 것
 - **auto-connect** (iOS: `off / always / wi-fi`): On Demand 규칙. wi-fi는 와이파이에서만 붙고 셀룰러에선 끊음. 앱에서 disconnect를 누르면 자동 연결도 같이 꺼진다
 - **--kill-switch** (iOS): `includeAllNetworks`. 터널이 끊긴 동안 다른 트래픽을 막는다. `--allow-lan`을 켜면 같은 망 기기(프린터·AirPlay)는 터널 밖(`excludeLocalNetworks`). 켠 채 앱을 다시 설치하면 iOS가 모든 통신을 막아 버리는 문제가 있어서 업데이트 전에 끈다
-- auto-connect·kill-switch를 켜면 프로토콜이 wg로 고정된다. 서버를 깨우고 바뀐 IP를 따라가는 건 우리 터널 확장만 할 수 있어서다
+- **unicorn https**: 프로토콜이 `unicorn`일 때만 보인다(위 unicorn 절 참고)
+- kill-switch를 켜면 프로토콜이 wg로 고정된다. auto-connect는 우리 터널 확장이어야 하므로 ikev2/auto에서 켜면 wg로 바뀐다(unicorn은 그대로 쓸 수 있다). 서버를 깨우고 바뀐 IP를 따라가는 건 우리 터널 확장만 할 수 있어서다
   - 터널 확장은 핸드셰이크가 170초 넘게 없으면(서버 유휴 종료, 재부팅으로 IP 변경) 국가 API로 서버를 켜고 주소가 바뀌었으면 피어를 바꾼다. 확장 자신의 통신은 킬 스위치에도 막히지 않는다
 - **custom dns** (wg만): `1.1.1.1, 8.8.8.8`처럼. --adblock이 켜져 있으면 광고 차단 DNS가 우선. IKEv2 DNS는 서버가 준다
 - **안드로이드**: `--allow-lan`(IKEv2 `setLocalRoutesExcluded`, wg는 사설망·멀티캐스트 대역을 AllowedIPs에서 뺌), 항상 켜기·킬 스위치는 시스템 VPN 설정(`system ›`)에서
 - **안드로이드 wg engine**: `neptun`(기본) — iOS와 같은 NepTUN을 `NagoTun/build-android.sh`(NDK)로 libnago_tun.so로 빌드해 JNI(`NagoTun/src/android.rs`, `NeptunNative.kt`)로 부른다. `NeptunVpnService`가 TUN을 만들고 엔진에 넘김. NordVPN과 같게 이벤트 루프 4개 + 서버마다 connect한 UDP 소켓. 앱 자신은 VPN에서 빼서(`addDisallowedApplication`) 엔진 소켓과 국가 API 요청이 터널 밖으로 나간다. 핸드셰이크가 끊기면 iOS처럼 서버를 깨우고 새 주소로 바꾼다 / `go` — wireguard-android GoBackend
   - 빌드에 Rust와 Android NDK가 필요(Gradle `preBuild` 앞에 `buildNagoTun`이 돈다. NDK는 `ANDROID_NDK_HOME` 또는 `<SDK>/ndk/<버전>`)
-- **logs**: 진행 단계·오류·VPN 상태 변화(끊긴 이유 포함). iOS는 wg가 켜져 있으면 터널 확장의 로그와 핸드셰이크·주고받은 양도 같이 보여 준다
+- **logs**: 진행 단계·오류·VPN 상태 변화(끊긴 이유 포함). iOS는 터널 확장이 켜져 있으면 확장의 로그와 상태(wg는 핸드셰이크·주고받은 양, unicorn은 쪼갠 횟수·DNS 질의 수)도 같이 보여 준다
 - **server**: 가속(TCP 분할)은 4대 모두 IKEv2·WireGuard TCP에 켜져 있음
 
 ## --adblock (광고·추적 차단, 앱 전용)

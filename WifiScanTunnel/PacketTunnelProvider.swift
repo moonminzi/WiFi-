@@ -2,7 +2,9 @@ import NetworkExtension
 import WireGuardKit
 import os
 
-/// NAGO VPN의 WireGuard 터널(앱 확장). 앱이 providerConfiguration에 넣어 준 값으로 엔진을 띄운다.
+/// NAGO VPN의 터널(앱 확장). 앱이 providerConfiguration에 넣어 준 값으로 엔진을 띄운다.
+/// - mode "unicorn": 유니콘 HTTPS(SNI 차단 우회). 바깥으로 나가지 않고 기기 안에서
+///   TLS 첫 패킷만 쪼개 보낸다(UnicornStack)
 /// - engine "neptun": NepTUN(Rust, NordVPN 엔진). utun을 엔진이 직접 읽고 쓴다
 /// - engine "go": WireGuardKit(wireguard-go, 공식 WireGuard 앱과 같은 엔진)
 /// 서버가 유휴로 꺼지거나 켜지면서 IP가 바뀌면 핸드셰이크가 끊긴다. 그때 국가 API로 서버를 깨우고 새 주소로 바꾼다.
@@ -21,6 +23,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var neptun: NeptunEngine?
     private var current: Settings?
     private var watchdog: Task<Void, Never>?
+    /// 유니콘 HTTPS로 떴을 때의 스택. 패킷은 아래 큐에서만 다룬다.
+    private var unicorn: UnicornStack?
+    private let unicornQueue = DispatchQueue(label: "nago.vpn.unicorn", qos: .userInitiated)
 
     /// providerConfiguration: privateKey, address(10.9.0.x/32), serverPub, endpoint(ip:port), dns([String]), mtu, engine,
     /// region, apiKey(서버 깨우기용)
@@ -77,8 +82,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// 앱의 logs 화면이 부른다: 최근 로그 + 핸드셰이크·주고받은 양
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
         Task { @MainActor in
-            let stats = await self.stats()
-            let report: [String: Any] = ["lines": self.journal.snapshot(), "stats": stats?.summary ?? ""]
+            let summary: String
+            if let unicorn = self.unicorn {
+                summary = unicorn.summary
+            } else {
+                summary = await self.stats()?.summary ?? ""
+            }
+            let report: [String: Any] = ["lines": self.journal.snapshot(), "stats": summary]
             completionHandler?(try? JSONSerialization.data(withJSONObject: report))
         }
     }
@@ -87,6 +97,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     @MainActor
     private func start(onDemand: Bool, completionHandler: @escaping (Error?) -> Void) {
+        // 유니콘 HTTPS는 서버가 없어서 WireGuard 설정(키·엔드포인트)을 읽지 않는다.
+        let configuration = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
+        if configuration?["mode"] as? String == UnicornSettings.mode {
+            startUnicorn(UnicornSettings.from(providerConfiguration: configuration),
+                         completionHandler: completionHandler)
+            return
+        }
         guard let settings = Settings(protocolConfiguration) else {
             journal.add("✗ start: no configuration")
             completionHandler(NEVPNError(.configurationInvalid))
@@ -117,6 +134,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         watchdog?.cancel()
         watchdog = nil
         journal.add("stop · reason \(reason.rawValue)")
+        if let unicorn {
+            self.unicorn = nil
+            // 흐름 표는 스택의 큐에서만 만진다.
+            unicornQueue.async { unicorn.stop() }
+            completionHandler()
+            return
+        }
         if let neptun {
             neptun.stop()
             self.neptun = nil
@@ -126,6 +150,105 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         } else {
             completionHandler()
         }
+    }
+
+    // MARK: 유니콘 HTTPS
+
+    /// 기기 안에서만 도는 터널을 띄우고, 들어온 패킷을 UnicornStack에 넘긴다.
+    @MainActor
+    private func startUnicorn(_ s: UnicornSettings, completionHandler: @escaping (Error?) -> Void) {
+        journal.add("start unicorn · \(s.summary)")
+        guard s.strategy != .off else {
+            completionHandler(NSError(domain: "nago.unicorn", code: 1,
+                                      userInfo: [NSLocalizedDescriptionKey: "unicorn: split strategy is off"]))
+            return
+        }
+        setTunnelNetworkSettings(Self.unicornNetworkSettings(s)) { [weak self] error in
+            Task { @MainActor in
+                guard let self else { return }
+                if let error {
+                    self.journal.add("✗ unicorn: \(error.localizedDescription)")
+                    completionHandler(error)
+                    return
+                }
+                // 스택을 만드는 것 자체는 스레드에 민감하지 않다(안쪽 상태는 전부 unicornQueue에서만 바뀐다).
+                let stack = UnicornStack(
+                    settings: s,
+                    queue: self.unicornQueue,
+                    log: { [journal = self.journal] line in journal.add(line) },
+                    write: { [weak self] packets, families in
+                        self?.packetFlow.writePackets(packets, withProtocols: families)
+                    }
+                )
+                self.unicorn = stack
+                self.readUnicornPackets(into: stack)
+                completionHandler(nil)
+            }
+        }
+    }
+
+    /// tun에서 패킷을 읽어 스택에 넘기는 루프. 스택을 강하게 붙잡고 돌린다
+    /// (stop() 뒤에는 스택이 알아서 아무것도 하지 않는다).
+    private func readUnicornPackets(into stack: UnicornStack) {
+        packetFlow.readPackets { [weak self] packets, _ in
+            guard let self else { return }
+            self.unicornQueue.async {
+                for packet in packets { stack.handle(packet) }
+            }
+            self.readUnicornPackets(into: stack)
+        }
+    }
+
+    /// 유니콘 HTTPS용 터널 설정.
+    ///
+    /// 주소는 실제로 쓰이지 않는 벤치마크 대역(198.18/15)에서 골랐다. 기본 경로는 받아 오지만
+    /// 집·회사 안쪽 주소와 DoH 서버는 빼 둔다(DoH 요청이 다시 터널로 들어오면 서로를 기다리며 멈춘다).
+    /// DNS 질의를 터널 안으로 받으려고 가짜 DNS 서버 주소를 알려 주고, 응답은 UnicornDoH가 만든다.
+    private static func unicornNetworkSettings(_ s: UnicornSettings) -> NEPacketTunnelNetworkSettings {
+        let network = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
+        network.mtu = 1500
+
+        let v4 = NEIPv4Settings(addresses: ["198.18.0.1"], subnetMasks: ["255.255.255.0"])
+        v4.includedRoutes = [NEIPv4Route.default()]
+        var excluded: [NEIPv4Route] = [
+            NEIPv4Route(destinationAddress: "10.0.0.0", subnetMask: "255.0.0.0"),
+            NEIPv4Route(destinationAddress: "172.16.0.0", subnetMask: "255.240.0.0"),
+            NEIPv4Route(destinationAddress: "192.168.0.0", subnetMask: "255.255.0.0"),
+            NEIPv4Route(destinationAddress: "169.254.0.0", subnetMask: "255.255.0.0"),
+            NEIPv4Route(destinationAddress: "127.0.0.0", subnetMask: "255.0.0.0"),
+            NEIPv4Route(destinationAddress: "224.0.0.0", subnetMask: "240.0.0.0"),
+            NEIPv4Route(destinationAddress: "255.255.255.255", subnetMask: "255.255.255.255"),
+        ]
+        for address in [s.resolverAddress, s.plainDNSAddress] where isIPv4(address) {
+            excluded.append(NEIPv4Route(destinationAddress: address, subnetMask: "255.255.255.255"))
+        }
+        v4.excludedRoutes = excluded
+        network.ipv4Settings = v4
+
+        if s.handleIPv6 {
+            let v6 = NEIPv6Settings(addresses: ["fd6e:a1c0:fe0d::1"], networkPrefixLengths: [64])
+            v6.includedRoutes = [NEIPv6Route.default()]
+            v6.excludedRoutes = [
+                NEIPv6Route(destinationAddress: "fe80::", networkPrefixLength: 10),
+                NEIPv6Route(destinationAddress: "ff00::", networkPrefixLength: 8),
+            ]
+            network.ipv6Settings = v6
+        }
+
+        var servers = ["198.18.0.2"]
+        if s.handleIPv6 { servers.append("fd6e:a1c0:fe0d::2") }
+        let dns = NEDNSSettings(servers: servers)
+        dns.matchDomains = [""]     // 모든 도메인
+        network.dnsSettings = dns
+
+        return network
+    }
+
+    /// 잘못 입력한 주소가 터널 설정 전체를 깨뜨리지 않게 간단히 확인한다.
+    private static func isIPv4(_ address: String) -> Bool {
+        let parts = address.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+        return parts.allSatisfy { Int($0).map { (0...255).contains($0) } ?? false }
     }
 
     // MARK: NepTUN
