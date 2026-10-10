@@ -31,17 +31,17 @@ final class NeptunEngine {
 
     /// 엔진 시작. 실패하면 이유를 던진다.
     /// - queue: 스레드 사이 대기열 묶음 수(묶음당 최대 50패킷). 작을수록 다운로드 중 핑이 낮다
-    func start(tunFD: Int32, privateKey: String, serverPub: String, endpoint: String, queue: Int) throws {
+    func start(tunFD: Int32, privateKey: String, serverPub: String, endpoint: String, queue batches: Int) throws {
         let uapi = Self.uapi(privateKey: privateKey, serverPub: serverPub, endpoint: endpoint)
         // NordVPN(libtelio)과 같은 설정: 애플 기기에선 이벤트 루프 1개(성능 코어 하나)가 가장 빠르다.
         // 암호화/전송은 엔진의 작업 스레드들이 코어 수만큼 나눠 한다.
         let threads: UInt32 = 1
-        guard let handle = uapi.withCString({ nago_tun_start(tunFD, $0, threads, UInt32(clamping: queue)) }) else {
+        guard let handle = uapi.withCString({ nago_tun_start(tunFD, $0, threads, UInt32(clamping: batches)) }) else {
             throw NSError(domain: "nago.neptun", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "neptun: \(Self.lastError())"])
         }
         tun = handle
-        Self.log.info("started with \(threads) threads, queue \(queue)")
+        Self.log.info("started with \(threads) threads, queue \(batches)")
 
         // 와이파이↔셀룰러 전환 때 UDP 소켓을 새로 만들어야 끊기지 않는다(WireGuardKit의 bump sockets와 같은 일).
         let monitor = NWPathMonitor()
