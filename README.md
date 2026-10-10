@@ -56,8 +56,9 @@ HTTPS 접속 차단을 지나간다. 다른 프로토콜과 달리 **서버로 �
 ([`UnicornTCPFlow.swift`](WifiScanTunnel/UnicornTCPFlow.swift)) 실제 목적지로는 `NWConnection`으로
 다시 연결한다. 내보내기 직전에 ClientHello를 쪼개는 건
 [`UnicornClientHello.swift`](WifiScanTunnel/UnicornClientHello.swift)가 한다.
-터널 반대쪽은 같은 기기의 TCP 스택이라 패킷이 사라지지 않으니, 재전송 큐 없이 순서가 맞는 세그먼트만
-받아 바로 ACK하고 윈도만 지킨다. 확장이 만드는 연결은 모두 `prohibitedInterfaceTypes = [.other]`로
+터널 반대쪽은 같은 기기의 TCP 스택이라 순서가 뒤바뀌지는 않지만, `writePackets` 큐가 넘치면 우리가 보낸
+패킷이 버려질 수 있어서 단말에 보낸 데이터와 FIN은 ACK를 받을 때까지 들고 있다가 다시 보낸다(250ms부터 두 배씩,
+8번까지). 서버가 오류로 끊으면 단말에도 RST를 보내서, 중간에 끊긴 다운로드가 다 받은 것처럼 보이지 않게 한다. 확장이 만드는 연결은 모두 `prohibitedInterfaceTypes = [.other]`로
 자기 터널을 피하고, DoH 서버 IP는 경로에서 빼 둔다(안 그러면 서로를 기다리며 멈춘다).
 
 - 설정은 settings 탭의 `unicorn https` 블록. 분할 방식·조각 수·`--sni-cut`(이름 안쪽에서 끊기)·

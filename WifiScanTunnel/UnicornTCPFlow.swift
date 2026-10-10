@@ -16,8 +16,9 @@ extension IPAddr {
 /// 단말이 보는 TCP는 우리가 여기서 끝내고(terminate), 실제 목적지로는 `NWConnection`으로
 /// 새로 연결한다. 그래서 "보내기 직전"에 ClientHello를 쪼개 넣을 틈이 생긴다.
 ///
-/// tun 인터페이스 반대쪽은 같은 기기의 TCP 스택이라 패킷이 사라지지 않는다.
-/// 그래서 재전송 큐 없이 순서가 맞는 세그먼트만 받고 바로 ACK하는 정도로 충분하다.
+/// tun 반대쪽은 같은 기기의 TCP 스택이라 순서가 뒤바뀌지는 않는다. 다만 `writePackets`
+/// 큐가 넘치면 우리가 보낸 패킷이 버려질 수 있어서, 단말에 보낸 데이터와 FIN은 ACK를
+/// 받을 때까지 들고 있다가 시간이 지나면 다시 보낸다(안 그러면 그 연결이 영영 멈춘다).
 final class UnicornTCPFlow {
 
     struct Key: Hashable {
@@ -41,6 +42,10 @@ final class UnicornTCPFlow {
     private static let upstreamBufferLimit = 256 * 1024
     /// 조각 사이에 두는 간격. 로컬 스택이 패킷을 합치지 않을 만큼만.
     private static let spacing = DispatchTimeInterval.milliseconds(4)
+    /// 재전송 첫 대기 시간(같은 기기라 왕복이 1ms도 안 걸린다)과 상한, 포기할 횟수
+    private static let retransmitBase = 0.25
+    private static let retransmitCap = 3.0
+    private static let retransmitLimit = 8
 
     let key: Key
     private(set) var lastActivity = Date()
@@ -80,6 +85,12 @@ final class UnicornTCPFlow {
     private var receiveSuspended = false
 
     private var toClient: [UInt8] = []
+    /// 단말에 보냈지만 아직 ACK을 못 받은 데이터(unackedStart부터). 잃어버리면 여기서 다시 보낸다.
+    private var unacked: [UInt8] = []
+    private var unackedStart: UInt32 = 0
+    private var retransmitToken = 0
+    private var retransmitPending = false
+    private var retransmitTries = 0
     private var upstreamQueue: [Chunk] = []
     private var queuedUpstream = 0
     private var lastWindow = 0
@@ -131,6 +142,7 @@ final class UnicornTCPFlow {
                 initialSendSequence = UInt32.random(in: 0...UInt32.max)
                 sendUnacked = initialSendSequence
                 sendNext = initialSendSequence &+ 1
+                unackedStart = initialSendSequence &+ 1
                 handshakeDone = true
                 startUpstream()
             }
@@ -151,26 +163,42 @@ final class UnicornTCPFlow {
            sequenceLessThan(sendUnacked, segment.acknowledgement),
            sequenceLessThanOrEqual(segment.acknowledgement, sendNext) {
             sendUnacked = segment.acknowledgement
+            acknowledged()
         }
         clientWindow = segment.window
 
+        var needAck = false
         if !segment.payload.isEmpty {
-            if segment.sequence == receiveNext {
-                receiveNext = receiveNext &+ UInt32(segment.payload.count)
-                accept(segment.payload)
+            // 다시 보낸 세그먼트가 이미 받은 부분과 겹치면 새 부분만 받는다.
+            var sequence = segment.sequence
+            var data = segment.payload
+            if sequenceLessThan(sequence, receiveNext) {
+                let overlap = Int(receiveNext &- sequence)
+                data = overlap >= data.count ? [] : Array(data[overlap...])
+                sequence = receiveNext
             }
-            // 순서가 어긋난 세그먼트에는 지금 위치를 다시 알려 준다.
-            emitSegment(flags: [.ack], sequence: sendNext, payload: [])
+            if sequence == receiveNext, !data.isEmpty {
+                receiveNext = receiveNext &+ UInt32(data.count)
+                accept(data)
+            }
+            // 순서가 어긋났든 중복이든 지금 위치를 다시 알려 준다.
+            needAck = true
         }
 
-        if segment.flags.contains(.fin),
-           segment.sequence &+ UInt32(segment.payload.count) == receiveNext {
-            receiveNext = receiveNext &+ 1
-            clientFinished = true
+        if segment.flags.contains(.fin) {
+            let finSequence = segment.sequence &+ UInt32(segment.payload.count)
+            if !clientFinished, finSequence == receiveNext {
+                receiveNext = receiveNext &+ 1
+                clientFinished = true
+                flushHello(force: true)
+                halfCloseQueued = true
+                pumpUpstream()
+            }
+            // 우리 ACK이 사라져 FIN이 다시 와도 답해야 단말 쪽이 닫힌다.
+            needAck = true
+        }
+        if needAck {
             emitSegment(flags: [.ack], sequence: sendNext, payload: [])
-            flushHello(force: true)
-            halfCloseQueued = true
-            pumpUpstream()
         }
 
         pumpToClient()
@@ -326,7 +354,13 @@ final class UnicornTCPFlow {
                 self.toClient += [UInt8](data)
                 self.pumpToClient()
             }
-            if isComplete || error != nil {
+            // 서버가 오류로 끊었으면(RST 등) 단말에도 끊겼다고 알린다. FIN으로 닫아 버리면
+            // 중간에 끊긴 다운로드가 다 받은 것처럼 보인다.
+            if error != nil, !isComplete {
+                self.teardown(sendReset: true)
+                return
+            }
+            if isComplete {
                 self.upstreamFinished = true
                 self.pumpToClient()
                 return
@@ -346,9 +380,12 @@ final class UnicornTCPFlow {
             let room = Int(clientWindow) - inFlight
             guard room > 0 else { break }
             let count = min(room, sendSegment, toClient.count)
-            emitSegment(flags: [.ack, .psh], sequence: sendNext, payload: Array(toClient[0..<count]))
+            let payload = Array(toClient[0..<count])
+            emitSegment(flags: [.ack, .psh], sequence: sendNext, payload: payload)
             sendNext = sendNext &+ UInt32(count)
             toClient.removeFirst(count)
+            unacked += payload
+            ensureRetransmitTimer()
         }
 
         if receiveSuspended, toClient.count < 32 * 1024, !upstreamFinished,
@@ -361,10 +398,67 @@ final class UnicornTCPFlow {
             emitSegment(flags: [.fin, .ack], sequence: sendNext, payload: [])
             sendNext = sendNext &+ 1
             finSent = true
+            ensureRetransmitTimer()
         }
         if clientFinished, finSent, sequenceLessThanOrEqual(sendNext, sendUnacked) {
             teardown(sendReset: false)
         }
+    }
+
+    // MARK: - 재전송
+
+    /// ACK이 앞으로 나갔다. 확인된 데이터는 버리고, 남은 게 있으면 시계를 다시 잰다.
+    private func acknowledged() {
+        let advanced = Int(Int32(bitPattern: sendUnacked &- unackedStart))
+        if advanced > 0 {
+            let count = min(advanced, unacked.count)
+            unacked.removeFirst(count)
+            unackedStart = unackedStart &+ UInt32(count)
+        }
+        retransmitTries = 0
+        if sendUnacked == sendNext {
+            cancelRetransmit()
+        } else {
+            armRetransmit()
+        }
+    }
+
+    private func ensureRetransmitTimer() {
+        if !retransmitPending { armRetransmit() }
+    }
+
+    private func cancelRetransmit() {
+        retransmitToken += 1
+        retransmitPending = false
+    }
+
+    private func armRetransmit() {
+        retransmitToken += 1
+        retransmitPending = true
+        let token = retransmitToken
+        let delay = min(Self.retransmitBase * pow(2, Double(retransmitTries)), Self.retransmitCap)
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, !self.closed, self.retransmitToken == token else { return }
+            self.retransmitPending = false
+            self.retransmit()
+        }
+    }
+
+    /// 제일 오래된 미확인 데이터(없으면 FIN)를 다시 보낸다. 너무 오래 답이 없으면 끊는다.
+    private func retransmit() {
+        guard sendUnacked != sendNext, !unacked.isEmpty || finSent else { return }
+        retransmitTries += 1
+        guard retransmitTries <= Self.retransmitLimit else {
+            teardown(sendReset: true)
+            return
+        }
+        if !unacked.isEmpty {
+            let count = min(sendSegment, unacked.count)
+            emitSegment(flags: [.ack, .psh], sequence: unackedStart, payload: Array(unacked[0..<count]))
+        } else {
+            emitSegment(flags: [.fin, .ack], sequence: sendNext &- 1, payload: [])
+        }
+        armRetransmit()
     }
 
     // MARK: - 정리
@@ -375,9 +469,11 @@ final class UnicornTCPFlow {
         if sendReset, handshakeDone {
             emitSegment(flags: [.rst, .ack], sequence: sendNext, payload: [])
         }
+        cancelRetransmit()
         upstream?.cancel()
         upstream = nil
         toClient = []
+        unacked = []
         upstreamQueue = []
         helloBuffer = []
         onClose(key)
