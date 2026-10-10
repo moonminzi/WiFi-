@@ -1,0 +1,7 @@
+.gradle/
+build/
+local.properties
+*.jks
+*.keystore
+# 전달용 APK에만 넣는 내장 비밀번호(공개 레포라 커밋하지 않음)
+app/src/main/assets/preset.txt

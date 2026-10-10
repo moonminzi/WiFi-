@@ -3,6 +3,11 @@ options:
   bundleIdPrefix: com.example
   deploymentTarget:
     iOS: "17.0"
+packages:
+  # WireGuard 터널 엔진(wireguard-apple 1.0.16-27, MIT). Xcode 16용으로 Package.swift만 고쳐 Vendor/에 둠.
+  # Go 부분(libwg-go.a)은 아래 WireGuardGoBridgeiOS가 make로 빌드한다.
+  WireGuardKit:
+    path: Vendor/WireGuardKit
 settings:
   base:
     DEVELOPMENT_TEAM: ""          # ← 본인 Team ID (developer.apple.com > Membership)
@@ -17,19 +22,83 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan   # ← 본인 것으로 변경
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.7.2"
+        CURRENT_PROJECT_VERSION: "11"
+    dependencies:
+      - target: WifiScanTunnel
     entitlements:
       path: WifiScan/WifiScan.entitlements
       properties:
-        com.apple.developer.networking.HotspotConfiguration: true
-        com.apple.developer.networking.wifi-info: true
         com.apple.developer.networking.vpn.api: [allow-vpn]
+        com.apple.developer.networking.networkextension: [packet-tunnel-provider]
     info:
       path: WifiScan/Info.plist
       properties:
         CFBundleDisplayName: NAGO VPN
-        NSCameraUsageDescription: 와이파이 정보가 적힌 종이를 촬영하는 데 카메라를 사용합니다.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # 대시보드 사이트와 같은 글꼴(JetBrains Mono, SIL OFL 1.1 — WifiScan/Fonts/OFL-JetBrainsMono.txt)
+        UIAppFonts:
+          - JetBrainsMono-Regular.ttf
+          - JetBrainsMono-SemiBold.ttf
+          - JetBrainsMono-Bold.ttf
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+
+  # WireGuard 터널 확장. 앱의 PlugIns에 들어간다.
+  WifiScanTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - WifiScanTunnel
+      # 핸드셰이크가 끊기면 확장이 직접 국가 API로 서버를 깨우고 새 주소를 받는다(앱과 같은 코드)
+      - path: WifiScan/VPNRegion.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan.tunnel   # 앱 번들 ID + .tunnel
+        TARGETED_DEVICE_FAMILY: "1"
+        # NepTUN 엔진(NagoTun, Rust 정적 라이브러리)
+        SWIFT_OBJC_BRIDGING_HEADER: WifiScanTunnel/WifiScanTunnel-Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(SRCROOT)/NagoTun/include
+        OTHER_LDFLAGS: -lnago_tun -framework Security -framework Foundation -lobjc -liconv -lresolv
+        MARKETING_VERSION: "1.7.2"
+        CURRENT_PROJECT_VERSION: "11"
+    dependencies:
+      - target: WireGuardGoBridgeiOS
+      - target: NagoTunRust
+      - package: WireGuardKit
+    entitlements:
+      path: WifiScanTunnel/WifiScanTunnel.entitlements
+      properties:
+        com.apple.developer.networking.networkextension: [packet-tunnel-provider]
+    info:
+      path: WifiScanTunnel/Info.plist
+      properties:
+        CFBundleDisplayName: NAGO VPN Tunnel
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+
+  # wireguard-go를 libwg-go.a로 빌드(Go 필요). WireGuardKit 안내대로 External Build System 타깃.
+  WireGuardGoBridgeiOS:
+    type: ""
+    platform: iOS
+    legacy:
+      toolPath: /usr/bin/make
+      arguments: $(ACTION)
+      passSettings: true
+      workingDirectory: $(SRCROOT)/Vendor/WireGuardKit/Sources/WireGuardKitGo
+
+  # NepTUN(NordVPN의 Rust WireGuard 엔진, BSD-3)을 libnago_tun.a로 빌드(Rust 필요)
+  NagoTunRust:
+    type: ""
+    platform: iOS
+    legacy:
+      toolPath: /bin/sh
+      arguments: $(SRCROOT)/NagoTun/build-ios.sh
+      passSettings: true
+      workingDirectory: $(SRCROOT)/NagoTun

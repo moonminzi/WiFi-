@@ -14,6 +14,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # WireGuardKit의 Go 브리지(libwg-go.a)를 만들 때 쓴다
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+
+      # NepTUN 엔진(NagoTun, Rust)을 iOS용으로 빌드할 때 쓴다
+      - name: Rust iOS target
+        run: rustup target add aarch64-apple-ios
+
       - name: Generate Xcode project
         run: |
           brew install xcodegen
@@ -30,8 +40,12 @@ jobs:
         run: |
           mkdir -p Payload
           cp -R build/Build/Products/Release-iphoneos/WifiScan.app Payload/
-          # 재서명 도구가 권한을 그대로 가져가도록 entitlements를 바이너리에 박아 둔다(ad-hoc 서명)
+          # 재서명 도구가 권한을 그대로 가져가도록 entitlements를 바이너리에 박아 둔다(ad-hoc 서명).
+          # 확장(PlugIns)을 먼저 서명해야 앱 서명이 깨지지 않는다.
+          codesign --force --sign - --entitlements WifiScanTunnel/WifiScanTunnel.entitlements \
+            Payload/WifiScan.app/PlugIns/WifiScanTunnel.appex
           codesign --force --sign - --entitlements WifiScan/WifiScan.entitlements Payload/WifiScan.app
+          codesign -d --entitlements - Payload/WifiScan.app/PlugIns/WifiScanTunnel.appex
           codesign -d --entitlements - Payload/WifiScan.app
           zip -qry WifiScan.ipa Payload
 
