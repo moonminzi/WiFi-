@@ -34,8 +34,11 @@ final class UnicornTCPFlow {
         let spaced: Bool
     }
 
-    /// 단말에 알리는 수신 윈도. 윈도 스케일 옵션은 주고받지 않아서 최대 64KB.
-    private static let advertisedWindow: UInt16 = 65535
+    /// 단말에 알리는 수신 윈도의 최대값. 윈도 스케일 옵션은 주고받지 않아서 64KB가 한계.
+    private static let maximumWindow = 65535
+    /// 상류로 아직 못 보낸 바이트가 이만큼 쌓이면 윈도를 0으로 알려 단말을 멈춘다.
+    /// 확장은 메모리 한도가 빡빡해서(넘으면 시스템이 확장을 죽인다) 이쪽을 막아 둬야 한다.
+    private static let upstreamBufferLimit = 256 * 1024
     /// 조각 사이에 두는 간격. 로컬 스택이 패킷을 합치지 않을 만큼만.
     private static let spacing = DispatchTimeInterval.milliseconds(4)
 
@@ -71,6 +74,8 @@ final class UnicornTCPFlow {
 
     private var toClient: [UInt8] = []
     private var upstreamQueue: [Chunk] = []
+    private var queuedUpstream = 0
+    private var lastWindow = 0
     private var halfCloseQueued = false
 
     // ClientHello 모으기
@@ -160,7 +165,7 @@ final class UnicornTCPFlow {
     /// 단말이 보낸 데이터. ClientHello를 기다리는 중이면 모아 두고, 아니면 바로 흘린다.
     private func accept(_ payload: [UInt8]) {
         guard watchingHello else {
-            upstreamQueue.append(Chunk(bytes: payload, spaced: false))
+            enqueueUpstream(Chunk(bytes: payload, spaced: false))
             pumpUpstream()
             return
         }
@@ -204,17 +209,22 @@ final class UnicornTCPFlow {
         if let split = fragmenter.split(buffered), split.pieces.count > 1 {
             onFragment(split.hostname)
             for (index, piece) in split.pieces.enumerated() {
-                upstreamQueue.append(
+                enqueueUpstream(
                     Chunk(bytes: piece, spaced: index > 0 && settings.strategy.splitsSegment)
                 )
             }
         } else {
-            upstreamQueue.append(Chunk(bytes: buffered, spaced: false))
+            enqueueUpstream(Chunk(bytes: buffered, spaced: false))
         }
         pumpUpstream()
     }
 
     // MARK: - 우리 → 원격
+
+    private func enqueueUpstream(_ chunk: Chunk) {
+        upstreamQueue.append(chunk)
+        queuedUpstream += chunk.bytes.count
+    }
 
     private func startUpstream() {
         guard let host = key.destination.networkHost,
@@ -262,6 +272,7 @@ final class UnicornTCPFlow {
         }
 
         let chunk = upstreamQueue.removeFirst()
+        queuedUpstream -= chunk.bytes.count
         upstreamSending = true
         let send = { [weak self] in
             guard let self, !self.closed else { return }
@@ -273,6 +284,10 @@ final class UnicornTCPFlow {
                     if error != nil {
                         self.teardown(sendReset: true)
                         return
+                    }
+                    // 윈도를 0으로 알려 둔 상태에서 자리가 생겼으면 바로 알려 준다.
+                    if self.lastWindow == 0, self.currentWindow > 0, self.handshakeDone, !self.closed {
+                        self.emitSegment(flags: [.ack], sequence: self.sendNext, payload: [])
                     }
                     self.pumpUpstream()
                 }
@@ -364,15 +379,22 @@ final class UnicornTCPFlow {
             sequence: sequence,
             acknowledgement: receiveNext,
             flags: flags,
-            window: Self.advertisedWindow,
+            window: UInt16(currentWindow),
             payload: payload,
             maximumSegmentSize: mss
         )
+        lastWindow = currentWindow
         let transport = segment.serialized(source: key.destination, destination: key.source)
         let packet = IPDatagram.packet(
             source: key.destination, destination: key.source,
             protocolNumber: IPDatagram.tcp, payload: transport
         )
         emit(packet, key.source.isIPv6 ? NSNumber(value: AF_INET6) : NSNumber(value: AF_INET))
+    }
+
+    /// 지금 단말에 알릴 수신 윈도. 상류로 못 보낸 게 쌓이면 줄어든다.
+    private var currentWindow: Int {
+        let free = Self.upstreamBufferLimit - queuedUpstream
+        return min(max(free, 0), Self.maximumWindow)
     }
 }

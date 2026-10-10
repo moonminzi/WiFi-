@@ -208,6 +208,8 @@ struct VPNView: View {
                     try await Task.sleep(for: .seconds(1))
                     try await connectWG(target, user: user, key: key)
                 }
+            case .unicorn:
+                break       // 서버가 없어서 위에서 먼저 처리한다(여기까지 오지 않는다)
             }
             savedRegion = region
         } catch {
