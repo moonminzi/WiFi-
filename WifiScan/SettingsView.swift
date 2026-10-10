@@ -16,8 +16,18 @@ struct SettingsView: View {
     @AppStorage("vpnKillSwitch") private var killSwitch = false
     @AppStorage("vpnAllowLAN") private var allowLAN = true
     @AppStorage("vpnCustomDNS") private var customDNS = ""
+    // 유니콘 HTTPS(SNI 차단 우회). 키는 UnicornSettings.Key에 모여 있다.
+    @AppStorage(UnicornSettings.Key.strategy) private var uniStrategy: UnicornSettings.Strategy = .both
+    @AppStorage(UnicornSettings.Key.pieces) private var uniPieces = 2
+    @AppStorage(UnicornSettings.Key.sniCut) private var uniSNICut = true
+    @AppStorage(UnicornSettings.Key.allPorts) private var uniAllPorts = false
+    @AppStorage(UnicornSettings.Key.blockQUIC) private var uniBlockQUIC = true
+    @AppStorage(UnicornSettings.Key.handleIPv6) private var uniIPv6 = true
+    @AppStorage(UnicornSettings.Key.resolver) private var uniResolver: UnicornSettings.Resolver = .cloudflare
 
     @State private var password = ""
+    /// 키체인에 비밀번호가 들어 있는지. 들어 있으면 입력칸 대신 ●●●● 로 보여 준다.
+    @State private var savedPassword = false
     @State private var showLogs = false
 
     private let preset = VPNPreset.password
@@ -25,8 +35,11 @@ struct SettingsView: View {
 
     /// 연결 중에는 바꿔도 지금 연결에 안 들어가서 잠가 둔다.
     private var locked: Bool { vpn.status.isActive || vpn.status.isBusy }
-    /// 자동 연결·킬 스위치는 wg로만 한다.
-    private var forcedWG: Bool { autoConnect != .off || killSwitch }
+    /// 킬 스위치는 우리 터널(wg)로만 한다. 유니콘 HTTPS는 확장이 직접 DoH로 나가야 해서
+    /// 모든 통신을 터널에 밀어 넣는 includeAllNetworks와 같이 쓰지 않는다.
+    private var forcedWG: Bool { killSwitch }
+    /// 자동 연결은 ikev2로 못 한다. wg나 유니콘 HTTPS처럼 우리 터널이어야 한다.
+    private var needsOurTunnel: Bool { autoConnect != .off }
 
     var body: some View {
         TermPage(path: "settings") {
@@ -35,15 +48,25 @@ struct SettingsView: View {
             }
             accountBlock
             protocolBlock
+            if proto == .unicorn {
+                unicornBlock
+            }
             connectionBlock
             dnsBlock
             serverBlock
             logsBlock
             aboutBlock
         }
-        .task { await vpn.reload() }
+        .task {
+            await vpn.reload()
+            savedPassword = hasKeychainPassword
+        }
+        .onChange(of: username) { _, _ in savedPassword = hasKeychainPassword }
         .onChange(of: forcedWG) { _, forced in
             if forced { proto = .wireguard }
+        }
+        .onChange(of: needsOurTunnel) { _, needed in
+            if needed, !proto.usesTunnel { proto = .wireguard }
         }
         .onDisappear(perform: savePassword)
         .sheet(isPresented: $showLogs) { LogsView(vpn: vpn) }
@@ -55,13 +78,22 @@ struct SettingsView: View {
         TermBlock(label: "account") {
             TermField(key: "user", text: $username, placeholder: "wifiscan")
             TermDivider()
-            if preset != nil {
+            if preset != nil || savedPassword {
                 HStack(spacing: 10) {
                     Text("pw")
                         .foregroundStyle(Term.muted)
                         .frame(width: 56, alignment: .leading)
                     Text("••••••••")
                         .foregroundStyle(Term.muted)
+                    Text(preset != nil ? "built-in" : "keychain")
+                        .font(Term.mono(11))
+                        .foregroundStyle(Term.muted)
+                    Spacer()
+                    // 내장 비밀번호는 못 바꾸지만, 키체인에 넣은 건 다시 입력할 수 있게 둔다.
+                    if preset == nil {
+                        Button("change") { savedPassword = false }
+                            .buttonStyle(.term)
+                    }
                 }
                 .font(Term.mono(15))
             } else {
@@ -77,7 +109,7 @@ struct SettingsView: View {
             TermChoice(options: VPNProto.allCases.map { (label: $0.label, value: $0) }, selection: $proto)
                 .disabled(forcedWG)
                 .opacity(forcedWG ? 0.5 : 1)
-            if proto != .ikev2 {
+            if proto == .auto || proto == .wireguard {
                 TermDivider()
                 row("engine") {
                     TermChoice(options: [(label: "neptun", value: "neptun"), (label: "go", value: "go")],
@@ -90,9 +122,49 @@ struct SettingsView: View {
                     }
                 }
             }
-            if proto != .wireguard {
+            if proto == .auto || proto == .ikev2 {
                 TermDivider()
                 toggle("--fast", isOn: $fastMode)
+            }
+        }
+        .locked(locked)
+    }
+
+    /// 유니콘 HTTPS: TLS 첫 패킷(ClientHello)에 평문으로 들어 있는 도메인 이름(SNI)을
+    /// 쪼개 보내 차단 장비가 읽지 못하게 한다. 서버를 거치지 않는다.
+    private var unicornBlock: some View {
+        TermBlock(label: "unicorn https") {
+            VStack(alignment: .leading, spacing: 8) {
+                key("split")
+                TermChoice(options: UnicornSettings.Strategy.allCases.map { (label: $0.label, value: $0) },
+                           selection: $uniStrategy)
+            }
+            if uniStrategy == .off {
+                StatusLine(kind: .warn, text: "split off → cannot connect")
+            } else {
+                TermDivider()
+                row("pieces") {
+                    TermChoice(options: [2, 3, 4, 5].map { (label: "\($0)", value: $0) }, selection: $uniPieces)
+                }
+                TermDivider()
+                toggle("--sni-cut", isOn: $uniSNICut)
+                toggle("--all-ports", isOn: $uniAllPorts)
+                toggle("--block-quic", isOn: $uniBlockQUIC)
+                toggle("--ipv6", isOn: $uniIPv6)
+            }
+            TermDivider()
+            VStack(alignment: .leading, spacing: 8) {
+                key("doh")
+                TermChoice(options: UnicornSettings.Resolver.allCases.map { (label: $0.label, value: $0) },
+                           selection: $uniResolver)
+            }
+            if uniResolver == .off {
+                Text("plain dns · \(DNSList.parse(customDNS)?.joined(separator: ",") ?? "1.1.1.1")")
+                    .font(Term.mono(12))
+                    .foregroundStyle(Term.muted)
+            }
+            if killSwitch {
+                StatusLine(kind: .warn, text: "kill-switch forces wg")
             }
         }
         .locked(locked)
@@ -189,12 +261,19 @@ struct SettingsView: View {
         customDNS.trimmingCharacters(in: .whitespaces).isEmpty || DNSList.parse(customDNS) != nil
     }
 
+    private var hasKeychainPassword: Bool {
+        let user = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !user.isEmpty else { return false }
+        return KeychainHelper.read(account: user)?.isEmpty == false
+    }
+
     /// 내장 비밀번호가 없는 IPA에서 입력한 비밀번호를 키체인에 둔다(연결 때 VPNPreset.key가 읽음).
     private func savePassword() {
         let user = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard preset == nil, !password.isEmpty, !user.isEmpty else { return }
         _ = try? KeychainHelper.store(password: password, account: user)
         password = ""
+        savedPassword = true
     }
 
     private static var version: String {
