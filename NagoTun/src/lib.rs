@@ -89,9 +89,10 @@ pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u3
         firewall_process_inbound_callback: None,
         firewall_process_outbound_callback: None,
         skt_buffer_size: None,
-        // 기본 500묶음(묶음당 최대 50패킷)이면 밀릴 때 채널 하나가 40MB까지 커진다.
-        // iOS 터널 확장은 메모리 50MB를 넘으면 강제 종료되므로 64묶음(약 5MB)으로 묶어 둔다.
-        inter_thread_channel_size: Some(64),
+        // 스레드 사이 대기열(묶음당 최대 50패킷). 크면 다운로드가 몰릴 때 패킷이 쌓여 그만큼 핑이 오른다
+        // (기본 500묶음이면 수백 ms, 채널 하나가 40MB까지 커져 iOS 확장 메모리 한도 50MB에도 걸림).
+        // 8묶음(약 600KB)이면 300Mbps에서 쌓이는 지연이 20ms 안팎이고, 넘치면 TCP가 속도를 맞춘다.
+        inter_thread_channel_size: Some(8),
         max_inter_thread_batched_pkts: None,
     };
     let handle = match DeviceHandle::new_with_tun(tun, config) {
