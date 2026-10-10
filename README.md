@@ -91,6 +91,12 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
 - 서버: `server/adblock/setup-adblock.sh` (dnsmasq + OISD big + YousList, 매일 갱신). 모든 서버(kr/jp/us/uk)에 설치됨
 - 구분 방법: IKE ID를 `adblock.nago`로 보내면 strongSwan이 `ikev2-adblock` 연결을 골라 차단 DNS를 준다. 비밀번호 확인(EAP)은 그대로 사용자 이름
 - 앱 안 WireGuard는 DNS를 10.53.53.53으로 바꾼다. WireGuard 앱(친구 .conf)과 보통 연결은 그대로 1.1.1.1. 잘못 막힌 사이트는 서버의 `/etc/nago-dns/allow.conf`에 `server=/도메인/1.1.1.1`
+- **피어별 adblock (dash 탭)**: 피어를 눌러 `adblock on/off`. 클라이언트 설정과 상관없이 **서버가** 그 피어의 DNS(udp/tcp 53)를 차단 DNS로 돌린다(iptables `NAGO_DNS` 체인, `-s 10.9.0.x -j DNAT`). 친구 .conf처럼 DNS를 못 바꾸는 피어에도 걸린다
+  - 기준은 `/nago/wg/peers`의 `adblock` 값. 켜면 켜져 있는 서버 전부에 sync가 가고, 꺼진 서버는 켤 때 맞춰진다. 서버에는 `/etc/wireguard/nago-flags.json`에 남고 재부팅 뒤 `nago-dns-peers.service`가 다시 건다
+  - DNS 고리는 PREROUTING 맨 앞에 둔다. TCP 분할 가속(`NAGO_ACCEL`)보다 아래면 TCP 53이 가속 프록시로 끌려가 DNAT이 안 걸린다
+  - 차단 DNS(`setup-adblock.sh`)가 없는 서버에서는 규칙을 걸지 않는다(죽은 DNS로 돌리면 이름 해석이 아예 안 되므로). sync 결과에 `adblockError`로 남는다
+  - **DNS over HTTPS/TLS는 못 막는다.** 53번 포트만 돌리는 방식이라, 기기가 DNS를 HTTPS로 물어보면(Chrome 보안 DNS, iOS 암호화 DNS 프로파일, 이 앱의 unicorn 모드) 그냥 지나간다
+  - Lambda 반영: `cd server/dashboard && zip -j /tmp/nago-dash.zip index.py nago-peer.py && aws lambda update-function-code --region ap-northeast-2 --function-name nago-dash --zip-file fileb:///tmp/nago-dash.zip`
 
 ## dash 탭 (통합 대시보드)
 

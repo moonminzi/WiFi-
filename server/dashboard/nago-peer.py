@@ -10,8 +10,11 @@ JSON op:
     reset   {ip}                사용량 카운터만 0으로(키·설정 그대로)
     remove  {ip}                영구 삭제(wg0.conf에서도 지움)
     rename  {ip, name}
-    sync    {peers: [{pub, ip}]}  피어 목록(SSM 파라미터 /nago/wg/peers)에 맞춘다. 바뀐 것만 건드려서
-                                  붙어 있는 사람은 끊기지 않는다
+    flags   {ip, adblock}       피어별 스위치. adblock을 켜면 그 피어의 DNS(53)를 차단 DNS로 돌린다
+    sync    {peers: [{pub, ip, adblock}]}  피어 목록(SSM 파라미터 /nago/wg/peers)에 맞춘다. 바뀐 것만
+                                  건드려서 붙어 있는 사람은 끊기지 않는다
+
+    nago-peer apply               저장된 피어별 스위치를 iptables에 다시 올린다(재부팅 뒤 systemd가 부름)
 """
 import base64
 import ipaddress
@@ -25,6 +28,12 @@ import tempfile
 IFACE = os.environ.get("NAGO_WG_IFACE", "wg0")
 CONF = os.environ.get("NAGO_WG_CONF", "/etc/wireguard/wg0.conf")
 NAMES = os.environ.get("NAGO_WG_NAMES", "/etc/wireguard/nago-names.json")
+FLAGS = os.environ.get("NAGO_WG_FLAGS", "/etc/wireguard/nago-flags.json")
+# setup-adblock.sh가 올리는 VPN 안쪽 전용 차단 DNS(dummy 인터페이스 nago-dns)
+ADBLOCK_DNS = os.environ.get("NAGO_ADBLOCK_DNS", "10.53.53.53")
+DNS_CHAIN = "NAGO_DNS"
+BOOT_UNIT_NAME = "nago-dns-peers.service"
+BOOT_UNIT = "/etc/systemd/system/" + BOOT_UNIT_NAME
 RUN = os.environ.get("NAGO_WG_RUN", "/run")
 SELF = "/usr/local/sbin/nago-peer"
 NET = ipaddress.ip_network("10.9.0.0/24")
@@ -94,6 +103,84 @@ def load_names():
 
 def save_names(names):
     write_atomic(NAMES, json.dumps(names, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def load_flags():
+    """{ip: {"adblock": true}} — 피어별 스위치"""
+    try:
+        with open(FLAGS) as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def save_flags(flags):
+    write_atomic(FLAGS, json.dumps(flags, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def as_bool(value):
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def ipt(*args, soft=False):
+    """iptables nat 테이블. soft면 실패해도 넘어간다(이미 있는 체인 만들기, 없는 규칙 지우기 등)."""
+    r = subprocess.run(["iptables", "-t", "nat", *args], capture_output=True, text=True)
+    if r.returncode != 0 and not soft:
+        raise Fail("iptables %s: %s" % (" ".join(args[:2]), r.stderr.strip()[:200]))
+    return r.returncode == 0
+
+
+def adblock_ready():
+    """이 서버에 차단 DNS가 올라와 있는지. 없는데 DNS를 돌리면 이름 해석이 아예 안 된다."""
+    r = subprocess.run(["ip", "-brief", "addr", "show", "nago-dns"], capture_output=True, text=True)
+    return r.returncode == 0 and ADBLOCK_DNS in r.stdout
+
+
+def apply_dns(flags=None):
+    """adblock을 켠 피어의 DNS(53)만 차단 DNS로 돌린다.
+
+    체인을 비우고 다시 쌓기 때문에 몇 번 불러도 결과가 같다. PREROUTING 고리는 지웠다가
+    맨 앞에 다시 넣는다 — TCP 분할 가속(NAGO_ACCEL)이 PREROUTING 맨 앞에 끼어들기 때문에,
+    그 아래에 있으면 TCP 53이 가속 프록시로 끌려가 DNAT이 안 걸린다.
+    """
+    flags = load_flags() if flags is None else flags
+    wanted = sorted(ip for ip, f in flags.items() if (f or {}).get("adblock"))
+
+    ipt("-N", DNS_CHAIN, soft=True)     # 이미 있으면 그냥 넘어간다
+    ipt("-F", DNS_CHAIN)
+    for proto in ("udp", "tcp"):
+        rule = ["PREROUTING", "-i", IFACE, "-p", proto, "--dport", "53", "-j", DNS_CHAIN]
+        while ipt("-C", *rule, soft=True):
+            ipt("-D", *rule, soft=True)
+        ipt("-I", *rule)
+
+    if not wanted:
+        return []
+    if not adblock_ready():
+        # 죽은 DNS로 돌려 두면 그 피어들은 이름 해석이 아예 안 된다. 체인은 비운 채로 두고
+        # 알린다(스위치는 파일에 남아 있어서 차단 DNS가 살아나면 다음 apply/sync 때 다시 걸린다).
+        raise Fail("ad-blocking dns (%s) is not up on this server - run setup-adblock.sh" % ADBLOCK_DNS)
+    for ip in wanted:
+        ipt("-A", DNS_CHAIN, "-s", ip + "/32", "-j", "DNAT", "--to-destination", ADBLOCK_DNS + ":53")
+    return wanted
+
+
+def install_boot_unit():
+    """재부팅해도 규칙이 남게 한다(wg0이 올라온 뒤 apply 한 번)."""
+    # After만 건다(Wants를 걸면 wg0을 다른 방식으로 올리는 서버에서 wg-quick을 띄우려 든다).
+    # -i wg0 규칙은 인터페이스가 아직 없어도 걸리니 순서만 맞추면 된다.
+    unit = ("[Unit]\nDescription=NAGO VPN per-peer DNS rules\n"
+            "After=network-online.target wg-quick@%s.service\n\n"
+            "[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=%s apply\n\n"
+            "[Install]\nWantedBy=multi-user.target\n") % (IFACE, SELF)
+    try:
+        if not os.path.exists(BOOT_UNIT) or open(BOOT_UNIT).read() != unit:
+            write_atomic(BOOT_UNIT, unit, mode=0o644)
+            subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+        subprocess.run(["systemctl", "enable", BOOT_UNIT_NAME], capture_output=True)
+    except OSError:
+        pass   # 규칙 자체는 이미 들어가 있으니 부팅 복원만 포기한다
 
 
 def conf_sections():
@@ -259,7 +346,33 @@ def op_remove(req):
     names = load_names()
     if names.pop(ip, None) is not None:
         save_names(names)
+    flags = load_flags()
+    if flags.pop(ip, None) is not None:
+        save_flags(flags)
+        try:
+            apply_dns(flags)
+        except Fail:
+            pass   # 피어는 이미 지워졌다. 남은 규칙은 다음 sync/apply 때 정리된다
     return {"ip": ip}
+
+
+def op_flags(req):
+    """피어별 스위치를 바꾸고 바로 적용한다. 지금은 adblock 하나."""
+    ip = check_ip(req.get("ip"))
+    if ip not in live_peers() and ip not in conf_ips():
+        raise Fail("no peer at %s" % ip)
+    flags = load_flags()
+    entry = dict(flags.get(ip) or {})
+    if "adblock" in req:
+        entry["adblock"] = as_bool(req.get("adblock"))
+    if entry.get("adblock"):
+        flags[ip] = entry
+    else:
+        flags.pop(ip, None)
+    applied = apply_dns(flags)      # 실패하면(차단 DNS 없음) 저장하지 않는다
+    save_flags(flags)
+    install_boot_unit()
+    return {"ip": ip, "adblock": bool(entry.get("adblock")), "adblockPeers": len(applied)}
 
 
 def op_rename(req):
@@ -274,11 +387,15 @@ def op_rename(req):
 
 def op_sync(req):
     want = {}
+    flags = {}
     for p in req.get("peers") or []:
         pub = str(p.get("pub", ""))
         if not KEY_RE.match(pub):
             raise Fail("bad key in list")
-        want[pub] = check_ip(p.get("ip"))
+        ip = check_ip(p.get("ip"))
+        want[pub] = ip
+        if as_bool(p.get("adblock")):
+            flags[ip] = {"adblock": True}
     live = {p["pub"]: ip for ip, p in live_peers().items()}
     conf = conf_peers()
     added = removed = 0
@@ -295,16 +412,28 @@ def op_sync(req):
         removed += 1
     for pub in set(conf) - set(want):
         conf_remove(pub)
-    return {"added": added, "removed": removed, "total": len(want)}
+    out = {"added": added, "removed": removed, "total": len(want)}
+    # 차단 DNS가 안 깔린 서버라도 피어 동기화 자체는 성공해야 한다. 스위치만 못 건다.
+    save_flags(flags)
+    try:
+        out["adblock"] = len(apply_dns(flags))
+    except Fail as e:
+        out["adblock"] = 0
+        out["adblockError"] = str(e)
+    install_boot_unit()
+    return out
 
 
-OPS = {"add": op_add, "sync": op_sync, "kick": op_kick, "reset": op_reset, "remove": op_remove, "rename": op_rename}
+OPS = {"add": op_add, "sync": op_sync, "kick": op_kick, "reset": op_reset, "remove": op_remove,
+       "rename": op_rename, "flags": op_flags}
 
 
 def main(argv):
     try:
         if len(argv) == 3 and argv[1] == "restore":
             out = op_restore(argv[2])
+        elif len(argv) == 2 and argv[1] == "apply":
+            out = {"adblockPeers": len(apply_dns())}
         else:
             req = json.loads(base64.b64decode(argv[1]).decode())
             fn = OPS.get(req.get("op"))

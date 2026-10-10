@@ -27,6 +27,8 @@ struct DashData: Decodable {
         let n: String
         let ip: String
         let name: String?
+        /// 이 피어의 DNS를 서버가 광고 차단 DNS로 돌리는지(대시보드에서 피어별로 켬)
+        let adblock: Bool?
         let hsAgo: Int?
         let rx: Int64
         let tx: Int64
@@ -127,6 +129,9 @@ struct DashView: View {
             managedPeer.map(peerTitle) ?? "",
             isPresented: present($managedPeer), titleVisibility: .visible, presenting: managedPeer
         ) { peer in
+            Button(peer.adblock == true ? "adblock off" : "adblock on") {
+                run("flags", peer, extra: ["adblock": peer.adblock == true ? "0" : "1"])
+            }
             Button("kick 60s") { run("kick", peer, extra: ["seconds": "60"]) }
             Button("reset usage") { run("reset", peer) }
             Button("rename") {
@@ -174,8 +179,9 @@ struct DashView: View {
     private func run(_ op: String, _ peer: DashData.Peer, extra: [String: String] = [:]) {
         var body = ["op": op, "ip": peer.ip]
         body.merge(extra) { $1 }
-        perform(body, label: "wg peer \(op) \(peer.ip)",
-                done: "\(op) \(peer.ip)" + (op == "kick" ? " · back in 60s" : ""))
+        let what = op == "flags" ? "adblock \(extra["adblock"] == "1" ? "on" : "off")" : op
+        perform(body, label: "wg peer \(what) \(peer.ip)",
+                done: "\(what) \(peer.ip)" + (op == "kick" ? " · back in 60s" : ""))
     }
 
     private func nodeOp(_ op: String, _ node: DashData.Node) {
@@ -413,6 +419,7 @@ struct DashView: View {
     private func peerLines(_ peer: DashData.Peer) -> some View {
         let head = Text("[peer \(peer.n)]").foregroundStyle(Term.key) + Text(" \(peer.ip) ")
             + Text(peer.name.map { $0 + " " } ?? "").foregroundStyle(Term.path)
+            + Text(peer.adblock == true ? "adblock " : "").foregroundStyle(Term.green)
         if let ago = peer.hsAgo {
             let online = ago < 180
             line(head + Text(online ? "● online" : "○ idle").foregroundStyle(online ? Term.green : Term.amber))
