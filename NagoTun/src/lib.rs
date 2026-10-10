@@ -69,8 +69,9 @@ fn errno_of(response: &str) -> c_int {
 /// - `tun_fd`: iOS utun 또는 안드로이드 TUN 디스크립터(네트워크 설정을 적용한 뒤에 넘겨야 MTU가 맞다). 엔진이 닫는다
 /// - `uapi`: "set=1\nprivate_key=…\npublic_key=…\nendpoint=…\nallowed_ip=…\n\n"
 /// - `threads`: 이벤트 루프 스레드 수(NordVPN과 같게 아이폰 1, 안드로이드 4)
+/// - `queue`: 스레드 사이 대기열 묶음 수(0이면 8). 작을수록 다운로드 중 핑이 낮고, 클수록 몰릴 때 덜 버린다
 #[no_mangle]
-pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u32) -> *mut NagoTun {
+pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u32, queue: u32) -> *mut NagoTun {
     let Some(cmd) = text(uapi).map(|c| normalize(&c)) else {
         return fail("uapi is not utf-8".into());
     };
@@ -90,9 +91,10 @@ pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u3
         firewall_process_outbound_callback: None,
         skt_buffer_size: None,
         // 스레드 사이 대기열(묶음당 최대 50패킷). 크면 다운로드가 몰릴 때 패킷이 쌓여 그만큼 핑이 오른다
-        // (기본 500묶음이면 수백 ms, 채널 하나가 40MB까지 커져 iOS 확장 메모리 한도 50MB에도 걸림).
+        // (NepTUN 기본 500묶음이면 수백 ms, 채널 하나가 40MB까지 커져 iOS 확장 메모리 한도 50MB에도 걸림).
         // 8묶음(약 600KB)이면 300Mbps에서 쌓이는 지연이 20ms 안팎이고, 넘치면 TCP가 속도를 맞춘다.
-        inter_thread_channel_size: Some(8),
+        // 64묶음(약 5MB)까지만 받는다(iOS 메모리 한도).
+        inter_thread_channel_size: Some(if queue == 0 { 8 } else { queue.clamp(1, 64) as usize }),
         max_inter_thread_batched_pkts: None,
     };
     let handle = match DeviceHandle::new_with_tun(tun, config) {

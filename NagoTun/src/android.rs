@@ -32,7 +32,7 @@ pub extern "system" fn Java_com_nago_vpn_NeptunNative_start(
     let Some(cmd) = c_text(&mut env, &uapi) else {
         return 0;
     };
-    crate::nago_tun_start(tun_fd, cmd.as_ptr(), threads.max(1) as u32) as jlong
+    crate::nago_tun_start(tun_fd, cmd.as_ptr(), threads.max(1) as u32, 0) as jlong
 }
 
 /// 설정 변경(서버 주소 바꾸기 등). 0이면 성공, 아니면 UAPI errno.

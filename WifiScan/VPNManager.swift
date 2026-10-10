@@ -188,12 +188,13 @@ final class VPNManager {
 
     /// WireGuard 설정을 저장한다. 처음 한 번은 "VPN 구성 추가" 허용 창이 뜬다.
     /// - engine: "neptun"(Rust, NordVPN 엔진) 또는 "go"(wireguard-go, 공식 앱과 같은 엔진)
+    /// - queue: NepTUN 스레드 사이 대기열 묶음 수(작을수록 다운로드 중 핑이 낮음)
     /// - region, apiKey: 터널 확장이 핸드셰이크가 끊기면 국가 API로 서버를 깨우고 새 주소로 바꿀 때 쓴다.
     /// - killSwitch: 터널이 끊긴 동안 다른 트래픽을 막는다(includeAllNetworks). 확장 자신의 통신은 막히지 않는다.
     /// - allowLAN: 킬 스위치를 켠 상태에서 프린터·AirPlay 같은 같은 망 기기는 터널 밖으로 보낸다.
     ///   킬 스위치가 꺼져 있으면 iOS가 원래 같은 망 트래픽을 터널에 넣지 않는다.
     func saveWireGuard(privateKey: String, address: String, serverPub: String, endpoint: String,
-                       dns: [String], engine: String, region: String, apiKey: String,
+                       dns: [String], engine: String, queue: Int, region: String, apiKey: String,
                        autoConnect: VPNAutoConnect, killSwitch: Bool, allowLAN: Bool) async throws {
         let tunnel = try await NETunnelProviderManager.loadAllFromPreferences().first ?? NETunnelProviderManager()
         let proto = NETunnelProviderProtocol()
@@ -207,6 +208,7 @@ final class VPNManager {
             "dns": dns,
             "mtu": 1420,
             "engine": engine,
+            "queue": queue,
             "region": region,
             "apiKey": apiKey,
         ]

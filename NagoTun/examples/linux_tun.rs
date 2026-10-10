@@ -1,5 +1,5 @@
 //! 리눅스에서 nago_tun 시험용: TUN을 만들어 그 fd로 nago_tun_start를 부른다(iOS에서 utun fd를 넘기는 것과 같은 경로).
-//! 사용: linux_tun <tun 이름> <UAPI 파일> <스레드 수>   — Ctrl-C/kill 할 때까지 돈다.
+//! 사용: linux_tun <tun 이름> <UAPI 파일> <스레드 수> [대기열 묶음 수, 기본 8]   — Ctrl-C/kill 할 때까지 돈다.
 use std::ffi::CString;
 use std::{env, fs, thread, time::Duration};
 
@@ -22,7 +22,8 @@ fn main() {
     assert!(unsafe { libc::ioctl(fd, TUNSETIFF as _, &req) } >= 0, "TUNSETIFF failed");
 
     let uapi = CString::new(fs::read_to_string(uapi_path).unwrap()).unwrap();
-    let tun = nago_tun::nago_tun_start(fd, uapi.as_ptr(), threads);
+    let queue = args.get(4).and_then(|q| q.parse::<u32>().ok()).unwrap_or(0);
+    let tun = nago_tun::nago_tun_start(fd, uapi.as_ptr(), threads, queue);
     if tun.is_null() {
         let mut buf = vec![0u8; 512];
         let n = nago_tun::nago_tun_last_error(buf.as_mut_ptr() as *mut _, buf.len());

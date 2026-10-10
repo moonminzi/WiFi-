@@ -8,6 +8,8 @@ struct SettingsView: View {
     @AppStorage("vpnUsername") private var username = "wifiscan"
     @AppStorage("vpnProtocol") private var proto: VPNProto = .auto
     @AppStorage("wgEngine") private var wgEngine = "neptun"
+    /// NepTUN 스레드 사이 대기열 묶음 수. 작을수록 다운로드 중 핑이 낮고, 클수록 몰릴 때 덜 버린다
+    @AppStorage("wgQueue") private var wgQueue = 8
     @AppStorage("vpnFastMode") private var fastMode = true
     @AppStorage("vpnAdblock") private var adblock = false
     @AppStorage("vpnAutoConnect") private var autoConnect: VPNAutoConnect = .off
@@ -80,6 +82,12 @@ struct SettingsView: View {
                 row("engine") {
                     TermChoice(options: [(label: "neptun", value: "neptun"), (label: "go", value: "go")],
                                selection: $wgEngine)
+                }
+                if wgEngine == "neptun" {
+                    TermDivider()
+                    row("queue") {
+                        TermChoice(options: [8, 16, 64].map { (label: "\($0)", value: $0) }, selection: $wgQueue)
+                    }
                 }
             }
             if proto != .wireguard {

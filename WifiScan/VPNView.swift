@@ -14,6 +14,7 @@ struct VPNView: View {
     @AppStorage("vpnAdblock") private var adblock = false
     @AppStorage("vpnProtocol") private var proto: VPNProto = .auto
     @AppStorage("wgEngine") private var wgEngine = "neptun"
+    @AppStorage("wgQueue") private var wgQueue = 8
     @AppStorage("vpnAutoConnect") private var autoConnect: VPNAutoConnect = .off
     @AppStorage("vpnKillSwitch") private var killSwitch = false
     @AppStorage("vpnAllowLAN") private var allowLAN = true
@@ -41,6 +42,7 @@ struct VPNView: View {
     /// `wg/neptun · adblock · kill-switch` 처럼 지금 설정 한 줄
     private var flags: String {
         var parts = [effectiveProto == .wireguard ? "wg/\(wgEngine)" : effectiveProto.label]
+        if effectiveProto == .wireguard, wgEngine == "neptun", wgQueue != 8 { parts[0] += " q\(wgQueue)" }
         if adblock {
             parts.append("adblock")
         } else if effectiveProto != .ikev2, let dns = DNSList.parse(customDNS) {
@@ -213,7 +215,7 @@ struct VPNView: View {
         step("\(region.rawValue): wg/\(wgEngine) → \(endpoint)")
         try await vpn.saveWireGuard(privateKey: reg.privateKey, address: reg.address + "/32",
                                     serverPub: serverPub, endpoint: endpoint, dns: wgDNS, engine: wgEngine,
-                                    region: region.rawValue, apiKey: key,
+                                    queue: wgQueue, region: region.rawValue, apiKey: key,
                                     autoConnect: autoConnect, killSwitch: killSwitch, allowLAN: allowLAN)
         try vpn.connectWireGuard()
     }

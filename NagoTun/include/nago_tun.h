@@ -7,7 +7,8 @@
 
 typedef struct NagoTun NagoTun;
 
-NagoTun *nago_tun_start(int tun_fd, const char *uapi, uint32_t threads);
+// queue: 스레드 사이 대기열 묶음 수(0이면 8, 최대 64)
+NagoTun *nago_tun_start(int tun_fd, const char *uapi, uint32_t threads, uint32_t queue);
 int nago_tun_set(NagoTun *tun, const char *uapi);
 size_t nago_tun_get(NagoTun *tun, char *buf, size_t len);
 void nago_tun_network_changed(NagoTun *tun);
