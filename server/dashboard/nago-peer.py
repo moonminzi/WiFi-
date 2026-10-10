@@ -162,7 +162,9 @@ def apply_dns(flags=None):
         # 알린다(스위치는 파일에 남아 있어서 차단 DNS가 살아나면 다음 apply/sync 때 다시 걸린다).
         raise Fail("ad-blocking dns (%s) is not up on this server - run setup-adblock.sh" % ADBLOCK_DNS)
     for ip in wanted:
-        ipt("-A", DNS_CHAIN, "-s", ip + "/32", "-j", "DNAT", "--to-destination", ADBLOCK_DNS + ":53")
+        # 포트를 적으면 iptables가 -p를 요구한다(Need TCP, UDP ... with port specification).
+        # 이 체인엔 53번만 들어오니 주소만 바꾸면 포트는 53 그대로 간다.
+        ipt("-A", DNS_CHAIN, "-s", ip + "/32", "-j", "DNAT", "--to-destination", ADBLOCK_DNS)
     return wanted
 
 
