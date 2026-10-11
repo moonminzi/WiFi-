@@ -12,16 +12,16 @@ enum ClaudeClient {
         return URLSession(configuration: c)
     }()
 
-    static func request(_ url: URL, apiKey: String) -> URLRequest {
+    static func request(_ url: URL, apiKey: String, mode: ClaudeAPI.Mode = .full) -> URLRequest {
         var req = URLRequest(url: url)
-        for (k, v) in ClaudeAPI.headers(apiKey: apiKey) { req.setValue(v, forHTTPHeaderField: k) }
+        for (k, v) in ClaudeAPI.headers(apiKey: apiKey, mode: mode) { req.setValue(v, forHTTPHeaderField: k) }
         return req
     }
 
     /// 요청 하나를 스트리밍으로 받는다. progress는 0.3초마다 부른다.
-    static func stream(_ body: Data, apiKey: String,
+    static func stream(_ body: Data, apiKey: String, mode: ClaudeAPI.Mode = .full,
                        progress: @escaping @Sendable (StreamAccumulator) -> Void) async throws -> StreamAccumulator {
-        var req = request(ClaudeAPI.endpoint, apiKey: apiKey)
+        var req = request(ClaudeAPI.endpoint, apiKey: apiKey, mode: mode)
         req.httpMethod = "POST"
         req.httpBody = body
         let bytes: URLSession.AsyncBytes
@@ -110,12 +110,21 @@ enum ClaudeClient {
     static func alternatives(source: String, current: String, kind: BlockKind, context: TranslationContext,
                              summary: String, apiKey: String) async throws -> ([String], Usage) {
         struct Answer: Decodable { var alternatives: [String] }
-        let body = PageRequest.alternativesBody(source: source, current: current, kind: kind, context: context,
-                                                pageSummary: summary)
+        var mode = ClaudeAPI.Mode.full
         let acc = try await ClaudeClient.withRetries(3) { _ in
-            let acc = try await ClaudeClient.stream(body, apiKey: apiKey) { _ in }
-            _ = try acc.decode(Answer.self)
-            return acc
+            let body = PageRequest.alternativesBody(source: source, current: current, kind: kind, context: context,
+                                                    pageSummary: summary, mode: mode)
+            do {
+                let acc = try await ClaudeClient.stream(body, apiKey: apiKey, mode: mode) { _ in }
+                _ = try acc.decode(Answer.self)
+                return acc
+            } catch let e as TranslateError {
+                if case .invalidRequest = e, mode == .full {
+                    mode = .basic
+                    throw TranslateError.server(400, "기본 요청으로 다시")
+                }
+                throw e
+            }
         }
         return (try acc.decode(Answer.self).alternatives, acc.usage)
     }
@@ -219,18 +228,28 @@ enum Pipeline {
         var ctx = job.context
         if count > 1 { ctx.segment = (index, count) }
         var used = Usage()
+        // 계정에서 어떤 기능(서버 대체 모델·구조화 출력 등)이 막혀 400이 나면 기본 요청으로 한 번 더
+        var mode = ClaudeAPI.Mode.full
         let acc = try await ClaudeClient.withRetries { attempt in
             // 답이 잘렸으면 더 길게 허락하고 다시
             let body = PageRequest.body(imageJPEG: jpeg, width: sw, height: sh, context: ctx,
-                                        maxTokens: attempt == 0 ? 32000 : 64000)
+                                        maxTokens: attempt == 0 ? 32000 : 64000, mode: mode)
             status("보내는 중")
-            let acc = try await ClaudeClient.stream(body, apiKey: job.apiKey) { acc in
-                let n = acc.text.count
-                status(n > 0 ? "번역 쓰는 중 \(n)자" : (acc.thinking ? "읽고 생각하는 중" : "기다리는 중"))
+            do {
+                let acc = try await ClaudeClient.stream(body, apiKey: job.apiKey, mode: mode) { acc in
+                    let n = acc.text.count
+                    status(n > 0 ? "번역 쓰는 중 \(n)자" : (acc.thinking ? "읽고 생각하는 중" : "기다리는 중"))
+                }
+                used = used + acc.usage
+                _ = try acc.decode(PageAnswer.self)
+                return acc
+            } catch let e as TranslateError {
+                if case .invalidRequest = e, mode == .full {
+                    mode = .basic
+                    throw TranslateError.server(400, "기본 요청으로 다시")
+                }
+                throw e
             }
-            used = used + acc.usage
-            _ = try acc.decode(PageAnswer.self)
-            return acc
         }
         var answer = try acc.decode(PageAnswer.self)
         let sx = Double(tile.w) / Double(sw), sy = Double(tile.h) / Double(sh)

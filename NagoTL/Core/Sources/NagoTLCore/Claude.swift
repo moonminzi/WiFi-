@@ -14,14 +14,20 @@ public enum ClaudeAPI {
     /// 1백만 토큰당 달러(입력, 출력, 캐시 읽기, 캐시 쓰기 5분)
     public static let price = (input: 4.0, output: 20.0, cacheRead: 0.20, cacheWrite: 5.0)
 
-    public static func headers(apiKey: String) -> [String: String] {
-        [
+    /// 요청 모양: full = 서버 대체 모델·캐시·구조화 출력까지, basic = 가장 기본(계정에서 어떤 기능이 막혀 있을 때 한 번 더)
+    public enum Mode: Sendable {
+        case full, basic
+    }
+
+    public static func headers(apiKey: String, mode: Mode = .full) -> [String: String] {
+        var h = [
             "x-api-key": apiKey,
             "anthropic-version": version,
-            "anthropic-beta": fallbackBeta,
             "content-type": "application/json",
             "accept": "text/event-stream",
         ]
+        if mode == .full { h["anthropic-beta"] = fallbackBeta }
+        return h
     }
 
     /// 보낼 그림 크기(좌표가 그림 픽셀과 1:1이 되도록 한도 안으로)
@@ -289,21 +295,41 @@ public enum PageRequest {
 
     /// 페이지 하나 번역 요청 본문(스트리밍)
     public static func body(imageJPEG: Data, width: Int, height: Int, context: TranslationContext,
-                            maxTokens: Int = 32000) -> Data {
+                            maxTokens: Int = 32000, mode: ClaudeAPI.Mode = .full) -> Data {
+        var text = userText(width: width, height: height, context: context)
+        if mode == .basic { text += "\n\n" + jsonInstruction(schema) }
         let content: [[String: Any]] = [
             ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": imageJPEG.base64EncodedString()]],
-            ["type": "text", "text": userText(width: width, height: height, context: context)],
+            ["type": "text", "text": text],
         ]
-        let body: [String: Any] = [
+        return wrap(content: content, maxTokens: maxTokens, effort: "medium", schema: schema, mode: mode)
+    }
+
+    /// 공통 본문. basic이면 서버 대체 모델·캐시·구조화 출력 없이(대신 JSON만 쓰라고 지시)
+    static func wrap(content: [[String: Any]], maxTokens: Int, effort: String, schema: [String: Any],
+                     mode: ClaudeAPI.Mode) -> Data {
+        var body: [String: Any] = [
             "model": ClaudeAPI.model,
             "max_tokens": maxTokens,
             "stream": true,
-            "fallbacks": "default",
-            "system": [["type": "text", "text": systemPrompt, "cache_control": ["type": "ephemeral"]]],
             "messages": [["role": "user", "content": content]],
-            "output_config": ["effort": "medium", "format": ["type": "json_schema", "schema": schema]],
         ]
+        switch mode {
+        case .full:
+            body["fallbacks"] = "default"
+            body["system"] = [["type": "text", "text": systemPrompt, "cache_control": ["type": "ephemeral"]]]
+            body["output_config"] = ["effort": effort, "format": ["type": "json_schema", "schema": schema]]
+        case .basic:
+            body["system"] = systemPrompt
+        }
         return (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+    }
+
+    /// 구조화 출력을 못 쓸 때 대신 주는 지시
+    static func jsonInstruction(_ schema: [String: Any]) -> String {
+        let s = (try? JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return "Reply with only one JSON object (no markdown, no commentary) that matches this JSON schema:\n" + s
     }
 
     static func userText(width: Int, height: Int, context: TranslationContext) -> String {
@@ -331,7 +357,7 @@ public enum PageRequest {
 
     /// 말풍선 하나를 다른 표현으로(그림 없이 글만 — 싸고 빠르다)
     public static func alternativesBody(source: String, current: String, kind: BlockKind, context: TranslationContext,
-                                        pageSummary: String) -> Data {
+                                        pageSummary: String, mode: ClaudeAPI.Mode = .full) -> Data {
         var text = """
         Original (\(kind.rawValue)): \(source)
         Current Korean translation: \(current)
@@ -351,16 +377,8 @@ public enum PageRequest {
             "required": ["alternatives"],
             "additionalProperties": false,
         ]
-        let body: [String: Any] = [
-            "model": ClaudeAPI.model,
-            "max_tokens": 8000,
-            "stream": true,
-            "fallbacks": "default",
-            "system": [["type": "text", "text": systemPrompt, "cache_control": ["type": "ephemeral"]]],
-            "messages": [["role": "user", "content": [["type": "text", "text": text]]]],
-            "output_config": ["effort": "low", "format": ["type": "json_schema", "schema": schema]],
-        ]
-        return (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+        if mode == .basic { text += "\n\n" + jsonInstruction(schema) }
+        return wrap(content: [["type": "text", "text": text]], maxTokens: 8000, effort: "low", schema: schema, mode: mode)
     }
 }
 
@@ -518,8 +536,12 @@ public struct StreamAccumulator: Sendable {
         case nil: throw TranslateError.network("응답이 중간에 끊겼어요")
         default: break
         }
-        // 이어 쓴 글 전체, 안 되면 마지막 구간만
-        for candidate in [text, segments.last ?? ""] {
+        // 이어 쓴 글 전체, 안 되면 마지막 구간만, 그래도 안 되면 글 속 첫 { 부터 마지막 } 까지(코드 블록 등에 싸여 온 경우)
+        var candidates = [text, segments.last ?? ""]
+        for t in candidates {
+            if let a = t.firstIndex(of: "{"), let b = t.lastIndex(of: "}"), a < b { candidates.append(String(t[a...b])) }
+        }
+        for candidate in candidates {
             if let d = candidate.data(using: .utf8), let v = try? JSONDecoder().decode(T.self, from: d) { return v }
         }
         throw TranslateError.badResponse(String(text.prefix(200)))

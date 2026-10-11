@@ -39,6 +39,16 @@ final class ClaudeTests: XCTestCase {
         let headers = ClaudeAPI.headers(apiKey: "k")
         XCTAssertEqual(headers["anthropic-beta"], "server-side-fallback-2026-07-01")
         XCTAssertEqual(headers["anthropic-version"], "2023-06-01")
+        XCTAssertNil(ClaudeAPI.headers(apiKey: "k", mode: .basic)["anthropic-beta"])
+
+        // 기본 모양: 대체 모델·캐시·구조화 출력 없이, 대신 JSON 지시
+        let basic = try XCTUnwrap(JSONSerialization.jsonObject(with: PageRequest.body(
+            imageJPEG: Data([1]), width: 10, height: 10, context: ctx, mode: .basic)) as? [String: Any])
+        XCTAssertNil(basic["fallbacks"])
+        XCTAssertNil(basic["output_config"])
+        XCTAssertEqual(basic["system"] as? String, PageRequest.systemPrompt)
+        let basicContent = try XCTUnwrap((basic["messages"] as? [[String: Any]])?.first?["content"] as? [[String: Any]])
+        XCTAssertTrue((basicContent[1]["text"] as? String ?? "").contains("\"page_summary\""))
 
         let alt = try XCTUnwrap(JSONSerialization.jsonObject(with: PageRequest.alternativesBody(
             source: "うるさい", current: "시끄러워", kind: .speech, context: ctx, pageSummary: "")) as? [String: Any])
@@ -104,6 +114,18 @@ final class ClaudeTests: XCTestCase {
         XCTAssertEqual(answer.new_terms, [GlossaryEntry(source: "司", korean: "츠카사", note: "주인공")])
         XCTAssertEqual(acc.usage, Usage(input: 3000, output: 2500, cacheRead: 1500, cacheWrite: 0))
         XCTAssertEqual(acc.usage.dollars, (3000 * 4.0 + 2500 * 20.0 + 1500 * 0.2) / 1_000_000, accuracy: 1e-9)
+    }
+
+    /// 구조화 출력 없이 받은 답이 코드 블록에 싸여 와도 읽는다
+    func testDecodeWrappedJSON() throws {
+        var acc = StreamAccumulator()
+        let wrapped = "```json\n" + Self.answerJSON + "\n```"
+        for l in sse([["type": "content_block_start", "index": 0, "content_block": ["type": "text", "text": ""]],
+                      ["type": "content_block_delta", "index": 0, "delta": ["type": "text_delta", "text": wrapped]],
+                      ["type": "message_delta", "delta": ["stop_reason": "end_turn"]]]) {
+            acc.feed(line: l)
+        }
+        XCTAssertEqual(try acc.decode(PageAnswer.self).blocks.count, 2)
     }
 
     func testRefusalAndTruncation() {
