@@ -3,39 +3,109 @@ import Foundation
 /// Claude API(번역 엔진) 요청·응답. 전송은 앱이 URLSession으로 하고, 여기서는 본문을 만들고 응답을 읽는다.
 public enum ClaudeAPI {
     public static let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
-    /// 그림 읽기·번역 모두 가장 뛰어난 모델 하나로
-    public static let model = "claude-opus-5-5"
     public static let version = "2023-06-01"
-    /// 안전 분류기가 잘못 막으면 서버가 알아서 다른 모델로 다시 돌린다
+    /// 안전 분류기가 잘못 막으면 서버가 알아서 다른 모델로 다시 돌린다(Opus만 — Haiku 5.5에는 없다)
     public static let fallbackBeta = "server-side-fallback-2026-07-01"
+    /// 고해상도 등급(Claude 4.7 이후 모델): 긴 변 2576px, 그림 토큰 4784개(28×28 칸 하나가 토큰 하나).
     /// 이보다 크면 서버가 줄여서 상자 좌표가 어긋나므로 미리 맞춰 보낸다
-    public static let maxLongEdge = 2576
-    public static let maxPixels = 3_750_000
-    /// 1백만 토큰당 달러(입력, 출력, 캐시 읽기, 캐시 쓰기 5분)
-    public static let price = (input: 4.0, output: 20.0, cacheRead: 0.20, cacheWrite: 5.0)
+    public static let maxEdge = 2576
+    public static let maxImageTokens = 4784
+
+    /// 번역 엔진
+    public enum Engine: String, Codable, Sendable, CaseIterable {
+        /// 기본: Claude Haiku 5.5 — 한 쪽에 0.2~0.4센트, 5달러로 1천~2천 쪽
+        case standard
+        /// 고급: Claude Opus 5.5 — 한 쪽에 10센트 안팎. 어려운 쪽만 골라서
+        case premium
+
+        public var model: String {
+            switch self {
+            case .standard: "claude-haiku-5-5"
+            case .premium: "claude-opus-5-5"
+            }
+        }
+
+        public var label: String {
+            switch self {
+            case .standard: "Haiku 5.5"
+            case .premium: "Opus 5.5"
+            }
+        }
+
+        /// 생각하는 양. Haiku는 출력이 아주 싸서 medium으로 꼼꼼히
+        public var effort: String { "medium" }
+
+        /// 서버 대체 모델은 Opus에만 있다
+        public var serverFallback: Bool { self == .premium }
+
+        /// 한 쪽 어림 비용(달러) — 예산 확인·예상 금액 표시용
+        public var estimatedPageCost: Double {
+            switch self {
+            case .standard: 0.003
+            case .premium: 0.12
+            }
+        }
+    }
+
+    /// 1백만 토큰당 달러
+    public struct Price: Sendable, Equatable {
+        public var input: Double
+        public var output: Double
+        public var cacheRead: Double
+        public var cacheWrite: Double
+
+        public func cost(_ u: Usage) -> Double {
+            (Double(u.input) * input + Double(u.output) * output + Double(u.cacheRead) * cacheRead
+                + Double(u.cacheWrite) * cacheWrite) / 1_000_000
+        }
+    }
+
+    /// 실제로 답한 모델의 값(공식 가격표, 프롬프트 10만 토큰 이하 기준). 모르는 모델은 비싼 쪽으로 친다.
+    public static func price(model: String) -> Price {
+        if model.hasPrefix("claude-haiku-5-5") { return Price(input: 0.10, output: 0.50, cacheRead: 0.01, cacheWrite: 0.125) }
+        if model.hasPrefix("claude-sonnet-5-5") { return Price(input: 2, output: 10, cacheRead: 0.10, cacheWrite: 2.5) }
+        if model.hasPrefix("claude-opus-5-5") { return Price(input: 4, output: 20, cacheRead: 0.20, cacheWrite: 5) }
+        return Price(input: 5, output: 25, cacheRead: 0.50, cacheWrite: 6.25)
+    }
 
     /// 요청 모양: full = 서버 대체 모델·캐시·구조화 출력까지, basic = 가장 기본(계정에서 어떤 기능이 막혀 있을 때 한 번 더)
     public enum Mode: Sendable {
         case full, basic
     }
 
-    public static func headers(apiKey: String, mode: Mode = .full) -> [String: String] {
+    public static func headers(apiKey: String, mode: Mode = .full, engine: Engine = .standard) -> [String: String] {
         var h = [
             "x-api-key": apiKey,
             "anthropic-version": version,
             "content-type": "application/json",
             "accept": "text/event-stream",
         ]
-        if mode == .full { h["anthropic-beta"] = fallbackBeta }
+        if mode == .full && engine.serverFallback { h["anthropic-beta"] = fallbackBeta }
         return h
     }
 
-    /// 보낼 그림 크기(좌표가 그림 픽셀과 1:1이 되도록 한도 안으로)
-    public static func fittedSize(width: Int, height: Int) -> (Int, Int) {
-        var s = min(1.0, Double(maxLongEdge) / Double(max(width, height)))
-        let px = Double(width) * Double(height) * s * s
-        if px > Double(maxPixels) { s *= (Double(maxPixels) / px).squareRoot() }
-        return (max(1, Int(Double(width) * s)), max(1, Int(Double(height) * s)))
+    /// Claude가 그림을 줄이는 규칙 그대로(공식 참조 구현): 28px 칸으로 올림한 변이 maxEdge 이하이고
+    /// 칸 수가 maxTokens 이하인, 비율을 지킨 가장 큰 크기. 이 크기로 보내면 상자 좌표가 그림 픽셀과 1:1이다.
+    public static func fittedSize(width: Int, height: Int, maxEdge: Int = maxEdge,
+                                  maxTokens: Int = maxImageTokens) -> (Int, Int) {
+        guard width > 0, height > 0 else { return (max(1, width), max(1, height)) }
+        func cells(_ v: Int) -> Int { (v + 27) / 28 }
+        func fits(_ w: Int, _ h: Int) -> Bool {
+            cells(w) * 28 <= maxEdge && cells(h) * 28 <= maxEdge && cells(w) * cells(h) <= maxTokens
+        }
+        if fits(width, height) { return (width, height) }
+        if height > width {
+            let (h, w) = fittedSize(width: height, height: width, maxEdge: maxEdge, maxTokens: maxTokens)
+            return (w, h)
+        }
+        let aspect = Double(width) / Double(height)
+        func short(_ long: Int) -> Int { max(Int((Double(long) / aspect).rounded(.toNearestOrEven)), 1) }
+        var lo = 1, hi = width
+        while lo + 1 < hi {
+            let mid = (lo + hi) / 2
+            if fits(mid, short(mid)) { lo = mid } else { hi = mid }
+        }
+        return (lo, short(lo))
     }
 }
 
@@ -45,23 +115,35 @@ public struct Usage: Codable, Sendable, Equatable {
     public var output = 0
     public var cacheRead = 0
     public var cacheWrite = 0
+    /// 달러(답한 모델의 값으로 계산해 쌓는다)
+    public var cost = 0.0
 
-    public init(input: Int = 0, output: Int = 0, cacheRead: Int = 0, cacheWrite: Int = 0) {
+    public init(input: Int = 0, output: Int = 0, cacheRead: Int = 0, cacheWrite: Int = 0, cost: Double = 0) {
         self.input = input
         self.output = output
         self.cacheRead = cacheRead
         self.cacheWrite = cacheWrite
+        self.cost = cost
     }
 
-    public var dollars: Double {
-        let p = ClaudeAPI.price
-        return (Double(input) * p.input + Double(output) * p.output + Double(cacheRead) * p.cacheRead
-            + Double(cacheWrite) * p.cacheWrite) / 1_000_000
+    enum CodingKeys: String, CodingKey {
+        case input, output, cacheRead, cacheWrite, cost
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        input = try c.decodeIfPresent(Int.self, forKey: .input) ?? 0
+        output = try c.decodeIfPresent(Int.self, forKey: .output) ?? 0
+        cacheRead = try c.decodeIfPresent(Int.self, forKey: .cacheRead) ?? 0
+        cacheWrite = try c.decodeIfPresent(Int.self, forKey: .cacheWrite) ?? 0
+        cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
+    }
+
+    public var dollars: Double { cost }
 
     public static func + (a: Usage, b: Usage) -> Usage {
         Usage(input: a.input + b.input, output: a.output + b.output, cacheRead: a.cacheRead + b.cacheRead,
-              cacheWrite: a.cacheWrite + b.cacheWrite)
+              cacheWrite: a.cacheWrite + b.cacheWrite, cost: a.cost + b.cost)
     }
 }
 
@@ -295,30 +377,34 @@ public enum PageRequest {
 
     /// 페이지 하나 번역 요청 본문(스트리밍)
     public static func body(imageJPEG: Data, width: Int, height: Int, context: TranslationContext,
-                            maxTokens: Int = 32000, mode: ClaudeAPI.Mode = .full) -> Data {
+                            maxTokens: Int = 32000, mode: ClaudeAPI.Mode = .full,
+                            engine: ClaudeAPI.Engine = .standard) -> Data {
         var text = userText(width: width, height: height, context: context)
         if mode == .basic { text += "\n\n" + jsonInstruction(schema) }
-        let content: [[String: Any]] = [
-            ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": imageJPEG.base64EncodedString()]],
-            ["type": "text", "text": text],
+        var image: [String: Any] = [
+            "type": "image",
+            "source": ["type": "base64", "media_type": "image/jpeg", "data": imageJPEG.base64EncodedString()],
         ]
-        return wrap(content: content, maxTokens: maxTokens, effort: "medium", schema: schema, mode: mode)
+        // 서버가 몰래 줄이면 좌표가 어긋난다: 줄여야 하면 오류로 알려 달라(그 크기로 다시 보낸다)
+        if mode == .full { image["transformations"] = ["oversized_image": "error"] }
+        let content: [[String: Any]] = [image, ["type": "text", "text": text]]
+        return wrap(content: content, maxTokens: maxTokens, schema: schema, mode: mode, engine: engine)
     }
 
     /// 공통 본문. basic이면 서버 대체 모델·캐시·구조화 출력 없이(대신 JSON만 쓰라고 지시)
-    static func wrap(content: [[String: Any]], maxTokens: Int, effort: String, schema: [String: Any],
-                     mode: ClaudeAPI.Mode) -> Data {
+    static func wrap(content: [[String: Any]], maxTokens: Int, schema: [String: Any], mode: ClaudeAPI.Mode,
+                     engine: ClaudeAPI.Engine) -> Data {
         var body: [String: Any] = [
-            "model": ClaudeAPI.model,
+            "model": engine.model,
             "max_tokens": maxTokens,
             "stream": true,
             "messages": [["role": "user", "content": content]],
         ]
         switch mode {
         case .full:
-            body["fallbacks"] = "default"
+            if engine.serverFallback { body["fallbacks"] = "default" }
             body["system"] = [["type": "text", "text": systemPrompt, "cache_control": ["type": "ephemeral"]]]
-            body["output_config"] = ["effort": effort, "format": ["type": "json_schema", "schema": schema]]
+            body["output_config"] = ["effort": engine.effort, "format": ["type": "json_schema", "schema": schema]]
         case .basic:
             body["system"] = systemPrompt
         }
@@ -357,7 +443,8 @@ public enum PageRequest {
 
     /// 말풍선 하나를 다른 표현으로(그림 없이 글만 — 싸고 빠르다)
     public static func alternativesBody(source: String, current: String, kind: BlockKind, context: TranslationContext,
-                                        pageSummary: String, mode: ClaudeAPI.Mode = .full) -> Data {
+                                        pageSummary: String, mode: ClaudeAPI.Mode = .full,
+                                        engine: ClaudeAPI.Engine = .standard) -> Data {
         var text = """
         Original (\(kind.rawValue)): \(source)
         Current Korean translation: \(current)
@@ -378,7 +465,7 @@ public enum PageRequest {
             "additionalProperties": false,
         ]
         if mode == .basic { text += "\n\n" + jsonInstruction(schema) }
-        return wrap(content: [["type": "text", "text": text]], maxTokens: 8000, effort: "low", schema: schema, mode: mode)
+        return wrap(content: [["type": "text", "text": text]], maxTokens: 8000, schema: schema, mode: mode, engine: engine)
     }
 }
 
@@ -410,6 +497,15 @@ public enum TranslateError: Error, Equatable, LocalizedError {
         case let .network(m): return "네트워크 오류: \(m)"
         case .cancelled: return "취소됨"
         }
+    }
+
+    /// 서버가 "이 크기로 줄이라"고 알려 준 경우 그 크기(oversized_image: error)
+    public var downsizeTarget: (Int, Int)? {
+        guard case let .invalidRequest(m) = self, let r = m.range(of: "downsized to ") else { return nil }
+        let rest = m[r.upperBound...].prefix { $0.isNumber || $0 == "x" }
+        let parts = rest.split(separator: "x").compactMap { Int($0) }
+        guard parts.count == 2, parts[0] > 0, parts[1] > 0 else { return nil }
+        return (parts[0], parts[1])
     }
 
     /// 잠시 뒤 다시 하면 될 수 있는 오류
@@ -450,7 +546,13 @@ public struct StreamAccumulator: Sendable {
     public private(set) var stopReason: String?
     public private(set) var stopCategory: String?
     public private(set) var model: String?
-    public private(set) var usage = Usage()
+    var tokens = Usage()
+    /// 쓴 토큰과 비용(답한 모델의 값으로)
+    public var usage: Usage {
+        var u = tokens
+        u.cost = ClaudeAPI.price(model: model ?? "").cost(u)
+        return u
+    }
     /// 생각 중(아직 글이 안 나옴)인지 — 진행 표시용
     public private(set) var thinking = false
     public private(set) var error: TranslateError?
@@ -521,10 +623,10 @@ public struct StreamAccumulator: Sendable {
     }
 
     mutating func absorb(_ u: [String: Any]) {
-        if let v = u["input_tokens"] as? Int { usage.input = v }
-        if let v = u["output_tokens"] as? Int { usage.output = v }
-        if let v = u["cache_read_input_tokens"] as? Int { usage.cacheRead = v }
-        if let v = u["cache_creation_input_tokens"] as? Int { usage.cacheWrite = v }
+        if let v = u["input_tokens"] as? Int { tokens.input = v }
+        if let v = u["output_tokens"] as? Int { tokens.output = v }
+        if let v = u["cache_read_input_tokens"] as? Int { tokens.cacheRead = v }
+        if let v = u["cache_creation_input_tokens"] as? Int { tokens.cacheWrite = v }
     }
 
     /// 끝난 응답에서 JSON을 꺼낸다

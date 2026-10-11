@@ -7,6 +7,10 @@ struct SettingsView: View {
     @State private var saved = Keychain.apiKey
     @State private var checking = false
     @State private var check: (ok: Bool, text: String)?
+    @AppStorage(Budget.limitKey) private var budget = 5.0
+    @AppStorage(Budget.spentKey) private var spent = 0.0
+    @State private var budgetText = ""
+    @State private var confirmReset = false
 
     var body: some View {
         TermPage(path: "settings") {
@@ -45,15 +49,39 @@ struct SettingsView: View {
                     .foregroundStyle(Term.muted)
             }
 
+            TermBlock(label: "budget") {
+                let left = max(0, budget - spent)
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("한도").foregroundStyle(Term.muted).frame(width: 56, alignment: .leading)
+                    TextField("5", text: $budgetText)
+                        .keyboardType(.decimalPad)
+                        .frame(width: 80)
+                        .onSubmit { applyBudget() }
+                    Text("달러").foregroundStyle(Term.muted)
+                    Spacer()
+                    Button("적용") { applyBudget() }
+                        .buttonStyle(.term)
+                }
+                .font(Term.mono(15))
+                line("spent", Usage.money(spent) + " / " + Usage.money(budget))
+                line("left", Usage.money(left) + String(format: " · 기본 번역으로 약 %d쪽",
+                                                          Int(left / ClaudeAPI.Engine.standard.estimatedPageCost)))
+                Text("이 한도를 넘으면 번역을 멈춰요. 실제 잔액은 Anthropic 콘솔(Billing)이 기준이고, 여기 숫자는 앱이 센 어림값이에요.")
+                    .font(Term.mono(11.5))
+                    .foregroundStyle(Term.muted)
+                Button { confirmReset = true } label: { Label("쓴 돈 0으로(새로 충전했을 때)", systemImage: "arrow.counterclockwise") }
+                    .buttonStyle(.term)
+            }
+
             TermBlock(label: "engine") {
-                line("model", "Claude Opus 5.5")
+                line("기본", "Claude Haiku 5.5 — 한 쪽에 약 0.3센트")
+                line("고급", "Claude Opus 5.5 — 한 쪽에 약 12센트, 뷰어 ⋯ 메뉴에서 그 쪽만")
                 line("read", "그림 전체를 보고 세로쓰기·손글씨·효과음까지 읽음")
                 line("translate", "앞 쪽 줄거리·용어집을 기억하며 자연스러운 한국어로")
                 line("letter", "말풍선 모양을 찾아 원문만 지우고 한글을 모양대로 앉힘")
                 line("photo", "사진 위 글자는 둘레 색으로 덮고 그 자리에")
                 TermDivider()
-                line("spent", library.totalUsage.costText + " (지금까지 모든 책)")
-                line("price", "보통 한 쪽에 $0.03~0.10 (그림 크기·글 양에 따라)")
+                line("books", library.totalUsage.costText + " (지금 서재에 있는 책들)")
             }
 
             TermBlock(label: "tips") {
@@ -68,6 +96,16 @@ struct SettingsView: View {
             }
         }
         .toolbar(.hidden, for: .navigationBar)
+        .onAppear { budgetText = String(format: "%g", budget) }
+        .confirmationDialog("앱이 센 쓴 돈을 0으로 할까요?", isPresented: $confirmReset, titleVisibility: .visible) {
+            Button("0으로") { spent = 0 }
+        }
+    }
+
+    private func applyBudget() {
+        let v = Double(budgetText.replacingOccurrences(of: ",", with: ".").trimmingCharacters(in: .whitespaces)) ?? budget
+        budget = max(0.5, min(1000, v))
+        budgetText = String(format: "%g", budget)
     }
 
     private func line(_ k: String, _ v: String) -> some View {

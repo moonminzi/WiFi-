@@ -12,16 +12,17 @@ enum ClaudeClient {
         return URLSession(configuration: c)
     }()
 
-    static func request(_ url: URL, apiKey: String, mode: ClaudeAPI.Mode = .full) -> URLRequest {
+    static func request(_ url: URL, apiKey: String, mode: ClaudeAPI.Mode = .full,
+                        engine: ClaudeAPI.Engine = .standard) -> URLRequest {
         var req = URLRequest(url: url)
-        for (k, v) in ClaudeAPI.headers(apiKey: apiKey, mode: mode) { req.setValue(v, forHTTPHeaderField: k) }
+        for (k, v) in ClaudeAPI.headers(apiKey: apiKey, mode: mode, engine: engine) { req.setValue(v, forHTTPHeaderField: k) }
         return req
     }
 
     /// 요청 하나를 스트리밍으로 받는다. progress는 0.3초마다 부른다.
-    static func stream(_ body: Data, apiKey: String, mode: ClaudeAPI.Mode = .full,
+    static func stream(_ body: Data, apiKey: String, mode: ClaudeAPI.Mode = .full, engine: ClaudeAPI.Engine = .standard,
                        progress: @escaping @Sendable (StreamAccumulator) -> Void) async throws -> StreamAccumulator {
-        var req = request(ClaudeAPI.endpoint, apiKey: apiKey, mode: mode)
+        var req = request(ClaudeAPI.endpoint, apiKey: apiKey, mode: mode, engine: engine)
         req.httpMethod = "POST"
         req.httpBody = body
         let bytes: URLSession.AsyncBytes
@@ -141,6 +142,7 @@ enum Pipeline {
         let edits: [String: BlockEdit]
         /// 다시 번역할 때 전의 답(고친 번역을 같은 원문 말풍선으로 옮기려고)
         let previous: PageAnswer?
+        let engine: ClaudeAPI.Engine
     }
 
     struct Result: Sendable {
@@ -150,6 +152,7 @@ enum Pipeline {
         var usage: Usage
         var hits: [[Int]]
         var edits: [String: BlockEdit]
+        var engine: ClaudeAPI.Engine
     }
 
     /// 말풍선 번호가 바뀌어도 사용자가 고친 것은 원문이 같은 말풍선을 따라간다
@@ -212,7 +215,7 @@ enum Pipeline {
         status("그리는 중")
         let edits = remap(job.edits, from: job.previous, to: answer)
         let hits = try paint(work.bitmap, answer: answer, edits: edits, output: job.output, thumb: job.thumb)
-        return Result(answer: answer, width: w, height: h, usage: usage, hits: hits, edits: edits)
+        return Result(answer: answer, width: w, height: h, usage: usage, hits: hits, edits: edits, engine: job.engine)
     }
 
     /// 조각 하나를 보내고 답의 상자를 작업 그림 좌표로 바꾼다
@@ -221,8 +224,8 @@ enum Pipeline {
         guard let crop = image.cropping(to: CGRect(x: tile.x, y: tile.y, width: tile.w, height: tile.h)) else {
             throw TranslateError.badResponse("그림 자르기 실패")
         }
-        let (sw, sh) = ClaudeAPI.fittedSize(width: tile.w, height: tile.h)
-        guard let sized = Pixels.resized(crop, width: sw, height: sh), let jpeg = Pixels.jpeg(sized, quality: 0.88) else {
+        var (sw, sh) = ClaudeAPI.fittedSize(width: tile.w, height: tile.h)
+        guard let sized = Pixels.resized(crop, width: sw, height: sh), var jpeg = Pixels.jpeg(sized, quality: 0.88) else {
             throw TranslateError.badResponse("그림 변환 실패")
         }
         var ctx = job.context
@@ -230,13 +233,13 @@ enum Pipeline {
         var used = Usage()
         // 계정에서 어떤 기능(서버 대체 모델·구조화 출력 등)이 막혀 400이 나면 기본 요청으로 한 번 더
         var mode = ClaudeAPI.Mode.full
-        let acc = try await ClaudeClient.withRetries { attempt in
+        let acc = try await ClaudeClient.withRetries(5) { attempt in
             // 답이 잘렸으면 더 길게 허락하고 다시
             let body = PageRequest.body(imageJPEG: jpeg, width: sw, height: sh, context: ctx,
-                                        maxTokens: attempt == 0 ? 32000 : 64000, mode: mode)
+                                        maxTokens: attempt == 0 ? 32000 : 64000, mode: mode, engine: job.engine)
             status("보내는 중")
             do {
-                let acc = try await ClaudeClient.stream(body, apiKey: job.apiKey, mode: mode) { acc in
+                let acc = try await ClaudeClient.stream(body, apiKey: job.apiKey, mode: mode, engine: job.engine) { acc in
                     let n = acc.text.count
                     status(n > 0 ? "번역 쓰는 중 \(n)자" : (acc.thinking ? "읽고 생각하는 중" : "기다리는 중"))
                 }
@@ -244,6 +247,13 @@ enum Pipeline {
                 _ = try acc.decode(PageAnswer.self)
                 return acc
             } catch let e as TranslateError {
+                // 서버가 줄여야 한다고 크기를 알려 주면(좌표가 어긋나지 않게) 그 크기로 다시
+                if let t = e.downsizeTarget, t.0 < sw || t.1 < sh,
+                   let smaller = Pixels.resized(crop, width: t.0, height: t.1), let j = Pixels.jpeg(smaller, quality: 0.88) {
+                    (sw, sh) = t
+                    jpeg = j
+                    throw TranslateError.server(400, "그림 크기 맞춰 다시")
+                }
                 if case .invalidRequest = e, mode == .full {
                     mode = .basic
                     throw TranslateError.server(400, "기본 요청으로 다시")
@@ -314,7 +324,7 @@ final class Translator: ObservableObject {
 
     /// 페이지 ID → 지금 하는 일
     @Published private(set) var live: [String: String] = [:]
-    @Published private(set) var waiting: [(book: String, page: String)] = []
+    @Published private(set) var waiting: [(book: String, page: String, engine: ClaudeAPI.Engine)] = []
     private var running: [String: (book: String, task: Task<Void, Never>)] = [:]
     private var background: UIBackgroundTaskIdentifier = .invalid
     let limit = 3
@@ -327,13 +337,13 @@ final class Translator: ObservableObject {
         waiting.filter { $0.book == book }.count + running.values.filter { $0.book == book }.count
     }
 
-    func enqueue(book: String, pages: [String], front: Bool = false) {
+    func enqueue(book: String, pages: [String], front: Bool = false, engine: ClaudeAPI.Engine = .standard) {
         let lib = Library.shared
-        var add: [(book: String, page: String)] = []
+        var add: [(book: String, page: String, engine: ClaudeAPI.Engine)] = []
         for p in pages where running[p] == nil {
             waiting.removeAll { $0.page == p }
             guard lib.page(book, p) != nil else { continue }
-            add.append((book, p))
+            add.append((book, p, engine))
             lib.update(book: book, page: p) { rec in
                 rec.status = .queued
                 rec.error = nil
@@ -367,7 +377,7 @@ final class Translator: ObservableObject {
         while running.count < limit, !waiting.isEmpty {
             let job = waiting.removeFirst()
             let task = Task { [weak self] in
-                await self?.run(book: job.book, page: job.page)
+                await self?.run(book: job.book, page: job.page, engine: job.engine)
                 self?.running[job.page] = nil
                 self?.live[job.page] = nil
                 self?.pump()
@@ -391,7 +401,7 @@ final class Translator: ObservableObject {
         background = .invalid
     }
 
-    private func run(book: String, page: String) async {
+    private func run(book: String, page: String, engine: ClaudeAPI.Engine) async {
         let lib = Library.shared
         guard let key = Keychain.apiKey, !key.isEmpty else {
             lib.update(book: book, page: page) { rec in
@@ -400,11 +410,20 @@ final class Translator: ObservableObject {
             }
             return
         }
+        // 정해 둔 예산을 넘지 않게
+        if let stop = Budget.block(for: engine) {
+            lib.update(book: book, page: page) { rec in
+                rec.status = rec.answer == nil ? .failed : .done
+                rec.error = stop
+            }
+            lib.show(stop)
+            return
+        }
         guard let rec = lib.page(book, page) else { return }
         lib.update(book: book, page: page) { $0.status = .working }
         let job = Pipeline.Job(original: Paths.original(book, rec.file), output: Paths.output(book, page),
                                thumb: Paths.thumb(book, page), context: lib.context(book: book, page: page),
-                               apiKey: key, edits: rec.edits, previous: rec.answer)
+                               apiKey: key, edits: rec.edits, previous: rec.answer, engine: engine)
         do {
             let result = try await Pipeline.translate(job) { text in
                 Task { @MainActor in

@@ -107,6 +107,10 @@ struct ReaderView: View {
                     Button { translator.enqueue(book: bookID, pages: [page.id], front: true) } label: {
                         Label(page.answer == nil ? "이 쪽 번역" : "이 쪽 다시 번역", systemImage: "arrow.clockwise")
                     }
+                    Button { translator.enqueue(book: bookID, pages: [page.id], front: true, engine: .premium) } label: {
+                        Label("고급 번역 · Opus 5.5 (약 " + Usage.money(ClaudeAPI.Engine.premium.estimatedPageCost) + ")",
+                              systemImage: "sparkles")
+                    }
                     Button { Task { await save(page) } } label: { Label("사진 앱에 저장", systemImage: "square.and.arrow.down") }
                     Button { shareURL = imageURL(page) } label: { Label("공유", systemImage: "square.and.arrow.up") }
                 } label: {
@@ -147,13 +151,25 @@ struct ReaderView: View {
             case .failed:
                 VStack(alignment: .leading, spacing: 6) {
                     StatusLine(kind: .error, text: page.error ?? "실패")
-                    Button("다시 시도") { translator.enqueue(book: bookID, pages: [page.id], front: true) }
+                    HStack(spacing: 8) {
+                        Button("다시 시도") { translator.enqueue(book: bookID, pages: [page.id], front: true) }
+                            .buttonStyle(.term)
+                        // 기본 엔진이 거절하거나 잘 못 읽은 쪽은 고급 엔진으로
+                        Button("고급 번역 (약 " + Usage.money(ClaudeAPI.Engine.premium.estimatedPageCost) + ")") {
+                            translator.enqueue(book: bookID, pages: [page.id], front: true, engine: .premium)
+                        }
                         .buttonStyle(.term)
+                    }
                 }
             case .done:
-                Text(showOriginal ? "원문 보는 중 — 번역 단추로 돌아가요" : "말풍선을 누르면 원문·고치기 · 이 쪽 \(page.usage.costText)")
-                    .font(Term.mono(11.5))
-                    .foregroundStyle(Term.muted)
+                if let note = page.error {
+                    StatusLine(kind: .warn, text: note)
+                } else {
+                    Text(showOriginal ? "원문 보는 중 — 번역 단추로 돌아가요"
+                        : "말풍선을 누르면 원문·고치기 · \((page.engine ?? .standard).label) · 이 쪽 \(page.usage.costText)")
+                        .font(Term.mono(11.5))
+                        .foregroundStyle(Term.muted)
+                }
             }
         }
     }
@@ -472,6 +488,7 @@ struct BlockSheet: View {
             alternatives = alts.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
             library.update(book: bookID, page: target.page) { $0.usage = $0.usage + usage }
             library.updateBook(bookID) { $0.usage = $0.usage + usage }
+            Budget.add(usage.dollars)
         } catch {
             altError = ClaudeClient.map(error).localizedDescription
         }

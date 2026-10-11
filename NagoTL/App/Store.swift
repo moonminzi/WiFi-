@@ -34,6 +34,8 @@ struct PageRecord: Codable, Identifiable, Equatable {
     var translatedAt: Date?
     /// 그림을 다시 그릴 때마다 올린다(화면 새로고침용)
     var version = 0
+    /// 지금 번역을 만든 엔진(기본 Haiku / 고급 Opus)
+    var engine: ClaudeAPI.Engine?
 }
 
 /// 책(또는 사진 모음)
@@ -265,7 +267,9 @@ final class Library: ObservableObject {
             rec.usage = rec.usage + result.usage
             rec.translatedAt = Date()
             rec.version += 1
+            rec.engine = result.engine
         }
+        Budget.add(result.usage.dollars)
         updateBook(bookID) { b in
             b.usage = b.usage + result.usage
             if b.kind == .book {
@@ -299,6 +303,32 @@ final class Library: ObservableObject {
             try? await Task.sleep(nanoseconds: 3_500_000_000)
             if self.toast == current { self.toast = nil }
         }
+    }
+}
+
+/// 쓸 돈 한도: 정해 둔 금액을 넘으면 번역을 멈춘다(실제 청구는 Anthropic 콘솔 기준, 여기 숫자는 어림)
+enum Budget {
+    static let limitKey = "tl.budget"
+    static let spentKey = "tl.spent"
+
+    static var limit: Double {
+        let v = UserDefaults.standard.double(forKey: limitKey)
+        return v > 0 ? v : 5
+    }
+
+    static var spent: Double { UserDefaults.standard.double(forKey: spentKey) }
+
+    static var remaining: Double { max(0, limit - spent) }
+
+    static func add(_ dollars: Double) {
+        guard dollars > 0 else { return }
+        UserDefaults.standard.set(spent + dollars, forKey: spentKey)
+    }
+
+    /// 이 엔진으로 한 쪽을 더 하면 한도를 넘는가 — 넘으면 안내 문구
+    static func block(for engine: ClaudeAPI.Engine) -> String? {
+        guard spent + engine.estimatedPageCost > limit else { return nil }
+        return String(format: "예산 $%.2f 중 $%.2f를 썼어요. 설정에서 예산을 늘리면 이어서 번역해요.", limit, spent)
     }
 }
 

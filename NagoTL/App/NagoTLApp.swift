@@ -150,5 +150,12 @@ struct ThumbView: View {
 }
 
 extension Usage {
-    var costText: String { String(format: "$%.2f", dollars) }
+    /// $0.003처럼 작은 돈도 보이게
+    var costText: String { Usage.money(dollars) }
+
+    static func money(_ d: Double) -> String {
+        if d == 0 { return "$0" }
+        if d < 0.1 { return String(format: "$%.3f", d) }
+        return String(format: "$%.2f", d)
+    }
 }

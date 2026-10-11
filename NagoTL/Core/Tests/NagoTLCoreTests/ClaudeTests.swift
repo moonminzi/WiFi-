@@ -9,10 +9,17 @@ final class ClaudeTests: XCTestCase {
                                      segment: (1, 3))
         let body = PageRequest.body(imageJPEG: Data([0xFF, 0xD8, 0xFF]), width: 1200, height: 1700, context: ctx)
         let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        XCTAssertEqual(obj["model"] as? String, "claude-opus-5-5")
+        // 기본 엔진은 Haiku 5.5: 서버 대체 모델이 없으므로 fallbacks를 보내면 안 된다
+        XCTAssertEqual(obj["model"] as? String, "claude-haiku-5-5")
         XCTAssertEqual(obj["stream"] as? Bool, true)
-        XCTAssertEqual(obj["fallbacks"] as? String, "default")
-        XCTAssertNil(obj["thinking"], "Opus 5.5는 thinking을 빼야 한다")
+        XCTAssertNil(obj["fallbacks"])
+        XCTAssertNil(obj["thinking"], "thinking은 빼고 effort로 조절")
+        // 고급 엔진(Opus 5.5)은 서버 대체 모델까지
+        let premium = try XCTUnwrap(JSONSerialization.jsonObject(with: PageRequest.body(
+            imageJPEG: Data([1]), width: 10, height: 10, context: ctx, engine: .premium)) as? [String: Any])
+        XCTAssertEqual(premium["model"] as? String, "claude-opus-5-5")
+        XCTAssertEqual(premium["fallbacks"] as? String, "default")
+        XCTAssertEqual(ClaudeAPI.headers(apiKey: "k", engine: .premium)["anthropic-beta"], "server-side-fallback-2026-07-01")
         XCTAssertNil(obj["temperature"])
         let oc = try XCTUnwrap(obj["output_config"] as? [String: Any])
         XCTAssertEqual(oc["effort"] as? String, "medium")
@@ -26,6 +33,7 @@ final class ClaudeTests: XCTestCase {
         XCTAssertEqual(messages[0]["role"] as? String, "user")
         let content = try XCTUnwrap(messages[0]["content"] as? [[String: Any]])
         XCTAssertEqual(content[0]["type"] as? String, "image")
+        XCTAssertEqual((content[0]["transformations"] as? [String: Any])?["oversized_image"] as? String, "error")
         let source = try XCTUnwrap(content[0]["source"] as? [String: Any])
         XCTAssertEqual(source["media_type"] as? String, "image/jpeg")
         XCTAssertEqual(source["data"] as? String, "/9j/")
@@ -37,15 +45,17 @@ final class ClaudeTests: XCTestCase {
         XCTAssertTrue(text.contains("츠카사가 학교에 간다."))
 
         let headers = ClaudeAPI.headers(apiKey: "k")
-        XCTAssertEqual(headers["anthropic-beta"], "server-side-fallback-2026-07-01")
+        XCTAssertNil(headers["anthropic-beta"])
         XCTAssertEqual(headers["anthropic-version"], "2023-06-01")
-        XCTAssertNil(ClaudeAPI.headers(apiKey: "k", mode: .basic)["anthropic-beta"])
+        XCTAssertNil(ClaudeAPI.headers(apiKey: "k", mode: .basic, engine: .premium)["anthropic-beta"])
 
         // 기본 모양: 대체 모델·캐시·구조화 출력 없이, 대신 JSON 지시
         let basic = try XCTUnwrap(JSONSerialization.jsonObject(with: PageRequest.body(
             imageJPEG: Data([1]), width: 10, height: 10, context: ctx, mode: .basic)) as? [String: Any])
         XCTAssertNil(basic["fallbacks"])
         XCTAssertNil(basic["output_config"])
+        let basicImage = try XCTUnwrap(((basic["messages"] as? [[String: Any]])?.first?["content"] as? [[String: Any]])?.first)
+        XCTAssertNil(basicImage["transformations"])
         XCTAssertEqual(basic["system"] as? String, PageRequest.systemPrompt)
         let basicContent = try XCTUnwrap((basic["messages"] as? [[String: Any]])?.first?["content"] as? [[String: Any]])
         XCTAssertTrue((basicContent[1]["text"] as? String ?? "").contains("\"page_summary\""))
@@ -112,7 +122,9 @@ final class ClaudeTests: XCTestCase {
         XCTAssertEqual(answer.blocks[0].box.rect, IRect(x: 10, y: 20, w: 100, h: 200))
         XCTAssertEqual(answer.blocks[1].blockKind, .sfx)
         XCTAssertEqual(answer.new_terms, [GlossaryEntry(source: "司", korean: "츠카사", note: "주인공")])
-        XCTAssertEqual(acc.usage, Usage(input: 3000, output: 2500, cacheRead: 1500, cacheWrite: 0))
+        XCTAssertEqual(acc.usage.input, 3000)
+        XCTAssertEqual(acc.usage.output, 2500)
+        XCTAssertEqual(acc.usage.cacheRead, 1500)
         XCTAssertEqual(acc.usage.dollars, (3000 * 4.0 + 2500 * 20.0 + 1500 * 0.2) / 1_000_000, accuracy: 1e-9)
     }
 
@@ -197,12 +209,55 @@ final class ClaudeTests: XCTestCase {
         XCTAssertFalse(TranslateError.badKey.retryable)
     }
 
-    func testFittedSize() {
-        XCTAssertEqual(ClaudeAPI.fittedSize(width: 1200, height: 1700).0, 1200)
-        let (w, h) = ClaudeAPI.fittedSize(width: 4032, height: 3024)
-        XCTAssertLessThanOrEqual(max(w, h), 2576)
-        XCTAssertLessThanOrEqual(w * h, 3_750_000)
-        XCTAssertEqual(Double(w) / Double(h), 4032.0 / 3024.0, accuracy: 0.01)
+    /// 공식 문서의 예와 똑같이 줄여야 좌표가 1:1로 맞는다
+    func testFittedSizeMatchesServerRule() {
+        func f(_ w: Int, _ h: Int, standard: Bool = false) -> [Int] {
+            let (a, b) = standard ? ClaudeAPI.fittedSize(width: w, height: h, maxEdge: 1568, maxTokens: 1568)
+                : ClaudeAPI.fittedSize(width: w, height: h)
+            return [a, b]
+        }
+        XCTAssertEqual(f(1075, 1520, standard: true), [924, 1307])
+        XCTAssertEqual(f(1920, 1080, standard: true), [1456, 819])
+        // 공식 참조 구현은 1270×952(문서 표의 1269는 같은 토큰 수 1564) — 참조 구현을 따른다
+        XCTAssertEqual(f(2000, 1500, standard: true), [1270, 952])
+        XCTAssertEqual(f(3840, 2160, standard: true), [1456, 819])
+        XCTAssertEqual(f(1000, 1000, standard: true), [1000, 1000])
+        XCTAssertEqual(f(1920, 1080), [1920, 1080])
+        XCTAssertEqual(f(2000, 1500), [2000, 1500])
+        XCTAssertEqual(f(3840, 2160), [2576, 1449])
+        XCTAssertEqual(f(1200, 1700), [1200, 1700])
+        // 넓이로만 따지면 들어가지만(3.75MP) 28px 칸 수로는 넘는 경우
+        let (w, h) = ClaudeAPI.fittedSize(width: 1500, height: 2500)
+        XCTAssertLessThanOrEqual(((w + 27) / 28) * ((h + 27) / 28), 4784)
+        XCTAssertLessThan(w, 1500)
+        for (ow, oh) in [(4032, 3024), (800, 12000), (3000, 100), (1, 1)] {
+            let (a, b) = ClaudeAPI.fittedSize(width: ow, height: oh)
+            XCTAssertLessThanOrEqual(((a + 27) / 28) * 28, 2576)
+            XCTAssertLessThanOrEqual(((b + 27) / 28) * 28, 2576)
+            XCTAssertLessThanOrEqual(((a + 27) / 28) * ((b + 27) / 28), 4784)
+        }
+    }
+
+    func testPricesPerModel() {
+        let u = Usage(input: 1_000_000, output: 1_000_000)
+        XCTAssertEqual(ClaudeAPI.price(model: "claude-haiku-5-5").cost(u), 0.60, accuracy: 1e-9)
+        XCTAssertEqual(ClaudeAPI.price(model: "claude-opus-5-5").cost(u), 24, accuracy: 1e-9)
+        XCTAssertEqual(ClaudeAPI.price(model: "claude-sonnet-5-5").cost(u), 12, accuracy: 1e-9)
+        // 쪽 하나(그림 2623 + 글 1600 입력, 생각 포함 출력 4000)
+        let page = Usage(input: 4223, output: 4000)
+        XCTAssertLessThan(ClaudeAPI.price(model: "claude-haiku-5-5").cost(page), 0.004)
+        // 옛 기록(cost 없음)도 읽힌다
+        let old = try? JSONDecoder().decode(Usage.self, from: Data(#"{"input":5,"output":6,"cacheRead":0,"cacheWrite":0}"#.utf8))
+        XCTAssertEqual(old?.output, 6)
+        XCTAssertEqual(old?.cost, 0)
+    }
+
+    func testDownsizeTargetFromError() {
+        let e = TranslateError.invalidRequest("messages.0.content.0: image dimensions 1920x1080 exceed the maximum image size "
+            + "of a model named on this request and would be downsized to 1456x819; scale the image to at most 1456x819")
+        XCTAssertEqual(e.downsizeTarget?.0, 1456)
+        XCTAssertEqual(e.downsizeTarget?.1, 819)
+        XCTAssertNil(TranslateError.invalidRequest("bad image").downsizeTarget)
     }
 
     func testTilesCoverTallStrip() {

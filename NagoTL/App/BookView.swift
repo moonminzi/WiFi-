@@ -41,8 +41,9 @@ struct BookView: View {
                 .foregroundStyle(Term.muted)
                 if left > 0 { StatusLine(kind: .running, text: "번역 중 · \(left)쪽 남음 (앱을 켜 두세요)") }
                 if done < pages.count && left == 0 {
-                    Text(String(format: "남은 %d쪽 예상 비용 약 $%.2f~%.2f (쪽당 $0.05~0.10)",
-                                pages.count - done, Double(pages.count - done) * 0.05, Double(pages.count - done) * 0.10))
+                    let rest = pages.count - done
+                    Text("남은 \(rest)쪽 예상 약 " + Usage.money(Double(rest) * ClaudeAPI.Engine.standard.estimatedPageCost)
+                        + " · 예산 남은 돈 " + Usage.money(Budget.remaining))
                         .font(Term.mono(11))
                         .foregroundStyle(Term.muted)
                 }
