@@ -35,6 +35,10 @@ final class FileRunner: Runner {
         var meter = SpeedMeter(window: 3)
         var retry: DispatchWorkItem?
         var note: String?
+        /// 요청이 나가 있는 중(응답·데이터를 기다림)
+        var inFlight = false
+        /// 마지막으로 뭔가(응답·데이터) 받은 때
+        var lastProgress: Double = 0
 
         init(id: Int, channel: HTTPChannel) {
             self.id = id
@@ -54,6 +58,7 @@ final class FileRunner: Runner {
     private var stopped = true
     private var connectionLimit: Int
     private var triedSourceAgain = false
+    private var watchdog: DispatchSourceTimer?
 
     init(manager: DownloadManager, item: DownloadManager.Item, settings: EngineSettings, partialURL: URL) {
         self.manager = manager
@@ -90,6 +95,7 @@ final class FileRunner: Runner {
             fail(error.localizedDescription)
             return
         }
+        startWatchdog()
         if record.isFresh {
             startProbe()
         } else {
@@ -102,8 +108,29 @@ final class FileRunner: Runner {
         }
     }
 
+    /// 멈춘 연결 찾기: 한동안 아무것도 안 온 연결은 끊고 다시(모바일망에서 TCP가 그냥 멈추는 일이 잦다)
+    private func startWatchdog() {
+        guard watchdog == nil else { return }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        let every = max(0.5, min(2, settings.stallTimeout / 4))
+        t.schedule(deadline: .now() + every, repeating: every)
+        t.setEventHandler { [weak self] in self?.checkStalls() }
+        t.resume()
+        watchdog = t
+    }
+
+    private func checkStalls() {
+        guard !stopped else { return }
+        let now = Date.monotonicNow
+        for c in conns where c.inFlight && now - c.lastProgress > settings.stallTimeout {
+            failConn(c, ChannelError.stalled)
+        }
+    }
+
     func stop() {
         stopped = true
+        watchdog?.cancel()
+        watchdog = nil
         for c in conns {
             c.retry?.cancel()
             c.channel.invalidate()
@@ -151,6 +178,8 @@ final class FileRunner: Runner {
         c.position = 0
         c.requestStart = 0
         c.gotResponse = false
+        c.inFlight = true
+        c.lastProgress = Date.monotonicNow
         let req = ChannelRequest(url: record.requestURL, headers: requestHeaders, rangeStart: 0, rangeEnd: nil)
         c.channel.start(req) { [weak self, weak c] event in
             guard let self, let c, !self.stopped else { return }
@@ -227,6 +256,8 @@ final class FileRunner: Runner {
         c.requestStart = s.next
         c.gotResponse = false
         c.note = nil
+        c.inFlight = true
+        c.lastProgress = Date.monotonicNow
         var req = ChannelRequest(url: record.requestURL, headers: requestHeaders)
         if record.acceptsRanges {
             req.rangeStart = s.next
@@ -243,14 +274,17 @@ final class FileRunner: Runner {
         switch event {
         case .response(let info):
             c.gotResponse = true
+            c.lastProgress = Date.monotonicNow
             if probing {
                 if adoptProbeResponse(c, info) { fill() }
                 return
             }
             checkResponse(c, info)
         case .data(let data):
+            c.lastProgress = Date.monotonicNow
             receive(c, data)
         case .finished(let error):
+            c.inFlight = false
             finished(c, error)
         }
     }
@@ -318,6 +352,7 @@ final class FileRunner: Runner {
         c.position += Int64(data.count)
         if record.segments[i].isDone {
             c.channel.cancel()
+            c.inFlight = false
             segmentDone(c)
         }
     }
@@ -419,6 +454,7 @@ final class FileRunner: Runner {
     private func failConn(_ c: Conn, _ error: Error) {
         guard !stopped else { return }
         c.channel.cancel()
+        c.inFlight = false
         c.segment = nil
         c.failures += 1
         c.note = error.localizedDescription
@@ -468,7 +504,9 @@ final class FileRunner: Runner {
             }
             return
         }
-        let delay = min(30, 0.5 * pow(2, Double(c.failures - 1)))
+        // 멈춤은 그 연결만의 문제인 경우가 많아서 처음 몇 번은 바로 새 연결로
+        let stalled = (error as? ChannelError) == .stalled
+        let delay = stalled && c.failures <= 3 ? 0.1 : min(30, 0.5 * pow(2, Double(c.failures - 1)))
         let work = DispatchWorkItem { [weak self, weak c] in
             guard let self, let c, !self.stopped else { return }
             c.retry = nil

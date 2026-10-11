@@ -301,12 +301,15 @@ public struct EngineSettings: Equatable, Sendable {
     public var maxRetries: Int
     /// 백그라운드로 넘길 때 구간을 이 크기 안팎으로 나눈다
     public var backgroundChunkBytes: Int64
+    /// 이만큼(초) 한 바이트도 안 오는 연결은 멈춘 것으로 보고 새 연결로 다시 받는다
+    public var stallTimeout: Double
 
     public static let safariUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1"
 
     public init(defaultConnections: Int = 8, maxActiveDownloads: Int = 3, allowsCellular: Bool = true,
                 userAgent: String = EngineSettings.safariUA, minPieceBytes: Int64 = 256 * 1024,
-                requestTimeout: Double = 30, maxRetries: Int = 8, backgroundChunkBytes: Int64 = 32 << 20) {
+                requestTimeout: Double = 30, maxRetries: Int = 8, backgroundChunkBytes: Int64 = 32 << 20,
+                stallTimeout: Double = 12) {
         self.defaultConnections = defaultConnections
         self.maxActiveDownloads = maxActiveDownloads
         self.allowsCellular = allowsCellular
@@ -315,6 +318,7 @@ public struct EngineSettings: Equatable, Sendable {
         self.requestTimeout = requestTimeout
         self.maxRetries = maxRetries
         self.backgroundChunkBytes = backgroundChunkBytes
+        self.stallTimeout = stallTimeout
     }
 }
 

@@ -60,6 +60,7 @@ final class HLSRunner: Runner {
         var failures = 0
         var meter = SpeedMeter(window: 3)
         var retry: DispatchWorkItem?
+        var lastProgress: Double = 0
 
         init(id: Int, channel: HTTPChannel) {
             self.id = id
@@ -77,6 +78,7 @@ final class HLSRunner: Runner {
     private var stopped = true
     private var partFailures: [HLSWork: Int] = [:]
     private var waiting: Set<HLSWork> = []
+    private var watchdog: DispatchSourceTimer?
 
     init(manager: DownloadManager, item: DownloadManager.Item, settings: EngineSettings, paths: EnginePaths) {
         self.manager = manager
@@ -120,11 +122,28 @@ final class HLSRunner: Runner {
             finish()
             return
         }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        let every = max(0.5, min(2, settings.stallTimeout / 4))
+        t.schedule(deadline: .now() + every, repeating: every)
+        t.setEventHandler { [weak self] in self?.checkStalls() }
+        t.resume()
+        watchdog = t
         fill()
+    }
+
+    /// 한동안 아무것도 안 온 조각 요청은 끊고 다시
+    private func checkStalls() {
+        guard !stopped else { return }
+        let now = Date.monotonicNow
+        for c in conns where c.work != nil && now - c.lastProgress > settings.stallTimeout {
+            failWork(c, ChannelError.stalled)
+        }
     }
 
     func stop() {
         stopped = true
+        watchdog?.cancel()
+        watchdog = nil
         for c in conns {
             c.retry?.cancel()
             c.channel.invalidate()
@@ -193,6 +212,7 @@ final class HLSRunner: Runner {
         c.tmpURL = tmp
         c.received = 0
         c.status = 0
+        c.lastProgress = Date.monotonicNow
         var req = ChannelRequest(url: part.url, headers: headers)
         if let off = part.rangeOffset, let len = part.rangeLength {
             req.rangeStart = off
@@ -206,6 +226,7 @@ final class HLSRunner: Runner {
 
     private func handle(_ c: Conn, _ event: HTTPChannel.Event) {
         guard let w = c.work else { return }
+        c.lastProgress = Date.monotonicNow
         switch event {
         case .response(let info):
             c.status = info.statusCode
@@ -299,9 +320,10 @@ final class HLSRunner: Runner {
             fail("조각 \(w.index + 1)번을 못 받았어요: \(error.localizedDescription)")
             return
         }
-        // 조각을 잠깐 쉬게 하고 이 연결은 다른 조각부터
+        // 조각을 잠깐 쉬게 하고 이 연결은 다른 조각부터(멈춤은 곧바로 다시)
         waiting.insert(w)
-        let delay = min(30, 0.5 * pow(2, Double(n - 1)))
+        let stalled = (error as? ChannelError) == .stalled
+        let delay = stalled && n <= 3 ? 0.1 : min(30, 0.5 * pow(2, Double(n - 1)))
         let work = DispatchWorkItem { [weak self] in
             guard let self, !self.stopped else { return }
             self.waiting.remove(w)

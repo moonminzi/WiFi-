@@ -378,6 +378,23 @@ final class EngineIntegrationTests: XCTestCase {
         _ = id
     }
 
+    /// 연결 하나가 데이터를 안 보내고 멈춘다(끊기지도 않음). 멈춤을 알아채고 다른 연결로 받아야 한다.
+    func testStalledConnectionIsReplaced() throws {
+        let path = "/file/stall.bin?size=4000000&seed=47&rate=1000000&stallat=3900000&stallfor=40"
+        let settings = EngineSettings(defaultConnections: 4, minPieceBytes: 64 * 1024, requestTimeout: 60, maxRetries: 20,
+                                      stallTimeout: 2)
+        let m = DownloadManager(paths: paths(), settings: settings)
+        m.load()
+        m.resumeForeground()
+        let t0 = Date()
+        let id = m.add(NewDownload(url: URL(string: server + path)!, connections: 4))
+        let snap = try waitFor(m, id, timeout: 35)
+        let took = Date().timeIntervalSince(t0)
+        try assertFile(snap, equals: path)
+        XCTAssertLessThan(took, 15, "멈춘 연결을 못 알아챔(\(took)s)")
+        print("stall: \(String(format: "%.1f", took))s")
+    }
+
     func testRefreshAddressAfterExpiry() throws {
         let p = paths()
         let first = "/file/exp.bin?size=4000000&seed=31&rate=700000"

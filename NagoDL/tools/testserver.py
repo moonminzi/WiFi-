@@ -12,6 +12,7 @@
     cd=이름       Content-Disposition: attachment; filename*=UTF-8''...
     h2fail=K      처음 K번 요청은 403(만료된 주소 흉내)
     slowfirst=B   이 파일의 첫 요청만 초당 B바이트(느린 연결 하나 흉내 — 동적 분할 확인)
+    stallat=N&stallfor=S  N번째 바이트를 지나는 첫 요청은 거기서 S초 동안 멈춤(연결이 그냥 멈추는 상황)
   /redir?to=<경로>   302로 넘긴다
   /static/<경로>     --root 폴더의 파일(HLS 시험용, Range 지원)
   /stats            경로별 최대 동시 연결 수, 요청 수(JSON)
@@ -145,6 +146,9 @@ class Handler(BaseHTTPRequestHandler):
             if n == 0:
                 q = dict(q)
                 q["rate"] = q["slowfirst"]
+        if "stallat" in q:
+            q = dict(q)
+            q["_stallkey"] = path + "#stall"
         data = content(seed, size)
         extra = {}
         if "cd" in q:
@@ -196,8 +200,16 @@ class Handler(BaseHTTPRequestHandler):
             step = 16384
             t0 = time.monotonic()
             sent = 0
+            stall_at = int(q["stallat"]) if "stallat" in q else None
             while pos <= end and size > 0:
                 n = min(step, end - pos + 1)
+                if stall_at is not None and pos <= stall_at < pos + n:
+                    with LOCK:
+                        first = not COUNTERS.get(q["_stallkey"])
+                        COUNTERS[q["_stallkey"]] = 1
+                    if first:
+                        self.wfile.flush()
+                        time.sleep(float(q.get("stallfor", "30")))
                 if cut is not None and pos + n > cut:
                     n = cut - pos
                     if n > 0:

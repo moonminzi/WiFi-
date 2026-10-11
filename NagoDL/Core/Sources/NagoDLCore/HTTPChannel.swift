@@ -52,6 +52,8 @@ public enum ChannelError: Error, LocalizedError, Equatable {
     case shortRead
     case badRange(String)
     case encoded(String)
+    /// 한동안 한 바이트도 안 옴(연결이 멈춤)
+    case stalled
 
     public var errorDescription: String? {
         switch self {
@@ -59,6 +61,7 @@ public enum ChannelError: Error, LocalizedError, Equatable {
         case .shortRead: return "서버가 중간에 끊었어요"
         case .badRange(let s): return "범위 응답이 이상해요(\(s))"
         case .encoded(let e): return "압축된 응답(\(e))"
+        case .stalled: return "응답이 멈춰서 다시 연결해요"
         }
     }
 
@@ -175,7 +178,13 @@ public final class HTTPChannel {
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
             completionHandler(.allow)
-            channel?.deliver(dataTask.taskIdentifier, .response(HTTPResponseInfo(response)))
+            let info = HTTPResponseInfo(response)
+            #if canImport(FoundationNetworking)
+            // 리눅스판 URLSession은 HTTPS 프록시의 "200 Connection Established"(머리 없음)를
+            // 응답으로 한 번 더 넘긴다. 진짜 응답은 그 뒤에 온다. (애플 URLSession은 이러지 않는다)
+            if info.statusCode == 200 && info.headers.isEmpty { return }
+            #endif
+            channel?.deliver(dataTask.taskIdentifier, .response(info))
         }
 
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
