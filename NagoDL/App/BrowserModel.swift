@@ -260,7 +260,7 @@ extension BrowserModel: WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
         if let url = navigationAction.request.url, let scheme = url.scheme?.lowercased(),
            !["http", "https", "about", "blob", "data", "file", "javascript"].contains(scheme) {
             // 다른 앱 링크(itms-apps:, tel: 등)
-            UIApplication.shared.open(url)
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
             return (.cancel, preferences)
         }
         return (.allow, preferences)

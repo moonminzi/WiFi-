@@ -291,6 +291,93 @@ final class EngineIntegrationTests: XCTestCase {
         try assertFile(snap, equals: path)
     }
 
+    /// 백그라운드에 넘긴 뒤 일시정지: 앱에 작업 취소를 요청하고, 다시 시작하면 포그라운드가 다 받는다.
+    func testPauseDropsBackgroundWork() throws {
+        let path = "/file/pd.bin?size=6000000&seed=37&rate=900000"
+        let m = makeManager(paths(), connections: 4)
+        var cancelled: [UUID] = []
+        let lock = NSLock()
+        m.onCancelExternal = { id in lock.lock(); cancelled.append(id); lock.unlock() }
+        let id = m.add(NewDownload(url: URL(string: server + path)!, connections: 4))
+        try waitFor(m, id, timeout: 30) { $0.doneBytes > 800_000 }
+        let jobs = m.detachForBackground()
+        XCTAssertFalse(jobs.isEmpty)
+        XCTAssertEqual(m.externalKeys(id).count, jobs.count)
+        m.resumeForeground()
+        m.pause(id)
+        try waitFor(m, id) { $0.status == .paused }
+        // onCancelExternal는 메인 큐로 온다
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            lock.lock(); let n = cancelled.count; lock.unlock()
+            if n > 0 { break }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        lock.lock(); XCTAssertEqual(cancelled, [id]); lock.unlock()
+        XCTAssertTrue(m.externalKeys(id).isEmpty)
+        // 늦게 도착한 백그라운드 결과는 받지 않는다
+        let tmp = root.appendingPathComponent("late")
+        try Data(count: 10).write(to: tmp)
+        XCTAssertFalse(m.externalFinished(jobs[0].key, file: tmp, statusCode: 206, contentRange: nil, mimeType: nil))
+        m.resume(id)
+        let snap = try waitFor(m, id, timeout: 60)
+        try assertFile(snap, equals: path)
+    }
+
+    /// 앱이 새로 켜졌는데 일부 작업만 살아 있다: 죽은 작업의 구간은 포그라운드가 받는다.
+    func testReconcileReleasesDeadTasks() throws {
+        let path = "/file/rc.bin?size=7000000&seed=41&rate=900000"
+        let p = paths()
+        let m = makeManager(p, connections: 4)
+        let id = m.add(NewDownload(url: URL(string: server + path)!, connections: 4))
+        try waitFor(m, id, timeout: 30) { $0.doneBytes > 800_000 }
+        let jobs = m.detachForBackground()
+        XCTAssertGreaterThan(jobs.count, 1)
+        m.persistAndStop()
+
+        // 새 실행: 첫 작업만 살아 있다
+        let m2 = DownloadManager(paths: p, settings: EngineSettings(defaultConnections: 4, minPieceBytes: 64 * 1024,
+                                                                    requestTimeout: 10, maxRetries: 20))
+        m2.load()
+        let live: Set<ExternalKey> = [jobs[0].key]
+        m2.reconcileExternal(live: live)
+        XCTAssertEqual(m2.externalKeys(id), [jobs[0].key])
+        m2.resumeForeground()
+        // 살아 있던 작업이 끝났다고 치고 넘긴다
+        var req = URLRequest(url: jobs[0].url)
+        for (k, v) in jobs[0].headers { req.setValue(v, forHTTPHeaderField: k) }
+        let sem = DispatchSemaphore(value: 0)
+        var data: Data?
+        var response: HTTPURLResponse?
+        URLSession(configuration: .ephemeral).dataTask(with: req) { d, r, _ in
+            data = d
+            response = r as? HTTPURLResponse
+            sem.signal()
+        }.resume()
+        sem.wait()
+        let tmp = root.appendingPathComponent("live0")
+        try XCTUnwrap(data).write(to: tmp)
+        XCTAssertTrue(m2.externalFinished(jobs[0].key, file: tmp, statusCode: response?.statusCode ?? 0,
+                                          contentRange: response?.allHeaderFields["Content-Range"] as? String, mimeType: nil))
+        let snap = try waitFor(m2, id, timeout: 60)
+        try assertFile(snap, equals: path)
+    }
+
+    /// 백그라운드에서 실패한 구간은 pendingJobs로 다시 넘길 수 있어야 한다(같은 구간이 두 번 나오지 않게).
+    func testPendingJobsAfterFailure() throws {
+        let path = "/file/pj.bin?size=5000000&seed=43&rate=900000"
+        let m = makeManager(paths(), connections: 4)
+        let id = m.add(NewDownload(url: URL(string: server + path)!, connections: 4))
+        try waitFor(m, id, timeout: 30) { $0.doneBytes > 600_000 }
+        let jobs = m.detachForBackground()
+        XCTAssertTrue(m.pendingJobs().isEmpty, "살아 있는 작업을 또 만들면 안 된다")
+        m.externalFailed(jobs[0].key)
+        let again = m.pendingJobs()
+        XCTAssertEqual(again.map(\.key), [jobs[0].key])
+        XCTAssertTrue(m.pendingJobs().isEmpty)
+        _ = id
+    }
+
     func testRefreshAddressAfterExpiry() throws {
         let p = paths()
         let first = "/file/exp.bin?size=4000000&seed=31&rate=700000"
