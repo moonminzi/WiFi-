@@ -19,8 +19,15 @@ enum Pixels {
     static func workingSize(_ w: Int, _ h: Int) -> (Int, Int) {
         guard w > 0, h > 0 else { return (w, h) }
         if Double(h) > Double(w) * Tiler.tallRatio {
-            let s = min(1, 1400 / Double(w), (36_000_000 / (Double(w) * Double(h))).squareRoot())
+            // 폭이 좁은 웹툰은 900px까지 키우고, 넓으면 1400px로 줄인다
+            let s = min(max(1, 900 / Double(w)), 1400 / Double(w), (36_000_000 / (Double(w) * Double(h))).squareRoot())
             return (max(1, Int(Double(w) * s)), max(1, Int(Double(h) * s)))
+        }
+        // 작은 그림(저해상도 스캔·캡처)은 키워서 읽는다: 작은 글자도 또렷이, 번역 글자도 매끈하게
+        let long = Double(max(w, h))
+        if long < 1600 {
+            let s = min(2, 1600 / long)
+            return ClaudeAPI.fittedSize(width: Int(Double(w) * s), height: Int(Double(h) * s))
         }
         return ClaudeAPI.fittedSize(width: w, height: h)
     }
@@ -39,9 +46,10 @@ enum Pixels {
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
         ]
-        guard let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary),
-              let bmp = bitmap(img) else { return nil }
-        guard let cg = cgImage(bmp) else { return nil }
+        guard var img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+        // 썸네일은 키워 주지 않으므로 작은 그림은 따로 키운다
+        if img.width < tw || img.height < th, let big = resized(img, width: tw, height: th) { img = big }
+        guard let bmp = bitmap(img), let cg = cgImage(bmp) else { return nil }
         return Working(cg: cg, bitmap: bmp)
     }
 

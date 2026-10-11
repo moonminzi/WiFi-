@@ -32,7 +32,7 @@ public struct Refined: Sendable {
     public var textBox: IRect
     /// clean: 다시 칠할 픽셀
     public var eraseMask: RegionMask?
-    /// clean: 지울 때 색을 가져올 수 있는 픽셀(바탕). nil이면 지울 곳 밖 어디든
+    /// clean: 지울 때 색·결을 가져올 깨끗한 바탕 픽셀(글자 둘레 번짐은 뺀 것). nil이면 지울 곳 밖 어디든
     public var eraseSource: RegionMask?
     /// label: 덮을 면
     public var patch: BorderPatch?
@@ -102,7 +102,9 @@ public enum Refiner {
     /// 원문 글자를 지운다. 모든 덩어리를 refinePage로 원본에서 구한 다음 한꺼번에 부를 것.
     public static func erase(_ bmp: inout Bitmap, _ items: [Refined]) {
         for r in items where r.mode == .clean {
-            if let m = r.eraseMask { Inpaint.fill(&bmp, mask: m, source: r.eraseSource, fallback: r.background) }
+            guard let m = r.eraseMask else { continue }
+            Inpaint.fill(&bmp, mask: m, source: r.eraseSource, fallback: r.background)
+            if let s = r.eraseSource { Inpaint.texture(&bmp, mask: m, source: s) }
         }
         for r in items where r.mode == .label { r.patch?.paint(&bmp) }
     }
@@ -151,9 +153,13 @@ public enum Refiner {
         }
         guard text.count > 0 else { return nil }
         let textBox = text.boundingBox
-        // 글자 가장자리의 흐린 픽셀까지 2픽셀 넓혀 지우되 말풍선 밖(테두리)은 건드리지 않는다
-        var erase = text.dilated(2)
+        // 글자 가장자리의 흐린 픽셀·JPEG 번짐까지 3픽셀 넓혀 지우되 말풍선 밖(테두리)은 건드리지 않는다
+        var erase = text.dilated(3)
         for i in erase.bits.indices where !filled.bits[i] { erase.bits[i] = false }
+        // 색·결은 글자에서 조금 떨어진 깨끗한 바탕에서만 가져온다
+        var clean = interior
+        let halo = text.dilated(5)
+        for i in clean.bits.indices where halo.bits[i] { clean.bits[i] = false }
         let glyph = glyphSize(text, fallback: short)
         let ink = maskColor(bmp, text, background: bg)
 
@@ -161,13 +167,13 @@ public enum Refiner {
             let margin = max(3, Int(Double(min(filledBox.w, filledBox.h)) * 0.08))
             let region = filled.eroded(margin)
             if region.count > 0 {
-                return Refined(mode: .clean, textBox: textBox, eraseMask: erase, eraseSource: interior, patch: nil,
+                return Refined(mode: .clean, textBox: textBox, eraseMask: erase, eraseSource: clean, patch: nil,
                                background: bg, ink: ink, region: region, layoutRect: region.boundingBox,
                                glyphSize: glyph, closedBubble: true)
             }
         }
         let layout = grow(bmp, textBox.union(box), bg: bg, ignore: text)
-        return Refined(mode: .clean, textBox: textBox, eraseMask: erase, eraseSource: interior, patch: nil,
+        return Refined(mode: .clean, textBox: textBox, eraseMask: erase, eraseSource: clean, patch: nil,
                        background: bg, ink: ink, region: nil, layoutRect: layout, glyphSize: glyph, closedBubble: false)
     }
 
@@ -327,9 +333,10 @@ public enum Refiner {
         guard inkIn > 0, keptIn * 10 >= inkIn * 7 else { return nil }
         let textBox = text.boundingBox
         let erase = text.dilated(2)
-        // 색은 잉크가 아닌 곳에서만 가져온다
+        // 색·결은 잉크가 아니고 글자에서 조금 떨어진 곳에서만 가져온다
         var source = RegionMask(rect: search)
-        for i in source.bits.indices { source.bits[i] = !ink.bits[i] }
+        let halo = text.dilated(4)
+        for i in source.bits.indices { source.bits[i] = !ink.bits[i] && !halo.bits[i] }
         let layout = grow(bmp, textBox.union(box), bg: bg, ignore: text)
         return Refined(mode: .clean, textBox: textBox, eraseMask: erase, eraseSource: source, patch: nil,
                        background: bg, ink: maskColor(bmp, text, background: bg), region: nil, layoutRect: layout,
@@ -445,21 +452,26 @@ public enum Refiner {
         return (bg, Double(close) / Double(max(1, box.area)))
     }
 
-    /// 마스크 픽셀 중 바탕과 확실히 다른 것들의 평균(원문 글자색)
+    /// 원문 글자색: 바탕과 가장 먼(획 가운데) 픽셀 30%의 평균. 스캔본은 획 가장자리가 흐려서 전체 평균은 회색이 된다.
     static func maskColor(_ bmp: Bitmap, _ m: RegionMask, background: RGBA) -> RGBA {
-        var sr = 0, sg = 0, sb = 0, n = 0
+        var samples: [(Int, RGBA)] = []
         for ly in 0..<m.rect.h {
             for lx in 0..<m.rect.w where m.bits[ly * m.rect.w + lx] {
                 let c = bmp.color(lx + m.rect.x, ly + m.rect.y)
-                if c.distance2(background) > inkThreshold {
-                    sr += Int(c.r)
-                    sg += Int(c.g)
-                    sb += Int(c.b)
-                    n += 1
-                }
+                let d = c.distance2(background)
+                if d > inkThreshold { samples.append((d, c)) }
             }
         }
-        if n == 0 { return background.luminance > 128 ? .black : .white }
+        if samples.isEmpty { return background.luminance > 128 ? .black : .white }
+        samples.sort { $0.0 > $1.0 }
+        let top = samples.prefix(max(1, samples.count * 3 / 10))
+        var sr = 0, sg = 0, sb = 0
+        for (_, c) in top {
+            sr += Int(c.r)
+            sg += Int(c.g)
+            sb += Int(c.b)
+        }
+        let n = top.count
         return RGBA(UInt8(sr / n), UInt8(sg / n), UInt8(sb / n))
     }
 

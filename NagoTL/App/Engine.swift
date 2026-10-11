@@ -130,6 +130,8 @@ enum Pipeline {
         let context: TranslationContext
         let apiKey: String
         let edits: [String: BlockEdit]
+        /// 다시 번역할 때 전의 답(고친 번역을 같은 원문 말풍선으로 옮기려고)
+        let previous: PageAnswer?
     }
 
     struct Result: Sendable {
@@ -138,6 +140,25 @@ enum Pipeline {
         var height: Int
         var usage: Usage
         var hits: [[Int]]
+        var edits: [String: BlockEdit]
+    }
+
+    /// 말풍선 번호가 바뀌어도 사용자가 고친 것은 원문이 같은 말풍선을 따라간다
+    static func remap(_ edits: [String: BlockEdit], from old: PageAnswer?, to new: PageAnswer) -> [String: BlockEdit] {
+        guard let old, !edits.isEmpty else { return [:] }
+        var out: [String: BlockEdit] = [:]
+        var used = Set<Int>()
+        for (key, e) in edits.sorted(by: { $0.key < $1.key }) {
+            guard let i = Int(key), i < old.blocks.count else { continue }
+            let src = old.blocks[i].source.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let j = new.blocks.indices.first(where: {
+                !used.contains($0) && new.blocks[$0].source.trimmingCharacters(in: .whitespacesAndNewlines) == src
+            }) {
+                used.insert(j)
+                out[String(j)] = e
+            }
+        }
+        return out
     }
 
     static func translate(_ job: Job, status: @escaping @Sendable (String) -> Void) async throws -> Result {
@@ -170,7 +191,7 @@ enum Pipeline {
             }
         }
         let all = answers.compactMap { $0 }
-        var answer: PageAnswer
+        let answer: PageAnswer
         if all.count == 1 {
             answer = all[0]
         } else {
@@ -180,8 +201,9 @@ enum Pipeline {
                                 new_terms: all.reduce([]) { GlossaryEntry.merge($0, adding: $1.new_terms) })
         }
         status("그리는 중")
-        let hits = try paint(work.bitmap, answer: answer, edits: job.edits, output: job.output, thumb: job.thumb)
-        return Result(answer: answer, width: w, height: h, usage: usage, hits: hits)
+        let edits = remap(job.edits, from: job.previous, to: answer)
+        let hits = try paint(work.bitmap, answer: answer, edits: edits, output: job.output, thumb: job.thumb)
+        return Result(answer: answer, width: w, height: h, usage: usage, hits: hits, edits: edits)
     }
 
     /// 조각 하나를 보내고 답의 상자를 작업 그림 좌표로 바꾼다
@@ -275,6 +297,7 @@ final class Translator: ObservableObject {
     @Published private(set) var live: [String: String] = [:]
     @Published private(set) var waiting: [(book: String, page: String)] = []
     private var running: [String: (book: String, task: Task<Void, Never>)] = [:]
+    private var background: UIBackgroundTaskIdentifier = .invalid
     let limit = 3
 
     var busy: Bool { !running.isEmpty || !waiting.isEmpty }
@@ -332,8 +355,21 @@ final class Translator: ObservableObject {
             }
             running[job.page] = (job.book, task)
         }
-        // 책 한 권을 번역하는 동안 화면이 꺼지지 않게
+        // 책 한 권을 번역하는 동안 화면이 꺼지지 않게, 잠깐 다른 앱으로 가도 하던 쪽은 마치게
         UIApplication.shared.isIdleTimerDisabled = busy
+        if busy && background == .invalid {
+            background = UIApplication.shared.beginBackgroundTask(withName: "translate") { [weak self] in
+                Task { @MainActor in self?.endBackground() }
+            }
+        } else if !busy {
+            endBackground()
+        }
+    }
+
+    private func endBackground() {
+        guard background != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(background)
+        background = .invalid
     }
 
     private func run(book: String, page: String) async {
@@ -349,7 +385,7 @@ final class Translator: ObservableObject {
         lib.update(book: book, page: page) { $0.status = .working }
         let job = Pipeline.Job(original: Paths.original(book, rec.file), output: Paths.output(book, page),
                                thumb: Paths.thumb(book, page), context: lib.context(book: book, page: page),
-                               apiKey: key, edits: rec.edits)
+                               apiKey: key, edits: rec.edits, previous: rec.answer)
         do {
             let result = try await Pipeline.translate(job) { text in
                 Task { @MainActor in

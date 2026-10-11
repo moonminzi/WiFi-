@@ -183,8 +183,10 @@ public enum Typesetter {
         let lh = size * lineSpacing
         let maxLines = Int(Double(shape.rect.h) / lh)
         guard maxLines >= 1 else { return nil }
+        // 강제 줄바꿈 수만큼은 줄이 있어야 한다
+        guard maxLines >= max(1, paras.count) else { return nil }
         let total = paras.reduce(0.0) { acc, p in acc + p.reduce(0.0) { $0 + $1.width * size } }
-        for n in max(1, paras.count)...max(1, maxLines) where n <= maxLines {
+        for n in max(1, paras.count)...maxLines {
             var top = shape.centerY - Double(n) * lh / 2
             top = min(max(top, Double(shape.rect.y)), Double(shape.rect.maxY) - Double(n) * lh)
             var spans: [(Double, Double)] = []

@@ -12,6 +12,7 @@ struct BookView: View {
     @State private var exporting = false
     @State private var shareURL: URL?
     @State private var deletingPage: PageRecord?
+    @State private var confirmRedo = false
 
     var body: some View {
         if let book = library.book(bookID) {
@@ -39,12 +40,20 @@ struct BookView: View {
                 .font(Term.mono(12))
                 .foregroundStyle(Term.muted)
                 if left > 0 { StatusLine(kind: .running, text: "번역 중 · \(left)쪽 남음 (앱을 켜 두세요)") }
+                if done < pages.count && left == 0 {
+                    Text(String(format: "남은 %d쪽 예상 비용 약 $%.2f~%.2f (쪽당 $0.05~0.10)",
+                                pages.count - done, Double(pages.count - done) * 0.05, Double(pages.count - done) * 0.10))
+                        .font(Term.mono(11))
+                        .foregroundStyle(Term.muted)
+                }
                 HStack(spacing: 8) {
                     if left > 0 {
                         Button { translator.cancel(book: bookID) } label: { Label("멈춤", systemImage: "pause") }
                             .buttonStyle(TermButtonStyle(kind: .secondary, fill: true))
                     } else {
-                        Button { translateAll(pages) } label: {
+                        Button {
+                            if done == pages.count { confirmRedo = true } else { translateAll(pages) }
+                        } label: {
                             Label(done == pages.count && !pages.isEmpty ? "모두 다시" : "전체 번역", systemImage: "character.bubble")
                         }
                         .buttonStyle(TermButtonStyle(kind: .primary, fill: true))
@@ -93,6 +102,10 @@ struct BookView: View {
         }
         .sheet(item: Binding(get: { shareURL.map(ShareItem.init) }, set: { shareURL = $0?.url })) { item in
             ActivityView(items: [item.url])
+        }
+        .confirmationDialog("모든 쪽을 처음부터 다시 번역할까요? 직접 고친 번역은 원문이 같은 말풍선에 그대로 남아요.",
+                            isPresented: $confirmRedo, titleVisibility: .visible) {
+            Button("모두 다시 번역") { translator.enqueue(book: bookID, pages: library.pageList(bookID).map(\.id)) }
         }
         .confirmationDialog("이 쪽을 지울까요?", isPresented: Binding(get: { deletingPage != nil }, set: { if !$0 { deletingPage = nil } }),
                             titleVisibility: .visible) {

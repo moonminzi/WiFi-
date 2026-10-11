@@ -367,10 +367,53 @@ public enum Inflate {
         return (try! Huffman(lengths: l), try! Huffman(lengths: [Int](repeating: 5, count: 30)))
     }()
 
+    /// 풀어 쓴 결과(미리 잡은 버퍼에 쓰고, 모자라면 늘린다 — 자기 자신을 조각으로 복사하면 버퍼 전체가 복사돼 느려진다)
+    struct Output {
+        var buf: [UInt8]
+        var n = 0
+
+        init(capacity: Int) {
+            buf = [UInt8](repeating: 0, count: max(1024, capacity))
+        }
+
+        @inline(__always) mutating func reserve(_ extra: Int) {
+            if n + extra > buf.count {
+                buf.append(contentsOf: repeatElement(0, count: max(buf.count, extra)))
+            }
+        }
+
+        @inline(__always) mutating func byte(_ b: UInt8) {
+            reserve(1)
+            buf[n] = b
+            n += 1
+        }
+
+        /// 거리 d 앞에서 len 바이트를 이어 붙인다(겹쳐도 된다: 한 바이트씩)
+        @inline(__always) mutating func copy(distance d: Int, length len: Int) {
+            reserve(len)
+            buf.withUnsafeMutableBufferPointer { p in
+                var src = n - d, dst = n
+                for _ in 0..<len {
+                    p[dst] = p[src]
+                    dst += 1
+                    src += 1
+                }
+            }
+            n += len
+        }
+
+        mutating func append(_ bytes: ArraySlice<UInt8>) {
+            reserve(bytes.count)
+            buf.replaceSubrange(n..<(n + bytes.count), with: bytes)
+            n += bytes.count
+        }
+
+        var result: [UInt8] { Array(buf[0..<n]) }
+    }
+
     public static func inflate(_ input: [UInt8], expectedSize: Int? = nil) throws -> [UInt8] {
         var b = Bits(data: input)
-        var out: [UInt8] = []
-        out.reserveCapacity(expectedSize ?? input.count * 3)
+        var out = Output(capacity: expectedSize ?? input.count * 3)
         var last = false
         while !last {
             last = try b.take(1) == 1
@@ -382,11 +425,11 @@ public enum Inflate {
                 // 비트 버퍼에 남은 바이트부터
                 var left = len
                 while left > 0 && b.count >= 8 {
-                    out.append(UInt8(try b.take(8)))
+                    out.byte(UInt8(try b.take(8)))
                     left -= 1
                 }
                 guard b.pos + left <= input.count else { throw ZipError.corrupt("deflate: 저장 블록 범위") }
-                out.append(contentsOf: input[b.pos..<(b.pos + left)])
+                out.append(input[b.pos..<(b.pos + left)])
                 b.pos += left
             case 1:
                 try codes(&b, &out, fixed.0, fixed.1)
@@ -419,14 +462,14 @@ public enum Inflate {
                 throw ZipError.corrupt("deflate: 블록 종류")
             }
         }
-        return out
+        return out.result
     }
 
-    static func codes(_ b: inout Bits, _ out: inout [UInt8], _ lit: Huffman, _ dist: Huffman) throws {
+    static func codes(_ b: inout Bits, _ out: inout Output, _ lit: Huffman, _ dist: Huffman) throws {
         while true {
             let sym = try lit.decode(&b)
             if sym < 256 {
-                out.append(UInt8(sym))
+                out.byte(UInt8(sym))
             } else if sym == 256 {
                 return
             } else {
@@ -436,13 +479,8 @@ public enum Inflate {
                 let di = try dist.decode(&b)
                 guard di < 30 else { throw ZipError.corrupt("deflate: 거리 부호") }
                 let d = distBase[di] + (try b.take(distExtra[di]))
-                guard d <= out.count else { throw ZipError.corrupt("deflate: 거리") }
-                let start = out.count - d
-                if d >= len {
-                    out.append(contentsOf: out[start..<(start + len)])
-                } else {
-                    for k in 0..<len { out.append(out[start + k]) }
-                }
+                guard d <= out.n else { throw ZipError.corrupt("deflate: 거리") }
+                out.copy(distance: d, length: len)
             }
         }
     }

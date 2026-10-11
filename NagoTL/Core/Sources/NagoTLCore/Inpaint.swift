@@ -96,6 +96,40 @@ public enum Inpaint {
     }
 }
 
+extension Inpaint {
+    /// 지운 자리에 둘레 바탕의 결(종이 질감·스캔 잡음)을 입힌다: 칸마다 가까운 깨끗한 바탕 픽셀 하나를 골라 옮긴다.
+    /// 평평한 디지털 바탕이면 그대로이고, 스캔본이면 매끈한 얼룩 대신 종이 결이 이어진다.
+    /// 바탕 픽셀을 못 찾은 칸은 fill이 채운 색을 둔다.
+    public static func texture(_ bmp: inout Bitmap, mask: RegionMask, source: RegionMask) {
+        let r = mask.rect
+        for ly in 0..<r.h {
+            for lx in 0..<r.w where mask.bits[ly * r.w + lx] {
+                let x = lx + r.x, y = ly + r.y
+                guard x >= 0, y >= 0, x < bmp.width, y < bmp.height else { continue }
+                // 자리마다 같은 난수(같은 그림이면 늘 같은 결과)
+                var seed = UInt32(truncatingIfNeeded: (x &* 73_856_093) ^ (y &* 19_349_663)) | 1
+                func next(_ n: Int) -> Int {
+                    seed ^= seed << 13
+                    seed ^= seed >> 17
+                    seed ^= seed << 5
+                    return Int(seed % UInt32(n))
+                }
+                var found: RGBA?
+                for radius in [6, 12, 24, 40] where found == nil {
+                    for _ in 0..<10 {
+                        let sx = x + next(2 * radius + 1) - radius, sy = y + next(2 * radius + 1) - radius
+                        guard sx >= 0, sy >= 0, sx < bmp.width, sy < bmp.height,
+                              source.get(sx, sy), !mask.get(sx, sy) else { continue }
+                        found = bmp.color(sx, sy)
+                        break
+                    }
+                }
+                if let c = found { bmp.set(x, y, c) }
+            }
+        }
+    }
+}
+
 /// 사각형 둘레 색으로 안쪽을 매끈하게 잇는 면(쿤스 패치). 사진·그림 위 글자를 덮을 때 쓴다.
 public struct BorderPatch: Sendable {
     public let rect: IRect

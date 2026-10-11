@@ -258,6 +258,7 @@ final class Library: ObservableObject {
             rec.status = .done
             rec.error = nil
             rec.answer = result.answer
+            rec.edits = result.edits
             rec.width = result.width
             rec.height = result.height
             rec.hits = result.hits
