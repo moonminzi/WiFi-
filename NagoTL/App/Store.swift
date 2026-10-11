@@ -109,6 +109,8 @@ final class Library: ObservableObject {
     /// 불러온 책의 페이지들
     @Published private(set) var pages: [String: [String: PageRecord]] = [:]
     @Published var toast: String?
+    /// 파일 가져오는 중이면 무엇을 얼마나(서재 화면에 보인다)
+    @Published var importing: String?
 
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
@@ -373,88 +375,238 @@ enum Importer {
         return await MainActor.run { Library.shared.attach(book: book, files: files, atFront: atFront) }
     }
 
-    /// 파일 앱에서 고른 것들: 그림은 한 책으로 묶고, ZIP/CBZ/PDF는 하나씩 책으로
+    /// 파일 앱에서 고를 수 있는 종류
+    static var fileTypes: [UTType] { [.image, .zip, cbz, .pdf] }
+
+    enum Kind { case archive, pdf, image }
+
+    /// 확장자로, 모르는 확장자면 파일 앞머리로
+    static func kind(of url: URL) -> Kind {
+        let ext = url.pathExtension.lowercased()
+        if ext == "zip" || ext == "cbz" { return .archive }
+        if ext == "pdf" { return .pdf }
+        if imageExts.contains(ext) { return .image }
+        let head: [UInt8] = withAccess(url) {
+            guard let h = try? FileHandle(forReadingFrom: url) else { return [] }
+            defer { try? h.close() }
+            return [UInt8]((try? h.read(upToCount: 8)) ?? Data())
+        }
+        if head.starts(with: [0x50, 0x4B, 0x03, 0x04]) { return .archive }
+        if head.starts(with: [0x25, 0x50, 0x44, 0x46]) { return .pdf }
+        return .image
+    }
+
+    /// 보안 범위가 걸린 주소면 읽는 동안만 열어 둔다(선택기가 준 복사본이면 아무 일 없음)
+    static func withAccess<T>(_ url: URL, _ body: () throws -> T) rethrows -> T {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        return try body()
+    }
+
+    /// 그림으로 읽히는 데이터인가(빈 파일·맥 부가 파일 같은 건 뺀다)
+    static func isImage(_ data: Data) -> Bool {
+        guard !data.isEmpty, let src = CGImageSourceCreateWithData(data as CFData, nil) else { return false }
+        return CGImageSourceGetType(src) != nil && CGImageSourceGetCount(src) > 0
+    }
+
+    /// 선택기·다른 앱이 이 앱 안에 만들어 준 복사본인가(가져온 뒤 지운다). 사용자의 원본은 건드리지 않는다
+    static func isOurCopy(_ url: URL) -> Bool {
+        let path = url.resolvingSymlinksInPath().path
+        let tmp = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path
+        let inbox = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Inbox").resolvingSymlinksInPath().path
+        return path.hasPrefix(tmp + "/") || path.hasPrefix(inbox + "/")
+    }
+
+    /// 지금 가져오는 중인 것(서재 화면에 보인다)
+    @MainActor
+    static func report(_ text: String) {
+        Library.shared.importing = text
+    }
+
+    /// 파일 앱·다른 앱에서 받은 것들: 그림은 한 책으로 묶고, ZIP/CBZ/PDF는 하나씩 책으로. 만든 책 ID들
     @MainActor
     static func importFiles(_ urls: [URL]) async -> [String] {
         let lib = Library.shared
         var bookIDs: [String] = []
+        var problems: [String] = []
         var loose: [URL] = []
-        for url in urls {
-            let ext = url.pathExtension.lowercased()
-            if ["zip", "cbz"].contains(ext) || ext == "pdf" {
-                let title = url.deletingPathExtension().lastPathComponent
-                let id = lib.createBook(title: title)
-                lib.show("가져오는 중: \(title)")
-                let files: [String] = await Task.detached(priority: .userInitiated) {
-                    let scoped = url.startAccessingSecurityScopedResource()
-                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                    return ext == "pdf" ? Importer.pdfPages(url, book: id) : Importer.archivePages(url, book: id)
-                }.value
-                if files.isEmpty {
-                    lib.deleteBook(id)
-                    lib.show("그림을 찾지 못했어요: \(url.lastPathComponent)")
-                } else {
-                    _ = lib.attach(book: id, files: files)
-                    bookIDs.append(id)
-                }
-            } else {
+        for (n, url) in urls.enumerated() {
+            let title = url.deletingPathExtension().lastPathComponent
+            report("가져오는 중: \(title)" + (urls.count > 1 ? " (\(n + 1)/\(urls.count))" : ""))
+            let kind = await Task.detached(priority: .userInitiated) { Importer.kind(of: url) }.value
+            switch kind {
+            case .archive:
+                let r = await importArchive(url, title: title)
+                bookIDs += r.ids
+                problems += r.problems
+            case .pdf:
+                let r = await importPDF(url, title: title)
+                bookIDs += r.ids
+                problems += r.problems
+            case .image:
                 loose.append(url)
             }
         }
         if !loose.isEmpty {
-            let title = loose.count == 1 ? loose[0].deletingPathExtension().lastPathComponent : "그림 \(loose.count)장"
-            let id = lib.createBook(title: title)
-            let sorted = loose.sorted { naturalLess($0.lastPathComponent, $1.lastPathComponent) }
-            let files: [String] = await Task.detached(priority: .userInitiated) {
-                sorted.enumerated().compactMap { i, url in
-                    let scoped = url.startAccessingSecurityScopedResource()
-                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                    guard let d = try? Data(contentsOf: url) else { return nil }
-                    let e = Importer.imageExts.contains(url.pathExtension.lowercased())
-                        ? url.pathExtension : Importer.ext(for: d)
-                    return Importer.store(d, ext: e, book: id, index: i)
-                }
-            }.value
-            if files.isEmpty { lib.deleteBook(id) } else {
-                _ = lib.attach(book: id, files: files)
-                bookIDs.append(id)
-            }
+            let r = await importLoose(loose)
+            bookIDs += r.ids
+            problems += r.problems
+        }
+        for url in urls where isOurCopy(url) { try? FileManager.default.removeItem(at: url) }
+        lib.importing = nil
+        if !problems.isEmpty {
+            lib.show(problems.joined(separator: "\n"))
+        } else if bookIDs.isEmpty {
+            lib.show("가져올 그림을 찾지 못했어요")
+        } else if bookIDs.count > 1 {
+            lib.show("책 \(bookIDs.count)권을 가져왔어요")
         }
         return bookIDs
     }
 
-    static func archivePages(_ url: URL, book: String) -> [String] {
-        guard let zip = try? ZipReader(url: url) else { return [] }
-        var out: [String] = []
-        for (i, e) in zip.imageEntries.enumerated() {
-            guard let data = try? zip.extract(e) else { continue }
-            if let f = store(data, ext: (e.name as NSString).pathExtension, book: book, index: i) { out.append(f) }
+    /// 낱장 그림들 → 한 책(파일 이름 순서: 2가 10보다 앞)
+    @MainActor
+    static func importLoose(_ urls: [URL]) async -> (ids: [String], problems: [String]) {
+        let lib = Library.shared
+        let title = urls.count == 1 ? urls[0].deletingPathExtension().lastPathComponent : "그림 \(urls.count)장"
+        let id = lib.createBook(title: title)
+        let sorted = urls.sorted { naturalLess($0.lastPathComponent, $1.lastPathComponent) }
+        let files: [String] = await Task.detached(priority: .userInitiated) {
+            var out: [String] = []
+            for (i, url) in sorted.enumerated() {
+                let data = Importer.withAccess(url) { try? Data(contentsOf: url) }
+                if let d = data, Importer.isImage(d) {
+                    let e = Importer.imageExts.contains(url.pathExtension.lowercased()) ? url.pathExtension : Importer.ext(for: d)
+                    if let f = Importer.store(d, ext: e, book: id, index: i) { out.append(f) }
+                }
+                await Importer.report("가져오는 중: 그림 \(i + 1)/\(sorted.count)장")
+            }
+            return out
+        }.value
+        guard !files.isEmpty else {
+            lib.deleteBook(id)
+            return ([], ["그림 파일을 읽지 못했어요"])
         }
-        return out
+        _ = lib.attach(book: id, files: files)
+        let skipped = sorted.count - files.count
+        return ([id], skipped > 0 ? ["\(skipped)장은 그림으로 읽히지 않아 뺐어요"] : [])
     }
 
-    /// PDF 쪽을 그림으로(긴 변 2000px 안팎)
-    static func pdfPages(_ url: URL, book: String) -> [String] {
-        guard let doc = PDFDocument(url: url) else { return [] }
+    /// ZIP/CBZ 하나 → 책 하나. 그림 없이 ZIP/CBZ/PDF만 들어 있으면(여러 권 묶음) 그것들을 권마다 책으로
+    @MainActor
+    static func importArchive(_ url: URL, title: String, nested: Bool = false) async -> (ids: [String], problems: [String]) {
+        let lib = Library.shared
+        let opened: Result<ZipReader, Error> = await Task.detached(priority: .userInitiated) {
+            Result { try Importer.withAccess(url) { try ZipReader(url: url) } }
+        }.value
+        let zip: ZipReader
+        switch opened {
+        case let .success(z): zip = z
+        case let .failure(e): return ([], ["\(title): \(e.localizedDescription)"])
+        }
+        let images = zip.imageEntries
+        if images.isEmpty {
+            let inner = nested ? [] : zip.innerBooks
+            guard !inner.isEmpty else {
+                let locked = zip.entries.contains { $0.encrypted }
+                return ([], [title + (locked ? ": 암호가 걸린 ZIP이라 열 수 없어요" : ": 안에 그림 파일이 없어요")])
+            }
+            var ids: [String] = []
+            var problems: [String] = []
+            for (k, e) in inner.enumerated() {
+                let name = e.name.split(separator: "/").last.map(String.init) ?? e.name
+                let sub = (name as NSString).deletingPathExtension
+                report("가져오는 중: \(title) · \(k + 1)/\(inner.count)권")
+                let tmp = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("inner-" + UUID().uuidString)
+                    .appendingPathExtension((name as NSString).pathExtension.lowercased())
+                let ok: Bool = await Task.detached(priority: .userInitiated) {
+                    guard let d = try? zip.extract(e) else { return false }
+                    return (try? d.write(to: tmp)) != nil
+                }.value
+                guard ok else {
+                    problems.append("\(sub): 꺼내지 못했어요")
+                    continue
+                }
+                let r: (ids: [String], problems: [String])
+                if tmp.pathExtension == "pdf" {
+                    r = await importPDF(tmp, title: sub)
+                } else {
+                    r = await importArchive(tmp, title: sub, nested: true)
+                }
+                try? FileManager.default.removeItem(at: tmp)
+                ids += r.ids
+                problems += r.problems
+            }
+            return (ids, problems)
+        }
+        let id = lib.createBook(title: title)
+        let total = images.count
+        let files: [String] = await Task.detached(priority: .userInitiated) {
+            var out: [String] = []
+            for (i, e) in images.enumerated() {
+                if let data = try? zip.extract(e), Importer.isImage(data),
+                   let f = Importer.store(data, ext: (e.name as NSString).pathExtension, book: id, index: i) {
+                    out.append(f)
+                }
+                if i % 3 == 2 || i == total - 1 { await Importer.report("가져오는 중: \(title) · \(i + 1)/\(total)쪽") }
+            }
+            return out
+        }.value
+        guard !files.isEmpty else {
+            lib.deleteBook(id)
+            let locked = images.contains { $0.encrypted }
+            return ([], [title + (locked ? ": 암호가 걸린 ZIP이라 열 수 없어요" : ": 그림을 하나도 읽지 못했어요")])
+        }
+        _ = lib.attach(book: id, files: files)
+        return ([id], files.count < total ? ["\(title): \(total - files.count)쪽은 읽지 못해 뺐어요"] : [])
+    }
+
+    /// PDF → 책 하나(쪽마다 긴 변 2000px 안팎 그림으로)
+    @MainActor
+    static func importPDF(_ url: URL, title: String) async -> (ids: [String], problems: [String]) {
+        let lib = Library.shared
+        let id = lib.createBook(title: title)
+        let files: [String] = await Task.detached(priority: .userInitiated) {
+            await Importer.pdfPages(url, book: id) { n, total in
+                await Importer.report("가져오는 중: \(title) · \(n)/\(total)쪽")
+            }
+        }.value
+        guard !files.isEmpty else {
+            lib.deleteBook(id)
+            return ([], ["\(title): PDF를 열지 못했어요(암호가 걸렸거나 깨진 파일)"])
+        }
+        _ = lib.attach(book: id, files: files)
+        return ([id], [])
+    }
+
+    static func pdfPages(_ url: URL, book: String, progress: (Int, Int) async -> Void) async -> [String] {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let doc = PDFDocument(url: url), !doc.isLocked else { return [] }
         var out: [String] = []
         for i in 0..<doc.pageCount {
-            guard let page = doc.page(at: i) else { continue }
-            let box = page.bounds(for: .mediaBox)
-            let scale = min(4, max(1, 2000 / max(box.width, box.height)))
-            let size = CGSize(width: (box.width * scale).rounded(), height: (box.height * scale).rounded())
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = 1
-            format.opaque = true
-            let img = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
-                UIColor.white.setFill()
-                ctx.fill(CGRect(origin: .zero, size: size))
-                ctx.cgContext.translateBy(x: 0, y: size.height)
-                ctx.cgContext.scaleBy(x: scale, y: -scale)
-                page.draw(with: .mediaBox, to: ctx.cgContext)
+            let file: String? = autoreleasepool {
+                guard let page = doc.page(at: i) else { return nil }
+                let box = page.bounds(for: .mediaBox)
+                let scale = min(4, max(1, 2000 / max(box.width, box.height)))
+                let size = CGSize(width: (box.width * scale).rounded(), height: (box.height * scale).rounded())
+                let format = UIGraphicsImageRendererFormat()
+                format.scale = 1
+                format.opaque = true
+                let img = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+                    UIColor.white.setFill()
+                    ctx.fill(CGRect(origin: .zero, size: size))
+                    ctx.cgContext.translateBy(x: 0, y: size.height)
+                    ctx.cgContext.scaleBy(x: scale, y: -scale)
+                    page.draw(with: .mediaBox, to: ctx.cgContext)
+                }
+                guard let data = img.jpegData(compressionQuality: 0.92) else { return nil }
+                return store(data, ext: "jpg", book: book, index: i)
             }
-            if let data = img.jpegData(compressionQuality: 0.92), let f = store(data, ext: "jpg", book: book, index: i) {
-                out.append(f)
-            }
+            if let file { out.append(file) }
+            await progress(i + 1, doc.pageCount)
         }
         return out
     }

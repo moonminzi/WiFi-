@@ -78,6 +78,37 @@ final class ZipTests: XCTestCase {
         }
     }
 
+    /// 여러 권을 한 ZIP에: 그림은 없고 권마다 CBZ/ZIP/PDF가 들어 있다(맥 부가 파일은 뺀다)
+    func testInnerBooks() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ziptest-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // 안에 넣을 권 하나(그림 2장)
+        let volURL = dir.appendingPathComponent("vol.cbz")
+        let vol = try ZipWriter(url: volURL)
+        try vol.add(name: "001.jpg", data: Data(repeating: 1, count: 300))
+        try vol.add(name: "002.jpg", data: Data(repeating: 2, count: 300))
+        try vol.finish()
+        let volData = try Data(contentsOf: volURL)
+
+        let packURL = dir.appendingPathComponent("pack.zip")
+        let pack = try ZipWriter(url: packURL)
+        try pack.add(name: "시리즈/10권.cbz", data: volData)
+        try pack.add(name: "시리즈/2권.zip", data: volData)
+        try pack.add(name: "시리즈/외전.pdf", data: Data("%PDF-1.4".utf8))
+        try pack.add(name: "__MACOSX/시리즈/._2권.zip", data: Data(repeating: 0, count: 10))
+        try pack.add(name: "시리즈/.숨김.cbz", data: volData)
+        try pack.add(name: "readme.txt", data: Data("hi".utf8))
+        try pack.finish()
+
+        let r = try ZipReader(url: packURL)
+        XCTAssertTrue(r.imageEntries.isEmpty)
+        XCTAssertEqual(r.innerBooks.map(\.name), ["시리즈/2권.zip", "시리즈/10권.cbz", "시리즈/외전.pdf"])
+        // 꺼낸 권은 그대로 다시 열린다
+        let inner = try ZipReader(data: try r.extract(r.innerBooks[0]))
+        XCTAssertEqual(inner.imageEntries.map(\.name), ["001.jpg", "002.jpg"])
+    }
+
     func testNaturalSort() {
         let names = ["p10.jpg", "p2.jpg", "p1.jpg", "P3.jpg", "cover.jpg", "p02a.jpg"]
         XCTAssertEqual(names.sorted(by: naturalLess), ["cover.jpg", "p1.jpg", "p2.jpg", "p02a.jpg", "P3.jpg", "p10.jpg"])

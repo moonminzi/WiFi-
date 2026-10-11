@@ -141,8 +141,17 @@ public struct ZipReader {
 
     /// 만화 페이지로 쓸 그림 파일들(이름 순서: 2가 10보다 앞)
     public var imageEntries: [ZipEntry] {
-        let exts: Set<String> = ["jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "avif", "tif", "tiff"]
-        return entries.filter { e in
+        files(withExtensions: ["jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "avif", "tif", "tiff"])
+    }
+
+    /// 여러 권을 한 ZIP에 묶은 경우 안에 든 책들(ZIP/CBZ/PDF, 이름 순서)
+    public var innerBooks: [ZipEntry] {
+        files(withExtensions: ["zip", "cbz", "pdf"])
+    }
+
+    /// 폴더·맥 부가 파일(__MACOSX, ._이름)·숨김 파일을 뺀, 확장자가 맞는 파일들
+    func files(withExtensions exts: Set<String>) -> [ZipEntry] {
+        entries.filter { e in
             guard !e.isDirectory, !e.name.hasPrefix("__MACOSX/") else { return false }
             let last = e.name.split(separator: "/").last.map(String.init) ?? e.name
             guard !last.hasPrefix(".") else { return false }

@@ -8,7 +8,6 @@ struct LibraryView: View {
     @EnvironmentObject private var translator: Translator
     @EnvironmentObject private var router: Router
     @State private var picked: [PhotosPickerItem] = []
-    @State private var importingFiles = false
     @State private var busy = false
     @State private var renaming: BookRecord?
     @State private var newTitle = ""
@@ -45,16 +44,6 @@ struct LibraryView: View {
             guard !items.isEmpty else { return }
             picked = []
             Task { await importPhotos(items) }
-        }
-        .fileImporter(isPresented: $importingFiles, allowedContentTypes: [.image, .zip, Importer.cbz, .pdf],
-                      allowsMultipleSelection: true) { result in
-            guard case let .success(urls) = result else { return }
-            Task {
-                busy = true
-                let ids = await Importer.importFiles(urls)
-                busy = false
-                if ids.count == 1 { router.path = [ids[0]] }
-            }
         }
         .alert("이름 바꾸기", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("제목", text: $newTitle)
@@ -94,27 +83,50 @@ struct LibraryView: View {
                     Label("사진 앱", systemImage: "photo.on.rectangle")
                 }
                 .buttonStyle(TermButtonStyle(kind: .primary, fill: true))
-                Button { importingFiles = true } label: { Label("파일", systemImage: "folder") }
+                .disabled(busy)
+                Button { pickFiles() } label: { Label("파일", systemImage: "folder") }
                     .buttonStyle(TermButtonStyle(kind: .secondary, fill: true))
+                    .disabled(busy)
             }
-            if busy {
-                StatusLine(kind: .running, text: "가져오는 중…")
+            if busy || library.importing != nil {
+                StatusLine(kind: .running, text: library.importing ?? "가져오는 중…")
             } else {
-                Text("망가·웹툰 페이지, CBZ/ZIP, PDF. 고른 순서대로 한 권이 돼요.")
+                Text("망가·웹툰 페이지, CBZ/ZIP(여러 권 묶음도), PDF. 그림 여러 장은 파일 이름 순서로 한 권, ZIP·PDF는 하나씩 한 권이 돼요.")
                     .font(Term.mono(11.5))
                     .foregroundStyle(Term.muted)
             }
         }
     }
 
+    /// 파일 앱에서 고르기(ZIP·PDF·그림 여러 개). 고른 파일은 선택기가 앱 안으로 복사해 준다
+    @MainActor
+    private func pickFiles() {
+        DocumentPicker.shared.present(types: Importer.fileTypes) { urls in
+            Task { @MainActor in
+                busy = true
+                let ids = await Importer.importFiles(urls)
+                busy = false
+                if ids.count == 1 { router.path = [ids[0]] }
+            }
+        }
+    }
+
     private func importPhotos(_ items: [PhotosPickerItem]) async {
         busy = true
-        defer { busy = false }
+        defer {
+            busy = false
+            library.importing = nil
+        }
         var datas: [Data] = []
-        for item in items {
+        for (i, item) in items.enumerated() {
+            library.importing = "사진 불러오는 중: \(i + 1)/\(items.count)장"
             if let d = try? await item.loadTransferable(type: Data.self) { datas.append(d) }
         }
-        guard !datas.isEmpty else { return }
+        guard !datas.isEmpty else {
+            library.show("사진을 불러오지 못했어요(iCloud 사진이면 사진 앱에서 한 번 열어 받은 뒤 다시)")
+            return
+        }
+        library.importing = "가져오는 중: 사진 \(datas.count)장"
         let id = library.createBook(title: "사진 \(datas.count)장 · " + Date().formatted(date: .abbreviated, time: .shortened))
         _ = await Importer.importImages(datas, book: id)
         router.path = [id]

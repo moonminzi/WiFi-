@@ -43,9 +43,8 @@ struct NagoTLApp: App {
                 .onOpenURL { url in
                     // 다른 앱의 "공유 → NAGO TL"/"다음으로 열기"로 받은 파일
                     Task { @MainActor in
+                        // 받은 편지함(Documents/Inbox)에 복사된 건 가져온 뒤 Importer가 지운다
                         let ids = await Importer.importFiles([url])
-                        // 받은 편지함(Documents/Inbox)에 복사된 건 가져온 뒤 지운다
-                        if url.path.contains("/Documents/Inbox/") { try? FileManager.default.removeItem(at: url) }
                         if let id = ids.first {
                             router.tab = .library
                             router.path = [id]
