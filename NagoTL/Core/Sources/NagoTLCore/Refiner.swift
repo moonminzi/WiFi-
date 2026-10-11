@@ -513,9 +513,31 @@ public enum Refiner {
             let k = hist[best]
             return RGBA(UInt8(sums[best].0 / k), UInt8(sums[best].1 / k), UInt8(sums[best].2 / k))
         }
-        let fill = block.fill ?? dominant(core.count > 0 ? core : mask) { _, _ in true }
-            ?? dominant(mask) { _, _ in true } ?? .black
-        var outline = block.outline ?? dominant(mask) { x, y in !core.get(x, y) }
+        // 테두리가 있으면 글자 덩어리 맨 바깥 한 겹은 테두리색, 글자색은 그 안에 갇혀 있다
+        // (흰 테두리가 두꺼우면 픽셀 수로는 테두리색이 더 많아서 "가장 많은 색"으로는 못 고른다)
+        let shell = mask.eroded(1)
+        let edge = dominant(mask) { x, y in !shell.get(x, y) }
+        var inside: RGBA?
+        if let e = edge {
+            var far = 0
+            for ly in 0..<inner.h {
+                for lx in 0..<inner.w where mask.bits[ly * inner.w + lx]
+                    && bmp.color(lx + inner.x, ly + inner.y).distance2(e) > 80 * 80 {
+                    far += 1
+                }
+            }
+            if far >= max(minComp, total / 20) {
+                let isFar = { (x: Int, y: Int) in bmp.color(x, y).distance2(e) > 80 * 80 }
+                inside = dominant(core.count > 0 ? core : mask, where: isFar) ?? dominant(mask, where: isFar)
+            }
+        }
+        // Claude가 알려 준 색은 고르는 데만 쓰고, 칠할 색은 그림에서 그 색에 가까운 실제 픽셀로(어림 색이 조금 달라도)
+        func snap(_ hint: RGBA) -> RGBA {
+            let near = dominant(mask) { x, y in bmp.color(x, y).distance2(hint) <= 70 * 70 }
+            return near ?? hint
+        }
+        let fill = block.fill.map(snap) ?? inside ?? edge ?? .black
+        var outline = block.outline.map(snap) ?? (inside != nil ? edge : nil)
         if let o = outline, o.distance2(fill) < 80 * 80 { outline = nil }
 
         // 글자 크기: 글자색 획 덩어리의 크기(테두리로 이어진 줄 전체가 아니라)

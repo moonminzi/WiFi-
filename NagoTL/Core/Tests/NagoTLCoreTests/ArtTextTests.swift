@@ -110,6 +110,24 @@ final class ArtTextTests: XCTestCase {
         }
     }
 
+    /// 두꺼운 흰 테두리(테두리 픽셀이 글자 픽셀보다 많다)여도 글자색·테두리색을 바로 고르고,
+    /// Claude가 준 어림 색은 그림의 실제 색으로 맞춘다
+    func testThickOutlineColorsAndHintSnapping() {
+        for hint in [nil, RGBA(224, 33, 138)] as [RGBA?] {
+            var cv = ArtFixtures.illustration(220, 420)
+            let (box, _) = ArtFixtures.outlinedText(&cv, right: 170, top: 40, columns: [9, 7], size: 30,
+                                                    fill: Self.magenta, outline: .white, width: 6, seed: 12)
+            let block = PageBlock(box: box, kind: .speech, fill: hint, outline: hint == nil ? nil : RGBA(240, 240, 240),
+                                  vertical: hint != nil)
+            let r = Refiner.refine(cv.bmp, block: block)
+            XCTAssertEqual(r.mode, .art)
+            XCTAssertLessThan(r.ink.distance2(Self.magenta), 12 * 12, "fill \(r.ink) hint \(String(describing: hint))")
+            XCTAssertLessThan(r.outline.map { $0.distance2(.white) } ?? .max, 12 * 12,
+                              "outline \(String(describing: r.outline))")
+            XCTAssertTrue(r.vertical)
+        }
+    }
+
     /// 흰 테두리 그물(글자 테두리)을 말풍선으로 잘못 보지 않는다
     func testOutlineNetworkIsNotABubble() {
         var cv = ArtFixtures.illustration(220, 420)
