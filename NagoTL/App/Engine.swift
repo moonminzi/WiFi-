@@ -288,7 +288,7 @@ enum Pipeline {
             if text.isEmpty { continue }
             active.append((i, b, text))
         }
-        let refined = Refiner.refinePage(bitmap, blocks: active.map { PageBlock(box: $0.1.box.rect, kind: $0.1.blockKind) })
+        let refined = Refiner.refinePage(bitmap, blocks: active.map { $0.1.pageBlock })
         var out = bitmap
         Refiner.erase(&out, refined)
         let placed = zip(active, refined).map { a, r in

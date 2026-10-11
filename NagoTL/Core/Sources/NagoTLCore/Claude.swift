@@ -223,16 +223,49 @@ public struct PageAnswer: Codable, Sendable, Equatable {
         public var source: String
         public var translation: String
         public var note: String
+        /// 원문이 세로쓰기인지
+        public var vertical: Bool
+        /// 글자색·테두리색("#RRGGBB", 테두리가 없으면 "")
+        public var text_color: String
+        public var outline_color: String
 
-        public init(kind: String, box: Box, source: String, translation: String, note: String = "") {
+        public init(kind: String, box: Box, source: String, translation: String, note: String = "",
+                    vertical: Bool = false, text_color: String = "", outline_color: String = "") {
             self.kind = kind
             self.box = box
             self.source = source
             self.translation = translation
             self.note = note
+            self.vertical = vertical
+            self.text_color = text_color
+            self.outline_color = outline_color
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case kind, box, source, translation, note, vertical, text_color, outline_color
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            kind = try c.decode(String.self, forKey: .kind)
+            box = try c.decode(Box.self, forKey: .box)
+            source = try c.decodeIfPresent(String.self, forKey: .source) ?? ""
+            translation = try c.decode(String.self, forKey: .translation)
+            note = try c.decodeIfPresent(String.self, forKey: .note) ?? ""
+            // 예전에 저장한 답에는 없다
+            vertical = try c.decodeIfPresent(Bool.self, forKey: .vertical) ?? false
+            text_color = try c.decodeIfPresent(String.self, forKey: .text_color) ?? ""
+            outline_color = try c.decodeIfPresent(String.self, forKey: .outline_color) ?? ""
         }
 
         public var blockKind: BlockKind { BlockKind(rawValue: kind) ?? .other }
+        public var fillColor: RGBA? { RGBA(hex: text_color) }
+        public var outlineColor: RGBA? { RGBA(hex: outline_color) }
+
+        /// 지우기·그리기에 줄 덩어리(상자 + Claude가 본 글자 모양)
+        public var pageBlock: PageBlock {
+            PageBlock(box: box.rect, kind: blockKind, fill: fillColor, outline: outlineColor, vertical: vertical)
+        }
     }
 
     public var source_language: String
@@ -301,6 +334,13 @@ public enum PageRequest {
     - translation: the Korean translation (see guidelines).
     - note: a short note in Korean only when something cannot be carried over (a pun, wordplay, a cultural \
     reference the reader needs); otherwise an empty string.
+    - vertical: true if the original text runs vertically (top-to-bottom columns), otherwise false.
+    - text_color: the main fill color of the letters as "#RRGGBB" (for example "#000000" for ordinary black text).
+    - outline_color: the color of an outline or stroke drawn around the letters as "#RRGGBB" (common for text \
+    written directly on the artwork, such as pink letters with a white outline), or "" if the letters have no outline.
+
+    Text drawn directly on the artwork without a bubble is still a block (speech, thought, narration or sfx by its \
+    role); its box hugs the letters including their outline.
 
     List blocks in natural reading order (Japanese manga: panels right-to-left then top-to-bottom; within a panel \
     right-to-left, top-to-bottom. Korean, Chinese webtoons and Western comics: left-to-right, top-to-bottom).
@@ -352,8 +392,11 @@ public enum PageRequest {
                 "source": ["type": "string"],
                 "translation": ["type": "string"],
                 "note": ["type": "string"],
+                "vertical": ["type": "boolean"],
+                "text_color": ["type": "string"],
+                "outline_color": ["type": "string"],
             ],
-            "required": ["kind", "box", "source", "translation", "note"],
+            "required": ["kind", "box", "source", "translation", "note", "vertical", "text_color", "outline_color"],
             "additionalProperties": false,
         ]
         let term: [String: Any] = [

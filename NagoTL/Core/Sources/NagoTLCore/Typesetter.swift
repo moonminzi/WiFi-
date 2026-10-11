@@ -111,18 +111,72 @@ public struct LaidLine: Sendable, Equatable, Codable {
 public struct TextLayout: Sendable, Equatable, Codable {
     public var fontSize: Double
     public var lineHeight: Double
+    /// 가로쓰기: 줄(x=왼쪽, y=줄 상자 위, width=줄 길이)
+    /// 세로쓰기: 열(x=열 왼쪽, y=열 위, width=열 길이, 열 폭=lineHeight). 오른쪽 열부터 읽는다
     public var lines: [LaidLine]
     /// 가장 작은 크기로도 모양 안에 다 못 넣었다(글자가 말풍선 밖으로 조금 나갈 수 있다)
     public var overflow: Bool
+    public var vertical = false
+
+    public init(fontSize: Double, lineHeight: Double, lines: [LaidLine], overflow: Bool, vertical: Bool = false) {
+        self.fontSize = fontSize
+        self.lineHeight = lineHeight
+        self.lines = lines
+        self.overflow = overflow
+        self.vertical = vertical
+    }
 
     public var bounds: (x: Double, y: Double, w: Double, h: Double) {
-        guard let f = lines.first else { return (0, 0, 0, 0) }
-        var x0 = f.x, x1 = f.x + f.width
+        guard !lines.isEmpty else { return (0, 0, 0, 0) }
+        var x0 = Double.infinity, y0 = Double.infinity, x1 = -Double.infinity, y1 = -Double.infinity
         for l in lines {
-            x0 = min(x0, l.x)
-            x1 = max(x1, l.x + l.width)
+            if vertical {
+                x0 = min(x0, l.x)
+                x1 = max(x1, l.x + lineHeight)
+                y0 = min(y0, l.y)
+                y1 = max(y1, l.y + l.width)
+            } else {
+                x0 = min(x0, l.x)
+                x1 = max(x1, l.x + l.width)
+                y0 = min(y0, l.y)
+                y1 = max(y1, l.y + lineHeight)
+            }
         }
-        return (x0, f.y, x1 - x0, Double(lines.count) * lineHeight)
+        return (x0, y0, x1 - x0, y1 - y0)
+    }
+}
+
+/// 세로쓰기 글자 폭: 한 글자가 한 칸(띄어쓰기는 짧게)
+public struct VerticalMetrics: GlyphMetrics {
+    public init() {}
+
+    public func advance(_ c: Character) -> Double { c == " " ? 0.35 : 1.0 }
+}
+
+/// 세로쓰기에서 글자 하나를 칸에 어떻게 세울지
+public enum VerticalGlyph: Equatable, Sendable {
+    /// 그대로 세운다(한글·한자·가나·영문·숫자) — 글자 몸통 가운데를 열 가운데에
+    case upright
+    /// 시계 방향으로 90° 돌린다(괄호·줄표·물결·말줄임표·쌍점): ( → ︵, ~ → ≀, … → ︙
+    case rotated
+    /// 칸 오른쪽 위(쉼표·마침표)
+    case corner
+    /// 칸 한가운데(느낌표·물음표·하트 같은 기호)
+    case centered
+
+    public static func of(_ c: Character) -> VerticalGlyph {
+        switch c {
+        case ",", ".", "、", "。", "，", "．", "､", "｡":
+            return .corner
+        case "(", ")", "[", "]", "{", "}", "<", ">", "「", "」", "『", "』", "《", "》", "〈", "〉", "【", "】", "〔", "〕",
+             "（", "）", "［", "］", "｛", "｝", "＜", "＞", "-", "—", "–", "―", "‐", "~", "～", "〜", "ー", "…", "‥",
+             ":", ";", "：", "；", "=", "＝", "_", "/", "|":
+            return .rotated
+        case "!", "?", "！", "？", "‼", "⁉", "⁈", "♡", "♥", "❤", "♪", "♫", "★", "☆", "·", "・", "'", "*":
+            return .centered
+        default:
+            return .upright
+        }
     }
 }
 
@@ -131,7 +185,7 @@ public enum Typesetter {
     public static let lineSpacing = 1.2
     /// 줄 머리에 오면 안 되는 글자
     static let noStart: Set<Character> = [".", ",", "!", "?", "…", "~", ")", "]", "}", "」", "』", "》", "〉", "'", "\"",
-                                          "’", "”", ":", ";", "·", "-", "—", "♡", "♥", "♪"]
+                                          "’", "”", ":", ";", "·", "-", "—", "♡", "♥", "♪", "、", "。"]
     /// 줄 끝에 오면 안 되는 글자
     static let noEnd: Set<Character> = ["(", "[", "{", "「", "『", "《", "〈", "‘", "“"]
 
@@ -176,6 +230,62 @@ public enum Typesetter {
         let size = max(lo0, (lo * 4).rounded(.down) / 4)
         return attempt(paras, shape: shape, size: size, space: space, split: split)
             ?? attempt(paras, shape: shape, size: lo, space: space, split: split)
+    }
+
+    /// 세로쓰기(오른쪽 열부터, 위→아래)로 사각형 안에 들어가는 가장 큰 크기. 열을 줄처럼 다루려고
+    /// 가로·세로를 바꾼 사각형에 가로쓰기로 앉힌 뒤 되돌린다.
+    public static func layoutVertical(_ text: String, rect: IRect, maxSize: Double, minSize: Double) -> TextLayout {
+        let t = IRect(x: 0, y: 0, w: rect.h, h: rect.w)
+        var l = layout(verticalForm(text), shape: LayoutShape(rect: t), maxSize: maxSize, minSize: minSize,
+                       metrics: VerticalMetrics())
+        let lh = l.lineHeight
+        // 바꾼 사각형의 줄(y = 오른쪽 끝에서 왼쪽으로 얼마나, x = 위에서 아래로 얼마나) → 원래 그림의 열.
+        // 세로쓰기는 열 머리를 맞춘다(덩어리 전체는 가운데)
+        let longest = l.lines.map(\.width).max() ?? 0
+        let top = Double(rect.y) + max(0, (Double(rect.h) - longest) / 2)
+        l.lines = l.lines.map { line in
+            LaidLine(text: line.text, x: Double(rect.maxX) - line.y - lh, y: l.overflow ? Double(rect.y) + line.x : top,
+                     width: line.width)
+        }
+        l.vertical = true
+        return l
+    }
+
+    /// 세로쓰기용 글자로: 따옴표는 낫표(“ ” → 「 」, ‘ ’ → 『 』), 점 여러 개는 말줄임표 한 칸
+    public static func verticalForm(_ text: String) -> String {
+        var out = ""
+        var openDouble = true
+        var dots = 0
+        func flushDots() {
+            if dots >= 2 {
+                out.append("…")
+            } else if dots == 1 {
+                out.append(".")
+            }
+            dots = 0
+        }
+        for c in text {
+            if c == "." {
+                dots += 1
+                continue
+            }
+            flushDots()
+            switch c {
+            case "“": out.append("「")
+            case "”": out.append("」")
+            case "‘": out.append("『")
+            case "’": out.append("』")
+            case "\"":
+                out.append(openDouble ? "「" : "」")
+                openDouble.toggle()
+            case "…":
+                // …… 처럼 겹친 말줄임표도 한 칸
+                if out.last != "…" { out.append("…") }
+            default: out.append(c)
+            }
+        }
+        flushDots()
+        return out
     }
 
     /// 크기 하나로 배치해 본다: 1줄부터 늘려 가며, 들어가면 줄 길이를 고르게 다시 나눈다.

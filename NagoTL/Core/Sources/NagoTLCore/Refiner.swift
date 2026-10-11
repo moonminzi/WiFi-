@@ -9,10 +9,18 @@ public enum BlockKind: String, Codable, Sendable, CaseIterable {
 public struct PageBlock: Sendable, Equatable {
     public var box: IRect
     public var kind: BlockKind
+    /// Claude가 본 글자색·테두리색(없으면 그림에서 찾는다)
+    public var fill: RGBA?
+    public var outline: RGBA?
+    /// 원문이 세로쓰기인지
+    public var vertical: Bool
 
-    public init(box: IRect, kind: BlockKind) {
+    public init(box: IRect, kind: BlockKind, fill: RGBA? = nil, outline: RGBA? = nil, vertical: Bool = false) {
         self.box = box
         self.kind = kind
+        self.fill = fill
+        self.outline = outline
+        self.vertical = vertical
     }
 }
 
@@ -25,6 +33,9 @@ public struct Refined: Sendable {
         case label
         /// 효과음 — 그림을 지우지 않고 테두리 글자로 겹쳐 쓴다
         case overlay
+        /// 말풍선 없이 그림 위에 쓴 글자 — 글자·테두리 픽셀만 지우고 그 밑 그림을 둘레 그림 조각으로 되살린 뒤,
+        /// 원문과 같은 색·테두리로 쓴다
+        case art
     }
 
     public var mode: Mode
@@ -47,6 +58,10 @@ public struct Refined: Sendable {
     public var glyphSize: Double
     /// 닫힌 말풍선을 찾았는지
     public var closedBubble: Bool
+    /// art: 원문 글자 테두리색(없으면 nil)
+    public var outline: RGBA? = nil
+    /// 원문이 세로쓰기였는지(그림 위 글자는 한글도 세로로 앉힐 수 있다)
+    public var vertical = false
 
     /// 번역 글자를 앉힐 모양
     public var shape: LayoutShape {
@@ -73,19 +88,24 @@ public enum Refiner {
         let boxes = blocks.map { $0.box.clamped(width: bmp.width, height: bmp.height) }
         var ctx = Context(boxes: boxes)
         var out: [Refined] = []
-        for b in blocks { out.append(refine(bmp, box: b.box, kind: b.kind, context: &ctx)) }
+        for b in blocks { out.append(refine(bmp, block: b, context: &ctx)) }
         splitSharedRegions(&out, boxes: boxes)
         return out
     }
 
     /// Claude가 준 대략적인 상자를 실제 그림에 맞춘다(덩어리 하나만 볼 때).
     public static func refine(_ bmp: Bitmap, box: IRect, kind: BlockKind) -> Refined {
-        var ctx = Context(boxes: [box.clamped(width: bmp.width, height: bmp.height)])
-        return refine(bmp, box: box, kind: kind, context: &ctx)
+        refine(bmp, block: PageBlock(box: box, kind: kind))
     }
 
-    static func refine(_ bmp: Bitmap, box rawBox: IRect, kind: BlockKind, context ctx: inout Context) -> Refined {
-        let box = rawBox.clamped(width: bmp.width, height: bmp.height)
+    public static func refine(_ bmp: Bitmap, block: PageBlock) -> Refined {
+        var ctx = Context(boxes: [block.box.clamped(width: bmp.width, height: bmp.height)])
+        return refine(bmp, block: block, context: &ctx)
+    }
+
+    static func refine(_ bmp: Bitmap, block: PageBlock, context ctx: inout Context) -> Refined {
+        let kind = block.kind
+        let box = block.box.clamped(width: bmp.width, height: bmp.height)
         let short = Double(max(1, min(box.w, box.h)))
         guard box.w >= 4, box.h >= 4 else {
             return Refined(mode: .overlay, textBox: box, eraseMask: nil, eraseSource: nil, patch: nil,
@@ -96,6 +116,7 @@ public enum Refiner {
         let (bg, uniformity) = dominantColor(bmp, box)
         if uniformity >= 0.35, let r = closedBubble(bmp, box: box, bg: bg, context: &ctx) { return r }
         if uniformity >= 0.55, let r = openText(bmp, box: box, bg: bg) { return r }
+        if let r = artText(bmp, block: block, box: box) { return r }
         return label(bmp, box: box)
     }
 
@@ -105,6 +126,12 @@ public enum Refiner {
             guard let m = r.eraseMask else { continue }
             Inpaint.fill(&bmp, mask: m, source: r.eraseSource, fallback: r.background)
             if let s = r.eraseSource { Inpaint.texture(&bmp, mask: m, source: s) }
+        }
+        // 그림 위 글자: 번짐으로 대충 채운 다음 둘레 그림 조각으로 되살린다
+        for r in items where r.mode == .art {
+            guard let m = r.eraseMask else { continue }
+            Inpaint.fill(&bmp, mask: m, source: nil, fallback: r.background)
+            Inpaint.patchMatch(&bmp, mask: m)
         }
         for r in items where r.mode == .label { r.patch?.paint(&bmp) }
     }
@@ -124,6 +151,9 @@ public enum Refiner {
         } else {
             return nil
         }
+        // 흰 테두리를 두른 글자(그림 위 글자)의 테두리 그물을 말풍선으로 보지 않게: 말풍선은 안쪽에 넓은 빈 곳이 있다
+        let core = interior.eroded(max(4, Int(Double(min(box.w, box.h)) * 0.08)))
+        guard core.count * 5 >= interior.count else { return nil }
         let limit = interior.rect
         let filled = fillHoles(interior)
         var holes = RegionMask(rect: limit)
@@ -388,6 +418,139 @@ public enum Refiner {
     }
 
     // MARK: - 라벨·효과음
+
+    // MARK: - 그림 위 글자
+
+    /// 4비트씩 묶은 색 칸
+    @inline(__always) static func colorBin(_ c: RGBA) -> Int { Int(c.r >> 4) << 8 | Int(c.g >> 4) << 4 | Int(c.b >> 4) }
+
+    static func binCenter(_ b: Int) -> RGBA {
+        RGBA(UInt8((b >> 8) * 16 + 8), UInt8(((b >> 4) & 15) * 16 + 8), UInt8((b & 15) * 16 + 8))
+    }
+
+    /// 말풍선 없이 그림 위에 쓴 글자: 글자 상자 안에는 흔한데 둘레(바깥 띠)에는 드문 색 = 글자·테두리 색.
+    /// Claude가 본 글자색·테두리색이 있으면 그 근처 색도 글자로 친다. 못 가려내면 nil(라벨로 덮는다).
+    static func artText(_ bmp: Bitmap, block: PageBlock, box: IRect) -> Refined? {
+        let short = Double(min(box.w, box.h))
+        let inner = box.expanded(by: max(4, Int(short * 0.12))).clamped(width: bmp.width, height: bmp.height)
+        let outer = inner.expanded(by: max(10, Int(short * 0.3))).clamped(width: bmp.width, height: bmp.height)
+        var hin = [Int](repeating: 0, count: 4096), hring = [Int](repeating: 0, count: 4096)
+        var nin = 0, nring = 0
+        for y in outer.y..<outer.maxY {
+            for x in outer.x..<outer.maxX {
+                let b = colorBin(bmp.color(x, y))
+                if inner.contains(x, y) {
+                    hin[b] += 1
+                    nin += 1
+                } else {
+                    hring[b] += 1
+                    nring += 1
+                }
+            }
+        }
+        guard nin > 0, nring > 0 else { return nil }
+        let hints = [block.fill, block.outline].compactMap { $0 }
+        // 둘레에 "비슷한" 색이 얼마나 있나(이웃 칸까지 — 그러데이션으로 칸이 조금 달라도 같은 색으로)
+        var ringNear = [Int](repeating: 0, count: 4096)
+        for b in 0..<4096 where hin[b] > 0 {
+            let r0 = b >> 8, g0 = (b >> 4) & 15, b0 = b & 15
+            var n = 0
+            for r in max(0, r0 - 1)...min(15, r0 + 1) {
+                for g in max(0, g0 - 1)...min(15, g0 + 1) {
+                    for bb in max(0, b0 - 1)...min(15, b0 + 1) { n += hring[r << 8 | g << 4 | bb] }
+                }
+            }
+            ringNear[b] = n
+        }
+        var isText = [Bool](repeating: false, count: 4096)
+        var any = false
+        for b in 0..<4096 where hin[b] > 0 {
+            let pin = Double(hin[b]) / Double(nin), pr = Double(ringNear[b]) / Double(nring)
+            // 글자색은 둘레에 거의 없다(그림 색은 둘레에도 있다)
+            var ok = pin >= 0.003 && (pr <= 0.004 || pin >= 10 * pr)
+            if !ok, pin >= 0.001, pin >= 1.5 * pr + 0.0002,
+               hints.contains(where: { $0.distance2(binCenter(b)) <= 56 * 56 }) {
+                ok = true
+            }
+            isText[b] = ok
+            any = any || ok
+        }
+        guard any else { return nil }
+        var mask = RegionMask(rect: inner)
+        for ly in 0..<inner.h {
+            for lx in 0..<inner.w where isText[colorBin(bmp.color(lx + inner.x, ly + inner.y))] {
+                mask.bits[ly * inner.w + lx] = true
+            }
+        }
+        // 작은 점(그림의 반짝임 등) 빼기
+        let minComp = max(6, Int(short * short / 2500))
+        for c in maskComponents(mask) where c.pixels.count < minComp {
+            for p in c.pixels { mask.bits[p] = false }
+        }
+        let total = mask.count
+        guard total >= max(30, inner.area / 60), total * 100 <= inner.area * 85 else { return nil }
+        let mbox = mask.boundingBox
+        guard box.intersection(mbox).area * 4 >= box.area else { return nil }
+
+        // 글자색은 획 안쪽, 테두리색은 가장자리 띠에서
+        let core = mask.eroded(2)
+        func dominant(_ m: RegionMask, where keep: (Int, Int) -> Bool) -> RGBA? {
+            var hist = [Int](repeating: 0, count: 4096)
+            var sums = [(Int, Int, Int)](repeating: (0, 0, 0), count: 4096)
+            var n = 0
+            for ly in 0..<m.rect.h {
+                for lx in 0..<m.rect.w where m.bits[ly * m.rect.w + lx] && keep(lx + m.rect.x, ly + m.rect.y) {
+                    let c = bmp.color(lx + m.rect.x, ly + m.rect.y)
+                    let b = colorBin(c)
+                    hist[b] += 1
+                    sums[b].0 += Int(c.r)
+                    sums[b].1 += Int(c.g)
+                    sums[b].2 += Int(c.b)
+                    n += 1
+                }
+            }
+            guard n > 0, let best = hist.indices.max(by: { hist[$0] < hist[$1] }), hist[best] > 0 else { return nil }
+            let k = hist[best]
+            return RGBA(UInt8(sums[best].0 / k), UInt8(sums[best].1 / k), UInt8(sums[best].2 / k))
+        }
+        let fill = block.fill ?? dominant(core.count > 0 ? core : mask) { _, _ in true }
+            ?? dominant(mask) { _, _ in true } ?? .black
+        var outline = block.outline ?? dominant(mask) { x, y in !core.get(x, y) }
+        if let o = outline, o.distance2(fill) < 80 * 80 { outline = nil }
+
+        // 글자 크기: 글자색 획 덩어리의 크기(테두리로 이어진 줄 전체가 아니라)
+        var fillMask = RegionMask(rect: inner)
+        for ly in 0..<inner.h {
+            for lx in 0..<inner.w where mask.bits[ly * inner.w + lx]
+                && bmp.color(lx + inner.x, ly + inner.y).distance2(fill) <= 70 * 70 {
+                fillMask.bits[ly * inner.w + lx] = true
+            }
+        }
+        var glyph = upperMedian(maskComponents(fillMask).filter { $0.pixels.count >= minComp }
+            .map { Double(max($0.box.w, $0.box.h)) }) ?? short * 0.4
+        glyph = min(max(glyph, short * 0.25), max(short, 12))
+        let vertical = block.vertical || Double(box.h) > Double(box.w) * 1.6
+        let ringAvg = Refiner.ringAverage(bmp, inner: inner, outer: outer)
+        // 글자 가장자리의 번진 픽셀(JPEG 테두리 번짐 포함)까지 2px 넓혀 지운다 — 밑 그림은 되살리므로 조금 넓어도 괜찮다
+        return Refined(mode: .art, textBox: mbox, eraseMask: mask.dilated(2), eraseSource: nil, patch: nil,
+                       background: ringAvg, ink: fill, region: nil, layoutRect: box.union(mbox),
+                       glyphSize: glyph, closedBubble: false, outline: outline, vertical: vertical)
+    }
+
+    /// 바깥 띠의 평균색
+    static func ringAverage(_ bmp: Bitmap, inner: IRect, outer: IRect) -> RGBA {
+        var sr = 0, sg = 0, sb = 0, n = 0
+        for y in outer.y..<outer.maxY {
+            for x in outer.x..<outer.maxX where !inner.contains(x, y) {
+                let c = bmp.color(x, y)
+                sr += Int(c.r)
+                sg += Int(c.g)
+                sb += Int(c.b)
+                n += 1
+            }
+        }
+        return n > 0 ? RGBA(UInt8(sr / n), UInt8(sg / n), UInt8(sb / n)) : .white
+    }
 
     static func label(_ bmp: Bitmap, box: IRect) -> Refined {
         let rect = box.expanded(by: 3).clamped(width: bmp.width, height: bmp.height)

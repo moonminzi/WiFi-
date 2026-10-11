@@ -79,6 +79,7 @@ struct SettingsView: View {
                 line("read", "그림 전체를 보고 세로쓰기·손글씨·효과음까지 읽음")
                 line("translate", "앞 쪽 줄거리·용어집을 기억하며 자연스러운 한국어로")
                 line("letter", "말풍선 모양을 찾아 원문만 지우고 한글을 모양대로 앉힘")
+                line("art", "말풍선 없이 그림 위에 쓴 글자는 글자·테두리 색만 골라 지우고 그림을 이어 그린 뒤, 같은 색·세로쓰기로")
                 line("photo", "사진 위 글자는 둘레 색으로 덮고 그 자리에")
                 TermDivider()
                 line("books", library.totalUsage.costText + " (지금 서재에 있는 책들)")

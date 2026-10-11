@@ -197,6 +197,10 @@ enum Painter {
         guard !t.layout.lines.isEmpty else { return }
         let size = CGFloat(t.layout.fontSize)
         let font = FontBook.font(weight: t.weight, size: size)
+        if t.layout.vertical {
+            drawVertical(t, font: font, in: ctx)
+            return
+        }
         let ascent = CTFontGetAscent(font), descent = CTFontGetDescent(font)
         let lh = CGFloat(t.layout.lineHeight)
         let fontKey = NSAttributedString.Key(kCTFontAttributeName as String)
@@ -233,6 +237,76 @@ enum Painter {
             ctx.textPosition = CGPoint(x: x, y: baseline)
             CTLineDraw(fill, ctx)
             ctx.restoreGState()
+        }
+    }
+
+    /// 세로쓰기: 열은 오른쪽부터, 글자는 한 칸씩 세워서(괄호·줄표·물결은 돌리고, 쉼표·마침표는 칸 오른쪽 위)
+    static func drawVertical(_ t: PlacedText, font: CTFont, in ctx: CGContext) {
+        let s = CGFloat(t.layout.fontSize)
+        let lh = CGFloat(t.layout.lineHeight)
+        let fontKey = NSAttributedString.Key(kCTFontAttributeName as String)
+        let colorKey = NSAttributedString.Key(kCTForegroundColorAttributeName as String)
+        func line(_ text: String, _ attrs: [NSAttributedString.Key: Any]) -> CTLine {
+            CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
+        }
+        // 세운 글자는 모두 "가"의 몸통 가운데를 칸 가운데에 맞춘다(글자마다 들쭉날쭉하지 않게)
+        let ref = CTLineGetBoundsWithOptions(line("가", [fontKey: font]), .useGlyphPathBounds)
+
+        struct Cell {
+            let text: String
+            let style: VerticalGlyph
+            let cx: CGFloat
+            let cy: CGFloat
+            let advance: CGFloat
+            let bounds: CGRect
+        }
+        let metrics = VerticalMetrics()
+        var cells: [Cell] = []
+        for col in t.layout.lines {
+            var y = CGFloat(col.y)
+            let cx = CGFloat(col.x) + lh / 2
+            for ch in col.text {
+                let step = CGFloat(metrics.advance(ch)) * s
+                defer { y += step }
+                if ch.isWhitespace { continue }
+                let plain = line(String(ch), [fontKey: font])
+                cells.append(Cell(text: String(ch), style: VerticalGlyph.of(ch), cx: cx, cy: y + step / 2,
+                                  advance: CGFloat(CTLineGetTypographicBounds(plain, nil, nil, nil)),
+                                  bounds: CTLineGetBoundsWithOptions(plain, .useGlyphPathBounds)))
+            }
+        }
+        // 테두리를 먼저 다 그리고 글자를 그 위에(옆 글자 테두리가 글자를 덮지 않게)
+        var passes: [[NSAttributedString.Key: Any]] = []
+        if let outline = t.outline, t.outlineWidth > 0 {
+            passes.append([
+                fontKey: font,
+                NSAttributedString.Key(kCTStrokeWidthAttributeName as String): t.outlineWidth * 200,
+                NSAttributedString.Key(kCTStrokeColorAttributeName as String): color(outline),
+            ])
+        }
+        passes.append([fontKey: font, colorKey: color(t.color)])
+        for attrs in passes {
+            for c in cells {
+                let glyph = line(c.text, attrs)
+                ctx.saveGState()
+                ctx.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
+                ctx.setLineJoin(.round)
+                switch c.style {
+                case .upright:
+                    ctx.textPosition = CGPoint(x: c.cx - c.advance / 2, y: c.cy + ref.midY)
+                case .centered:
+                    ctx.textPosition = CGPoint(x: c.cx - c.bounds.midX, y: c.cy + c.bounds.midY)
+                case .corner:
+                    ctx.textPosition = CGPoint(x: c.cx + s * 0.26 - c.bounds.midX, y: c.cy - s * 0.26 + c.bounds.midY)
+                case .rotated:
+                    // 위가 아래로 오는 그림 좌표라 +90°가 화면에서 시계 방향
+                    ctx.translateBy(x: c.cx, y: c.cy)
+                    ctx.rotate(by: .pi / 2)
+                    ctx.textPosition = CGPoint(x: -c.bounds.midX, y: c.bounds.midY)
+                }
+                CTLineDraw(glyph, ctx)
+                ctx.restoreGState()
+            }
         }
     }
 }

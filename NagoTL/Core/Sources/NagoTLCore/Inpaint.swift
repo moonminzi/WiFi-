@@ -219,3 +219,383 @@ public struct BorderPatch: Sendable {
         }
     }
 }
+
+extension Inpaint {
+    /// 글자 밑 그림 되살리기(PatchMatch 인페인팅): 지운 자리를 둘레 그림에서 찾은 비슷한 조각들로 채운다.
+    /// 거친 단계(작게 줄인 그림)부터 고운 단계로, 조각 찾기(전파 + 무작위 탐색) → 겹친 조각 투표를 되풀이한다.
+    /// 지운 자리는 미리 fill로 대충 채워 둘 것(가장 거친 단계에서 다시 번짐으로 채운다).
+    public static func patchMatch(_ bmp: inout Bitmap, mask: RegionMask, patch: Int = 7, iterations: Int = 5) {
+        let hb = mask.boundingBox
+        guard !hb.isEmpty, patch >= 3 else { return }
+        let r = patch / 2
+        let margin = max(4 * patch, Int(Double(max(hb.w, hb.h)) * 0.12))
+        let area = hb.expanded(by: margin).clamped(width: bmp.width, height: bmp.height)
+        let w0 = area.w, h0 = area.h
+        guard w0 > 3 * patch, h0 > 3 * patch else { return }
+
+        var base = PMLevel(w: w0, h: h0)
+        for y in 0..<h0 {
+            for x in 0..<w0 {
+                let c = bmp.color(x + area.x, y + area.y)
+                let i = (y * w0 + x) * 3
+                base.px[i] = Float(c.r)
+                base.px[i + 1] = Float(c.g)
+                base.px[i + 2] = Float(c.b)
+                base.hole[y * w0 + x] = mask.get(x + area.x, y + area.y)
+            }
+        }
+        // 구멍이 두꺼우면 더 거친 단계부터(가장 거친 단계에서 구멍 두께가 조각 반지름 정도가 되게)
+        let thick = base.holeThickness()
+        var count = 1
+        while count < 4 && (thick >> (count - 1)) > r && (w0 >> count) > 3 * patch && (h0 >> count) > 3 * patch {
+            count += 1
+        }
+        var levels = [base]
+        for _ in 1..<count { levels.append(levels[levels.count - 1].down()) }
+        levels[count - 1].diffuse()
+        for l in stride(from: count - 1, through: 0, by: -1) {
+            if l < count - 1 { levels[l].initHole(from: levels[l + 1]) }
+            // 조각은 가까운 데서만 가져온다(피부 옆 구멍엔 피부, 옷 옆엔 옷)
+            let window = max(4 * patch, 3 * (thick >> l) + 2 * patch)
+            levels[l].solve(patch: patch, iterations: iterations + (l > 0 ? 2 : 0), seed: UInt64(77 + l),
+                            window: window, sharpen: l == 0)
+        }
+        let fine = levels[0]
+        for y in 0..<h0 {
+            for x in 0..<w0 where fine.hole[y * w0 + x] {
+                let i = (y * w0 + x) * 3
+                func c(_ v: Float) -> UInt8 { UInt8(max(0, min(255, v.rounded()))) }
+                bmp.set(x + area.x, y + area.y, RGBA(c(fine.px[i]), c(fine.px[i + 1]), c(fine.px[i + 2])))
+            }
+        }
+    }
+}
+
+/// PatchMatch 한 단계(실수 RGB + 구멍 표시)
+struct PMLevel {
+    let w: Int
+    let h: Int
+    var px: [Float]
+    var hole: [Bool]
+
+    init(w: Int, h: Int) {
+        self.w = w
+        self.h = h
+        px = [Float](repeating: 0, count: w * h * 3)
+        hole = [Bool](repeating: false, count: w * h)
+    }
+
+    /// 구멍 픽셀에서 가장 가까운 구멍 아닌 픽셀까지 거리(체스판)의 최댓값
+    func holeThickness() -> Int {
+        let big = Int32.max / 4
+        var d = [Int32](repeating: 0, count: w * h)
+        for i in 0..<(w * h) where hole[i] { d[i] = big }
+        for y in 0..<h {
+            for x in 0..<w where hole[y * w + x] {
+                var m = d[y * w + x]
+                if x > 0 { m = min(m, d[y * w + x - 1] + 1) }
+                if y > 0 {
+                    m = min(m, d[(y - 1) * w + x] + 1)
+                    if x > 0 { m = min(m, d[(y - 1) * w + x - 1] + 1) }
+                    if x < w - 1 { m = min(m, d[(y - 1) * w + x + 1] + 1) }
+                }
+                d[y * w + x] = m
+            }
+        }
+        var best: Int32 = 0
+        for y in stride(from: h - 1, through: 0, by: -1) {
+            for x in stride(from: w - 1, through: 0, by: -1) where hole[y * w + x] {
+                var m = d[y * w + x]
+                if x < w - 1 { m = min(m, d[y * w + x + 1] + 1) }
+                if y < h - 1 {
+                    m = min(m, d[(y + 1) * w + x] + 1)
+                    if x < w - 1 { m = min(m, d[(y + 1) * w + x + 1] + 1) }
+                    if x > 0 { m = min(m, d[(y + 1) * w + x - 1] + 1) }
+                }
+                d[y * w + x] = m
+                best = max(best, m)
+            }
+        }
+        return Int(min(best, 1 << 20))
+    }
+
+    /// 반으로 줄인 단계(2×2 평균, 자식 중 하나라도 구멍이면 구멍)
+    func down() -> PMLevel {
+        var o = PMLevel(w: (w + 1) / 2, h: (h + 1) / 2)
+        for y in 0..<o.h {
+            for x in 0..<o.w {
+                var s: (Float, Float, Float) = (0, 0, 0)
+                var n: Float = 0
+                var isHole = false
+                for dy in 0...1 {
+                    for dx in 0...1 {
+                        let cx = 2 * x + dx, cy = 2 * y + dy
+                        guard cx < w, cy < h else { continue }
+                        let i = cy * w + cx
+                        if hole[i] { isHole = true }
+                        s.0 += px[i * 3]
+                        s.1 += px[i * 3 + 1]
+                        s.2 += px[i * 3 + 2]
+                        n += 1
+                    }
+                }
+                let j = y * o.w + x
+                o.hole[j] = isHole
+                o.px[j * 3] = s.0 / n
+                o.px[j * 3 + 1] = s.1 / n
+                o.px[j * 3 + 2] = s.2 / n
+            }
+        }
+        return o
+    }
+
+    /// 구멍을 바깥 둘레부터 안쪽으로 이웃 평균으로 채운다(시작값)
+    mutating func diffuse() {
+        var known = hole.map { !$0 }
+        var frontier: [Int] = []
+        var queued = [Bool](repeating: false, count: w * h)
+        func neighbors(_ i: Int, _ body: (Int, Bool) -> Void) {
+            let x = i % w, y = i / w
+            for dy in -1...1 {
+                let ny = y + dy
+                guard ny >= 0, ny < h else { continue }
+                for dx in -1...1 where dx != 0 || dy != 0 {
+                    let nx = x + dx
+                    guard nx >= 0, nx < w else { continue }
+                    body(ny * w + nx, dx == 0 || dy == 0)
+                }
+            }
+        }
+        for i in 0..<(w * h) where hole[i] {
+            var hasKnown = false
+            neighbors(i) { n, _ in if known[n] { hasKnown = true } }
+            if hasKnown {
+                frontier.append(i)
+                queued[i] = true
+            }
+        }
+        while !frontier.isEmpty {
+            var values: [(Float, Float, Float)] = []
+            values.reserveCapacity(frontier.count)
+            for i in frontier {
+                var s: (Float, Float, Float) = (0, 0, 0)
+                var n: Float = 0
+                neighbors(i) { j, straight in
+                    guard known[j] else { return }
+                    let wt: Float = straight ? 2 : 1
+                    s.0 += px[j * 3] * wt
+                    s.1 += px[j * 3 + 1] * wt
+                    s.2 += px[j * 3 + 2] * wt
+                    n += wt
+                }
+                values.append(n > 0 ? (s.0 / n, s.1 / n, s.2 / n) : (128, 128, 128))
+            }
+            var next: [Int] = []
+            for (k, i) in frontier.enumerated() {
+                px[i * 3] = values[k].0
+                px[i * 3 + 1] = values[k].1
+                px[i * 3 + 2] = values[k].2
+                known[i] = true
+            }
+            for i in frontier {
+                neighbors(i) { j, _ in
+                    if hole[j] && !known[j] && !queued[j] {
+                        queued[j] = true
+                        next.append(j)
+                    }
+                }
+            }
+            frontier = next
+        }
+    }
+
+    /// 거친 단계의 결과를 키워 구멍 시작값으로(쌍선형)
+    mutating func initHole(from c: PMLevel) {
+        for y in 0..<h {
+            for x in 0..<w where hole[y * w + x] {
+                let u = max(0, min(Float(c.w - 1), (Float(x) + 0.5) / 2 - 0.5))
+                let v = max(0, min(Float(c.h - 1), (Float(y) + 0.5) / 2 - 0.5))
+                let x0 = Int(u), y0 = Int(v)
+                let x1 = min(x0 + 1, c.w - 1), y1 = min(y0 + 1, c.h - 1)
+                let fx = u - Float(x0), fy = v - Float(y0)
+                for ch in 0..<3 {
+                    let a = c.px[(y0 * c.w + x0) * 3 + ch], b = c.px[(y0 * c.w + x1) * 3 + ch]
+                    let d = c.px[(y1 * c.w + x0) * 3 + ch], e = c.px[(y1 * c.w + x1) * 3 + ch]
+                    px[(y * w + x) * 3 + ch] = (a * (1 - fx) + b * fx) * (1 - fy) + (d * (1 - fx) + e * fx) * fy
+                }
+            }
+        }
+    }
+
+    /// 조각 찾기 + 투표
+    /// - window: 짝을 찾는 거리 한도(표적 둘레), sharpen: 마지막에 평균 대신 가장 잘 맞는 조각의 가운데 픽셀로(흐림 줄이기)
+    mutating func solve(patch: Int, iterations: Int, seed: UInt64, window: Int = .max, sharpen: Bool = false) {
+        let r = patch / 2
+        guard w > 2 * r + 1, h > 2 * r + 1 else { return }
+        let w = self.w, h = self.h
+        // 조각 안 구멍 수(적분 영상)
+        var integral = [Int32](repeating: 0, count: (w + 1) * (h + 1))
+        for y in 0..<h {
+            var row: Int32 = 0
+            for x in 0..<w {
+                row += hole[y * w + x] ? 1 : 0
+                integral[(y + 1) * (w + 1) + x + 1] = integral[y * (w + 1) + x + 1] + row
+            }
+        }
+        func holesIn(_ x: Int, _ y: Int) -> Int32 {
+            let x0 = x - r, y0 = y - r, x1 = x + r + 1, y1 = y + r + 1
+            return integral[y1 * (w + 1) + x1] - integral[y0 * (w + 1) + x1] - integral[y1 * (w + 1) + x0]
+                + integral[y0 * (w + 1) + x0]
+        }
+        var valid = [Bool](repeating: false, count: w * h)
+        var validList: [Int] = []
+        var targets: [Int] = []
+        for y in r..<(h - r) {
+            for x in r..<(w - r) {
+                let n = holesIn(x, y)
+                if n == 0 {
+                    valid[y * w + x] = true
+                    validList.append(y * w + x)
+                } else {
+                    targets.append(y * w + x)
+                }
+            }
+        }
+        guard !validList.isEmpty, !targets.isEmpty else { return }
+        var rng = seed &* 0x9E37_79B9_7F4A_7C15 | 1
+        func rand(_ n: Int) -> Int {
+            rng ^= rng << 13
+            rng ^= rng >> 7
+            rng ^= rng << 17
+            return Int(rng % UInt64(n))
+        }
+        var nnf = [Int](repeating: -1, count: w * h)
+        var dist = [Float](repeating: .infinity, count: w * h)
+        let win = min(window, max(w, h))
+        for t in targets {
+            // 처음 짝: 둘레 창 안의 아무 조각(못 찾으면 아무 데서나)
+            let tx = t % w, ty = t / w
+            var pick = -1
+            for _ in 0..<24 {
+                let cx = tx + rand(2 * win + 1) - win, cy = ty + rand(2 * win + 1) - win
+                if cx >= r && cx < w - r && cy >= r && cy < h - r && valid[cy * w + cx] {
+                    pick = cy * w + cx
+                    break
+                }
+            }
+            nnf[t] = pick >= 0 ? pick : validList[rand(validList.count)]
+        }
+        let rowLen = patch * 3
+
+        for it in 0..<iterations {
+            px.withUnsafeBufferPointer { p in
+                func patchDist(_ t: Int, _ s: Int, _ limit: Float) -> Float {
+                    let tx = t % w, ty = t / w, sx = s % w, sy = s / w
+                    var sum: Float = 0
+                    for dy in -r...r {
+                        var ti = ((ty + dy) * w + tx - r) * 3
+                        var si = ((sy + dy) * w + sx - r) * 3
+                        for _ in 0..<rowLen {
+                            let d = p[ti] - p[si]
+                            sum += d * d
+                            ti += 1
+                            si += 1
+                        }
+                        if sum >= limit { return sum }
+                    }
+                    return sum
+                }
+                for t in targets { dist[t] = patchDist(t, nnf[t], .infinity) }
+                let forward = it % 2 == 0
+                let step = forward ? 1 : -1
+                var k = forward ? 0 : targets.count - 1
+                while k >= 0 && k < targets.count {
+                    let t = targets[k]
+                    k += step
+                    var best = nnf[t], bestD = dist[t]
+                    let tx = t % w
+                    // 전파: 이웃 표적의 짝을 한 칸 옮겨 본다
+                    let side = t - step, vert = t - step * w
+                    if tx - step >= r && tx - step < w - r, nnf[side] >= 0 {
+                        let c = nnf[side] + step
+                        let cx = c % w
+                        if cx >= r && cx < w - r && valid[c] {
+                            let d = patchDist(t, c, bestD)
+                            if d < bestD {
+                                best = c
+                                bestD = d
+                            }
+                        }
+                    }
+                    if vert >= 0 && vert < w * h, nnf[vert] >= 0 {
+                        let c = nnf[vert] + step * w
+                        if c >= 0 && c < w * h && valid[c] {
+                            let d = patchDist(t, c, bestD)
+                            if d < bestD {
+                                best = c
+                                bestD = d
+                            }
+                        }
+                    }
+                    // 무작위 탐색: 지금 짝 둘레를 반경을 반씩 줄이며(표적에서 창 밖으로는 안 간다)
+                    var radius = win
+                    let bx = best % w, by = best / w
+                    let ty = t / w
+                    while radius >= 1 {
+                        let cx = bx + rand(2 * radius + 1) - radius, cy = by + rand(2 * radius + 1) - radius
+                        if cx >= r && cx < w - r && cy >= r && cy < h - r
+                            && abs(cx - tx) <= win && abs(cy - ty) <= win {
+                            let c = cy * w + cx
+                            if valid[c] {
+                                let d = patchDist(t, c, bestD)
+                                if d < bestD {
+                                    best = c
+                                    bestD = d
+                                }
+                            }
+                        }
+                        radius /= 2
+                    }
+                    nnf[t] = best
+                    dist[t] = bestD
+                }
+            }
+            // 투표: 구멍 픽셀마다 덮는 조각들의 짝 색을 (잘 맞는 짝일수록 훨씬 크게) 평균
+            var ds = targets.map { dist[$0] }
+            ds.sort()
+            let sigma2 = max(ds[min(ds.count - 1, ds.count / 4)], 1)
+            var acc = [Float](repeating: 0, count: w * h * 3)
+            var wsum = [Float](repeating: 0, count: w * h)
+            for t in targets {
+                let s = nnf[t]
+                let wt = max(Float(exp(Double(-dist[t] / (2 * sigma2)))), 1e-6)
+                for dy in -r...r {
+                    for dx in -r...r {
+                        let pidx = t + dy * w + dx
+                        guard hole[pidx] else { continue }
+                        let q = s + dy * w + dx
+                        acc[pidx * 3] += px[q * 3] * wt
+                        acc[pidx * 3 + 1] += px[q * 3 + 1] * wt
+                        acc[pidx * 3 + 2] += px[q * 3 + 2] * wt
+                        wsum[pidx] += wt
+                    }
+                }
+            }
+            for i in 0..<(w * h) where hole[i] && wsum[i] > 0 {
+                px[i * 3] = acc[i * 3] / wsum[i]
+                px[i * 3 + 1] = acc[i * 3 + 1] / wsum[i]
+                px[i * 3 + 2] = acc[i * 3 + 2] / wsum[i]
+            }
+        }
+        // 마지막: 구멍 픽셀은 자기를 가운데에 둔 조각의 짝 가운데 픽셀로(평균하면 흐려진다)
+        if sharpen {
+            var out = px
+            for t in targets where hole[t] && nnf[t] >= 0 {
+                let s = nnf[t]
+                // 평균값과 너무 다르면(이음매) 평균 쪽으로 반쯤
+                for ch in 0..<3 { out[t * 3 + ch] = px[s * 3 + ch] * 0.7 + px[t * 3 + ch] * 0.3 }
+            }
+            px = out
+        }
+    }
+}

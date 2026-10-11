@@ -46,7 +46,7 @@ final class RefinerTests: XCTestCase {
         for x in 10..<390 { XCTAssertLessThan(out.color(x, box.maxY + 20).luminance, 60, "x \(x)") }
     }
 
-    /// 사진처럼 복잡한 바탕 위 글자는 라벨로 덮는다(둘레 색을 매끈하게 이어서)
+    /// 사진처럼 복잡한 바탕 위 글자: 글자색이 둘레와 다르면 글자만 지우고 바탕을 되살린다(아니면 라벨로 덮는다)
     func testTexturedBackgroundBecomesLabel() {
         var cv = Canvas(width: 300, height: 200)
         var rnd = SeededRandom(3)
@@ -61,13 +61,23 @@ final class RefinerTests: XCTestCase {
         }
         cv.rect(IRect(x: 100, y: 80, w: 100, h: 30), .white, text: true)
         let r = Refiner.refine(cv.bmp, box: IRect(x: 96, y: 76, w: 108, h: 38), kind: .sign)
-        XCTAssertEqual(r.mode, .label)
+        XCTAssertTrue(r.mode == .art || r.mode == .label, "\(r.mode)")
         var out = cv.bmp
         Refiner.erase(&out, [r])
-        // 하얀 글자는 사라지고, 덮은 면은 왼쪽→오른쪽으로 밝아진다
-        XCTAssertLessThan(out.color(150, 95).luminance, 200)
-        XCTAssertLessThan(out.color(105, 95).luminance, out.color(195, 95).luminance)
-        XCTAssertEqual(Double(out.color(105, 95).luminance), Double(60 + 52 + 12), accuracy: 30)
+        // 하얀 글자는 사라지고, 덮은 면은 왼쪽→오른쪽으로 밝아진다(바탕 잡음까지 되살리므로 작은 구역 평균으로 본다)
+        func mean(_ x0: Int) -> Double {
+            var s = 0.0, n = 0.0
+            for y in 84..<106 {
+                for x in x0..<(x0 + 10) {
+                    s += Double(out.color(x, y).luminance)
+                    n += 1
+                }
+            }
+            return s / n
+        }
+        XCTAssertLessThan(mean(145), 200)
+        XCTAssertLessThan(mean(102) + 25, mean(188))
+        XCTAssertEqual(mean(102), Double(60 + 53 + 12), accuracy: 20)
     }
 
     /// 흰 칸(닫힌 곳) 안에 글자와 멀리 떨어진 그림이 있으면 그림은 지우지 않는다

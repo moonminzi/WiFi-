@@ -17,6 +17,15 @@ public struct RGBA: Equatable, Hashable, Codable, Sendable {
     public static let white = RGBA(255, 255, 255)
     public static let black = RGBA(0, 0, 0)
 
+    /// "#RRGGBB"(또는 "RRGGBB", "#RGB")를 읽는다. 비었거나 틀리면 nil
+    public init?(hex: String) {
+        var s = hex.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        if s.count == 3 { s = s.map { "\($0)\($0)" }.joined() }
+        guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
+        self.init(UInt8((v >> 16) & 0xFF), UInt8((v >> 8) & 0xFF), UInt8(v & 0xFF))
+    }
+
     /// 밝기(0...255, Rec.601)
     @inline(__always) public var luminance: Int {
         (Int(r) * 299 + Int(g) * 587 + Int(b) * 114) / 1000
