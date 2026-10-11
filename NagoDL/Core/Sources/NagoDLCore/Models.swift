@@ -240,6 +240,8 @@ public struct DownloadSnapshot: Identifiable, Equatable, Sendable {
     public var connections: [ConnectionSnapshot]
     public var mimeType: String?
     public var backgroundParts: Int
+    /// 완료했는데 파일이 없어짐(파일 앱에서 지웠거나 옮김)
+    public var fileMissing: Bool
 
     public var eta: Double? {
         guard speed > 1, let totalBytes, totalBytes > doneBytes else { return nil }

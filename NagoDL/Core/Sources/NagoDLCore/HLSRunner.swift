@@ -167,7 +167,6 @@ final class HLSRunner: Runner {
         while conns.count < limit, let w = nextWork() {
             request(makeConn(), w)
         }
-        checkIdle()
         manager?.itemChanged(item)
     }
 
@@ -282,7 +281,6 @@ final class HLSRunner: Runner {
             request(c, next)
         } else {
             close(c)
-            checkIdle()
         }
         manager?.itemChanged(item)
     }
@@ -317,9 +315,6 @@ final class HLSRunner: Runner {
         }
         manager?.itemChanged(item)
     }
-
-    /// 받을 게 남았는데 연결이 하나도 없으면(전부 백그라운드가 받는 중) 그냥 기다린다.
-    private func checkIdle() {}
 
     private func fail(_ message: String) {
         stop()

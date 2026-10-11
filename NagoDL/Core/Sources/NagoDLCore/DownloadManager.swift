@@ -387,6 +387,21 @@ public final class DownloadManager {
         complete(item, savedName: name)
     }
 
+    /// 이미 받은 파일을 완료 항목으로 넣는다(큐 안에서)
+    func insertCompleted(_ r: DownloadRecord, savedName: String) {
+        var record = r
+        record.savedName = savedName
+        record.status = .completed
+        record.completedAt = Date()
+        let item = Item(record: record)
+        items[record.id] = item
+        order.append(record.id)
+        save(item)
+        let id = record.id
+        DispatchQueue.main.async { self.onEvent?(.completed(id: id, name: savedName)) }
+        emitSoon()
+    }
+
     private func complete(_ item: Item, savedName: String) {
         item.record.savedName = savedName
         item.record.status = .completed
@@ -930,6 +945,9 @@ public final class DownloadManager {
             createdAt: r.createdAt, completedAt: r.completedAt, detail: detail,
             progress: r.status == .completed ? 1 : progress,
             connections: item.runner?.connectionSnapshots(now: now) ?? [],
-            mimeType: r.mimeType, backgroundParts: external)
+            mimeType: r.mimeType, backgroundParts: external,
+            fileMissing: r.status == .completed && r.savedName.map {
+                !FileManager.default.fileExists(atPath: paths.output.appendingPathComponent($0).path)
+            } ?? false)
     }
 }

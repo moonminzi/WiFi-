@@ -1,0 +1,67 @@
+name: Build NAGO DL IPA
+
+# NAGO DL(다운로드 매니저)만 빌드한다. VPN 앱(build-ipa.yml)과 따로 돈다.
+on:
+  push:
+    paths:
+      - 'NagoDL/**'
+      - 'WifiScan/Theme.swift'
+      - 'WifiScan/Fonts/**'
+      - '.github/workflows/build-dl-ipa.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nagodl-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      # 엔진 시험(리눅스와 같은 시험을 맥에서도). 시험 서버가 필요한 통합 시험은 건너뛴다.
+      - name: Core tests
+        run: swift test --package-path NagoDL/Core
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          cd NagoDL && xcodegen
+
+      - name: Build (no signing)
+        run: |
+          xcodebuild -project NagoDL/NagoDL.xcodeproj -scheme NagoDL -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/NagoDL.app Payload/
+          # 확장(PlugIns)을 먼저 서명해야 앱 서명이 깨지지 않는다(ad-hoc, 재서명 도구용)
+          codesign --force --sign - Payload/NagoDL.app/PlugIns/NagoDLShare.appex
+          codesign --force --sign - Payload/NagoDL.app
+          ls -la Payload/NagoDL.app Payload/NagoDL.app/PlugIns
+          zip -qry NagoDL.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NagoDL-ipa
+          path: NagoDL.ipa
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="nagodl-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" NagoDL.ipa --target "$GITHUB_SHA" --prerelease \
+            --title "NAGO DL ${tag}" \
+            --notes "서명 안 된 IPA입니다(ad-hoc 서명). 본인 인증서로 재서명 후 설치하세요. 브랜치: ${GITHUB_REF_NAME}"

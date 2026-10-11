@@ -152,3 +152,62 @@ final class MetaTests: XCTestCase {
         XCTAssertEqual(m.bytesPerSecond(now: 100), 0)
     }
 }
+
+final class LinkTests: XCTestCase {
+    func testFirstURL() {
+        XCTAssertEqual(LinkProbe.firstURL(in: "  https://a.com/x.zip ")?.absoluteString, "https://a.com/x.zip")
+        XCTAssertEqual(LinkProbe.firstURL(in: "이거 받아줘 (https://b.com/v.mp4?x=1).")?.absoluteString, "https://b.com/v.mp4?x=1")
+        XCTAssertEqual(LinkProbe.firstURL(in: "링크: HTTP://C.com/a")?.host, "C.com")
+        XCTAssertNil(LinkProbe.firstURL(in: "ftp://x.com/a"))
+        XCTAssertNil(LinkProbe.firstURL(in: "그냥 글"))
+    }
+
+    func testAddressBar() {
+        XCTAssertEqual(LinkProbe.urlFromAddressBar("example.com/a")?.absoluteString, "https://example.com/a")
+        XCTAssertEqual(LinkProbe.urlFromAddressBar("http://x.org")?.absoluteString, "http://x.org")
+        XCTAssertNil(LinkProbe.urlFromAddressBar("고양이 사진"))
+        XCTAssertNil(LinkProbe.urlFromAddressBar("hello"))
+    }
+
+    func testDescribe() {
+        let u = URL(string: "https://e.com/v/master.m3u8")!
+        let hls = LinkProbe.describe(HTTPResponseInfo(statusCode: 200, url: u, headers: ["Content-Type": "application/vnd.apple.mpegurl"]), requested: u)
+        XCTAssertEqual(hls.kind, .hls)
+        XCTAssertEqual(hls.suggestedName, "master.mp4")
+        let page = LinkProbe.describe(HTTPResponseInfo(statusCode: 200, url: URL(string: "https://e.com/")!, headers: ["Content-Type": "text/html; charset=utf-8"]), requested: u)
+        XCTAssertEqual(page.kind, .page)
+        let file = LinkProbe.describe(HTTPResponseInfo(statusCode: 206, url: URL(string: "https://e.com/dl?id=3")!,
+                                                       headers: ["Content-Range": "bytes 0-99/5000", "Content-Type": "application/zip",
+                                                                 "Content-Disposition": "attachment; filename=\"a.zip\""]), requested: u)
+        XCTAssertEqual(file.kind, .file)
+        XCTAssertEqual(file.totalBytes, 5000)
+        XCTAssertTrue(file.acceptsRanges)
+        XCTAssertEqual(file.suggestedName, "a.zip")
+        let saved = URL(string: "https://e.com/save")!
+        let attachmentHTML = LinkProbe.describe(HTTPResponseInfo(statusCode: 200, url: saved, headers: ["Content-Type": "text/html", "Content-Disposition": "attachment; filename=page.html"]), requested: saved)
+        XCTAssertEqual(attachmentHTML.kind, .file)
+    }
+
+    func testCompletedImport() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("imp-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = EnginePaths(support: root.appendingPathComponent("s"), output: root.appendingPathComponent("o"))
+        let m = DownloadManager(paths: paths)
+        m.load()
+        let tmp = root.appendingPathComponent("tmp.bin")
+        try Data([1, 2, 3]).write(to: tmp)
+        m.addCompletedFile(at: tmp, name: "웹 파일.bin", sourceURL: URL(string: "https://x.com/a")!)
+        let deadline = Date().addingTimeInterval(5)
+        var snap: DownloadSnapshot?
+        while Date() < deadline, snap == nil {
+            snap = m.snapshots().first
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        XCTAssertEqual(snap?.status, .completed)
+        XCTAssertEqual(snap?.fileName, "웹 파일.bin")
+        XCTAssertEqual(snap?.totalBytes, 3)
+        XCTAssertEqual(snap?.fileMissing, false)
+        try FileManager.default.removeItem(at: XCTUnwrap(snap?.savedURL))
+        XCTAssertEqual(m.snapshots().first?.fileMissing, true)
+    }
+}
