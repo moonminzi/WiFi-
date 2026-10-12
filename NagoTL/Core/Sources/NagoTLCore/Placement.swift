@@ -54,14 +54,14 @@ extension Typesetter {
     /// 덩어리 하나의 번역을 어떤 크기·색·굵기로 어디에 쓸지 정한다
     /// avoid: 다른 덩어리가 차지한 자리(그림 위 글을 넓힐 때 그쪽으로는 넓히지 않는다 — 글이 겹치지 않게)
     public static func place(_ text: String, for r: Refined, kind: BlockKind, metrics: GlyphMetrics,
-                             avoid: [IRect] = []) -> PlacedText {
-        var p = placed(printable(text), for: r, kind: kind, metrics: metrics, avoid: avoid)
+                             avoid: [IRect] = [], scale: Double = 1) -> PlacedText {
+        var p = placed(printable(text), for: r, kind: kind, metrics: metrics, avoid: avoid, scale: scale)
         p.face = face(for: r, kind: kind)
         return p
     }
 
     static func placed(_ text: String, for r: Refined, kind: BlockKind, metrics: GlyphMetrics,
-                       avoid: [IRect] = []) -> PlacedText {
+                       avoid: [IRect] = [], scale: Double = 1) -> PlacedText {
         // 원문 그대로 두는 덩어리는 아무것도 그리지 않는다
         if r.mode == .keep {
             return PlacedText(layout: TextLayout(fontSize: 0, lineHeight: 0, lines: [], overflow: false), color: r.ink, weight: 400)
@@ -69,6 +69,11 @@ extension Typesetter {
         var (hi, lo) = sizeRange(r)
         // 효과음은 원문이 차지하던 자리를 채울 만큼 크게(획 조각으로 잰 글자 크기는 효과음 글자보다 작다)
         if kind == .sfx && r.mode == .art { hi = max(hi, Double(min(r.layoutRect.w, r.layoutRect.h)) * 0.9) }
+        // 이웃 글과 겹쳐서 줄여 다시 앉힐 때
+        if scale < 1 {
+            hi = max(9, hi * scale)
+            lo = max(8, min(lo, hi) * scale)
+        }
         // 말풍선 없는 그림 위 글자는 세로 원문의 좁은 열 대신 가로로 읽기 좋은 폭(글자 8~9개)까지 양옆으로 넓혀
         // 짧은 줄이 길게 늘어서지 않게 쓴다
         var shape = r.shape

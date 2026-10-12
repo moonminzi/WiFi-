@@ -563,18 +563,44 @@ enum Pipeline {
         let refined = Refiner.refinePage(bitmap, blocks: active.map { $0.1.pageBlock }, translateSFX: translateSFX)
         var out = bitmap
         Refiner.erase(&out, refined)
-        let placed = zip(active, refined).enumerated().map { k, ar -> PlacedText in
-            let (a, r) = ar
+        let fonts = active.indices.map { k in
             // 쓰임에 맞는 글꼴(그 글꼴에 없는 글자가 있으면 다른 글꼴)로 재고 그린다
-            let name = FontBook.resolvedName(face: Typesetter.face(for: r, kind: a.1.blockKind), text: a.2)
-            // 다른 덩어리 자리로는 넓히지 않는다(글끼리 겹치지 않게)
-            let others = refined.indices.filter { $0 != k }.map { refined[$0].textBox }
-            var p = Typesetter.place(a.2, for: r, kind: a.1.blockKind, metrics: FontBook.metrics(fontName: name),
-                                     avoid: others)
-            p.fontName = name
+            FontBook.resolvedName(face: Typesetter.face(for: refined[k], kind: active[k].1.blockKind), text: active[k].2)
+        }
+        func make(_ k: Int, scale: Double, avoid: [IRect]) -> PlacedText {
+            var p = Typesetter.place(active[k].2, for: refined[k], kind: active[k].1.blockKind,
+                                     metrics: FontBook.metrics(fontName: fonts[k]), avoid: avoid, scale: scale)
+            p.fontName = fonts[k]
             // 그림 밖으로 나간 글은 안으로
             p.layout = p.layout.moved(inside: bitmap.bounds)
             return p
+        }
+        // 다른 덩어리 자리로는 넓히지 않는다(글끼리 겹치지 않게)
+        let boxes = refined.map(\.textBox)
+        var placed = active.indices.map { k in make(k, scale: 1, avoid: boxes.indices.filter { $0 != k }.map { boxes[$0] }) }
+        // 그래도 이웃 글과 겹치면(AI 상자끼리 겹친 경우 등) 글자가 큰 쪽을 조금씩 줄여 다시 앉힌다
+        func area(_ p: PlacedText) -> IRect? {
+            guard !p.layout.lines.isEmpty else { return nil }
+            let b = p.layout.bounds, pad = p.layout.fontSize * (p.outlineWidth + 0.05)
+            return IRect(x: Int(b.x - pad), y: Int(b.y - pad), w: Int(b.w + 2 * pad), h: Int(b.h + 2 * pad))
+        }
+        var scales = [Double](repeating: 1, count: placed.count)
+        for _ in 0..<8 {
+            var changed = false
+            for k in placed.indices {
+                guard let mine = area(placed[k]) else { continue }
+                for j in placed.indices where j > k {
+                    guard let other = area(placed[j]), other.intersection(mine).area > 0 else { continue }
+                    let s = placed[k].layout.fontSize >= placed[j].layout.fontSize ? k : j
+                    guard placed[s].layout.fontSize > 10 else { continue }
+                    scales[s] *= 0.85
+                    let avoid = placed.indices.filter { $0 != s }.compactMap { area(placed[$0]) } + boxes.indices
+                        .filter { $0 != s }.map { boxes[$0] }
+                    placed[s] = make(s, scale: scales[s], avoid: avoid)
+                    changed = true
+                }
+            }
+            if !changed { break }
         }
         guard let base = Pixels.cgImage(out), let img = Painter.draw(base: base, texts: placed) else {
             throw TranslateError.badResponse("그리기 실패")
