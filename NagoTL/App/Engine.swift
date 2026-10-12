@@ -504,9 +504,12 @@ enum Pipeline {
         let refined = Refiner.refinePage(bitmap, blocks: active.map { $0.1.pageBlock }, translateSFX: translateSFX)
         var out = bitmap
         Refiner.erase(&out, refined)
-        let placed = zip(active, refined).map { a, r in
-            Typesetter.place(a.2, for: r, kind: a.1.blockKind,
-                             metrics: FontBook.metrics(for: Typesetter.face(for: r, kind: a.1.blockKind)))
+        let placed = zip(active, refined).map { a, r -> PlacedText in
+            // 쓰임에 맞는 글꼴(그 글꼴에 없는 글자가 있으면 다른 글꼴)로 재고 그린다
+            let name = FontBook.resolvedName(face: Typesetter.face(for: r, kind: a.1.blockKind), text: a.2)
+            var p = Typesetter.place(a.2, for: r, kind: a.1.blockKind, metrics: FontBook.metrics(fontName: name))
+            p.fontName = name
+            return p
         }
         guard let base = Pixels.cgImage(out), let img = Painter.draw(base: base, texts: placed),
               let data = Pixels.jpeg(img, quality: 0.92) else { throw TranslateError.badResponse("그리기 실패") }

@@ -42,6 +42,8 @@ targets:
           - JetBrainsMono-SemiBold.ttf
           - JetBrainsMono-Bold.ttf
           # 만화용 한글 글꼴(SIL OFL 1.1, App/Fonts에 라이선스)
+          - NanumSquareRoundEB.ttf
+          - NanumSquareRoundB.ttf
           - Jua-Regular.ttf
           - BlackHanSans-Regular.ttf
           - DoHyeon-Regular.ttf

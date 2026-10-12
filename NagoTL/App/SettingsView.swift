@@ -6,8 +6,8 @@ struct SettingsView: View {
     @AppStorage(Budget.limitKey) private var budget = 5.0
     @AppStorage(Budget.spentKey) private var spent = 0.0
     @AppStorage(Pipeline.sfxKey) private var translateSFX = true
-    @AppStorage(FontBook.dialogueKey) private var dialogueFont: FontBook.Choice = .jua
-    @AppStorage(FontBook.sfxKey) private var sfxFont: FontBook.Choice = .blackHanSans
+    @AppStorage(FontBook.dialogueKey) private var dialogueFont: FontBook.Choice = FontBook.defaultDialogue
+    @AppStorage(FontBook.sfxKey) private var sfxFont: FontBook.Choice = FontBook.defaultSFX
     // 고른 AI가 바뀌면 아래 요약도 다시 그리게
     @AppStorage(AISettings.primaryKey) private var primary: Provider = .claude
     @AppStorage(AISettings.fallbackKey) private var fallback = ""
@@ -51,7 +51,7 @@ struct SettingsView: View {
                 ForEach(FontBook.sfxOptions) { c in
                     fontRow(c, selected: sfxFont == c, sample: "히죽히죽♥ 덜컥!!") { sfxFont = c }
                 }
-                Text("간판·사진 속 글자는 반듯한 시스템 고딕으로 써요. 바꾼 뒤 이미 번역한 쪽은 책 화면 더보기 → 모두 다시 그리기(무료).")
+                Text("주아·검은고딕·도현은 자주 쓰는 글자만 있어서, 없는 글자가 나오면 그 덩어리는 나눔스퀘어라운드로 써요(한 글자만 다른 모양으로 섞이지 않게). 간판·사진 속 글자는 반듯한 시스템 고딕. 바꾼 뒤 이미 번역한 쪽은 책 화면 더보기 → 모두 다시 그리기(무료).")
                     .font(Term.mono(11.5))
                     .foregroundStyle(Term.muted)
             }

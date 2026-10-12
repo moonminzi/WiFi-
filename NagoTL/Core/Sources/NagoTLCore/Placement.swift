@@ -18,6 +18,8 @@ public struct PlacedText: Sendable, Codable, Equatable {
     public var weight: Int
     /// 어떤 글꼴로 그릴지
     public var face: TextFace = .dialogue
+    /// 앱이 이 글에 맞춰 정한 글꼴 이름(고른 글꼴에 없는 글자가 있으면 다른 글꼴로 바꾼 것). nil이면 쓰임으로 고른다
+    public var fontName: String?
     /// 글자 테두리 색과 두께(글자 크기 배수). 말풍선 밖으로 넘칠 때·효과음에 쓴다
     public var outline: RGBA?
     public var outlineWidth: Double

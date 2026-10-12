@@ -128,14 +128,16 @@ enum Pixels {
 /// 간판·사진 속 글자는 시스템 Apple SD 산돌고딕 Neo(굵기가 여럿)
 enum FontBook {
     enum Choice: String, CaseIterable, Identifiable {
-        case jua, blackHanSans, doHyeon, nanumGothic, nanumPen, system
+        case nanumSquareRound, nanumSquareRoundBold, jua, blackHanSans, doHyeon, nanumGothic, nanumPen, system
 
         var id: String { rawValue }
 
         var label: String {
             switch self {
-            case .jua: "주아"
-            case .blackHanSans: "검은고딕"
+            case .nanumSquareRound: "나눔스퀘어라운드 ExtraBold(살짝 둥근)"
+            case .nanumSquareRoundBold: "나눔스퀘어라운드 Bold(조금 가늘게)"
+            case .jua: "주아(아주 둥근)"
+            case .blackHanSans: "검은고딕(아주 굵은)"
             case .doHyeon: "도현"
             case .nanumGothic: "나눔고딕 ExtraBold"
             case .nanumPen: "나눔손글씨 펜"
@@ -146,6 +148,8 @@ enum FontBook {
         /// 앱에 넣은 글꼴의 PostScript 이름(시스템 글꼴은 굵기마다 따로라 nil)
         var postScript: String? {
             switch self {
+            case .nanumSquareRound: "NanumSquareRoundEB"
+            case .nanumSquareRoundBold: "NanumSquareRoundB"
             case .jua: "Jua-Regular"
             case .blackHanSans: "BlackHanSans-Regular"
             case .doHyeon: "DoHyeon-Regular"
@@ -158,14 +162,19 @@ enum FontBook {
 
     static let dialogueKey = "tl.font.dialogue"
     static let sfxKey = "tl.font.sfx"
-    static let dialogueOptions: [Choice] = [.jua, .nanumGothic, .doHyeon, .nanumPen, .system]
-    static let sfxOptions: [Choice] = [.blackHanSans, .jua, .doHyeon, .nanumGothic, .system]
+    static let defaultDialogue = Choice.nanumSquareRound
+    static let defaultSFX = Choice.nanumSquareRound
+    static let dialogueOptions: [Choice] = [.nanumSquareRound, .nanumSquareRoundBold, .jua, .nanumGothic, .doHyeon,
+                                            .nanumPen, .system]
+    static let sfxOptions: [Choice] = [.nanumSquareRound, .blackHanSans, .jua, .doHyeon, .nanumGothic, .system]
+    /// 한글 11,172자가 다 있는 둥근 글꼴 — 고른 글꼴에 없는 글자가 있으면 그 덩어리는 이걸로
+    static let fullCoverage = Choice.nanumSquareRound
 
-    /// 쓰임마다 고른 글꼴(기본: 대사 주아, 효과음 검은고딕)
+    /// 쓰임마다 고른 글꼴(기본: 나눔스퀘어라운드 ExtraBold)
     static func choice(for face: TextFace) -> Choice {
         switch face {
-        case .dialogue: Choice(rawValue: UserDefaults.standard.string(forKey: dialogueKey) ?? "") ?? .jua
-        case .sfx: Choice(rawValue: UserDefaults.standard.string(forKey: sfxKey) ?? "") ?? .blackHanSans
+        case .dialogue: Choice(rawValue: UserDefaults.standard.string(forKey: dialogueKey) ?? "") ?? defaultDialogue
+        case .sfx: Choice(rawValue: UserDefaults.standard.string(forKey: sfxKey) ?? "") ?? defaultSFX
         case .plain: .system
         }
     }
@@ -179,18 +188,36 @@ enum FontBook {
         }
     }
 
-    static func fontName(_ choice: Choice, weight: Int) -> String { choice.postScript ?? systemName(weight) }
+    /// 이 글에 쓸 글꼴 이름. 고른 글꼴에 없는 한글 글자가 있으면(주아·검은고딕·도현은 자주 쓰는 2천여 자만 있다)
+    /// 한 글자만 다른 모양으로 섞이지 않게 덩어리 전체를 빠짐없는 둥근 글꼴로. 시스템 고딕이면 nil(굵기에 맞춰 고른다)
+    static func resolvedName(face: TextFace, text: String) -> String? {
+        guard let ps = choice(for: face).postScript else { return nil }
+        if covers(ps, text) { return ps }
+        return fullCoverage.postScript
+    }
+
+    /// 글꼴에 이 글의 한글 글자가 다 있는가
+    static func covers(_ fontName: String, _ text: String) -> Bool {
+        let font = CTFontCreateWithName(fontName as CFString, 20, nil)
+        for scalar in text.unicodeScalars where (0xAC00...0xD7A3).contains(scalar.value) {
+            var ch = UniChar(scalar.value)
+            var glyph: CGGlyph = 0
+            if !CTFontGetGlyphsForCharacters(font, &ch, &glyph, 1) { return false }
+        }
+        return true
+    }
 
     static func font(face: TextFace, weight: Int, size: CGFloat) -> CTFont {
-        CTFontCreateWithName(fontName(choice(for: face), weight: weight) as CFString, size, nil)
+        let name = choice(for: face).postScript ?? systemName(weight)
+        return CTFontCreateWithName(name as CFString, size, nil)
     }
 
     private static var metricsCache: [String: CTMetrics] = [:]
     private static let lock = NSLock()
 
-    /// 그 쓰임의 글꼴로 잰 글자 폭(줄 나누기·크기 찾기에 쓴다)
-    static func metrics(for face: TextFace) -> CTMetrics {
-        let name = fontName(choice(for: face), weight: 700)
+    /// 그 글꼴로 잰 글자 폭(줄 나누기·크기 찾기에 쓴다). 이름이 nil이면 시스템 고딕
+    static func metrics(fontName: String?) -> CTMetrics {
+        let name = fontName ?? systemName(700)
         lock.lock()
         defer { lock.unlock() }
         if let m = metricsCache[name] { return m }
@@ -254,7 +281,8 @@ enum Painter {
     static func draw(_ t: PlacedText, in ctx: CGContext) {
         guard !t.layout.lines.isEmpty else { return }
         let size = CGFloat(t.layout.fontSize)
-        let font = FontBook.font(face: t.face, weight: t.weight, size: size)
+        let font = t.fontName.map { CTFontCreateWithName($0 as CFString, size, nil) }
+            ?? FontBook.font(face: t.face, weight: t.weight, size: size)
         if t.layout.vertical {
             drawVertical(t, font: font, in: ctx)
             return
