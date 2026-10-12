@@ -3,9 +3,10 @@
 GET /?t=<TOKEN>                → 터미널 스타일 HTML (브라우저)
 GET /?format=json  + 헤더 x-nago-key: <VPN 비밀번호>  → JSON (앱)
 POST / {op, ...}   + 헤더 x-nago-key                 → 서울 WireGuard 피어 관리 (nago-peer.py)
+                                                       op: add|kick|reset|remove|rename|flags(adblock)
 POST / {op: start|stop|reboot|wake, node}             → 서버 켜기/끄기/재부팅/유휴 카운터 0으로
 
-WireGuard 피어 목록의 기준은 SSM 파라미터 /nago/wg/peers({"peers":[{pub, ip, name}]}).
+WireGuard 피어 목록의 기준은 SSM 파라미터 /nago/wg/peers({"peers":[{pub, ip, name, adblock}]}).
 추가/삭제하면 켜져 있는 서버에 nago-peer sync를 보내고, 꺼진 서버는 국가 API로 켤 때 맞춘다.
 서버별 WireGuard 공개키/포트는 /nago/wg/servers.
 
@@ -30,7 +31,7 @@ KEY_SHA = os.environ.get("KEY_SHA256", "")
 # [{"code","city","region","iid","idle_limit","eip"}]
 NODES = json.loads(os.environ["NODES"])
 PEER_ADMIN = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "nago-peer.py")).read()
-PEER_OPS = ("add", "kick", "reset", "remove", "rename")
+PEER_OPS = ("add", "kick", "reset", "remove", "rename", "flags")
 PARAM_REGION = "ap-northeast-2"
 WG_PEERS = "/nago/wg/peers"
 WG_SERVERS = "/nago/wg/servers"
@@ -240,6 +241,7 @@ def build(now, descs, stats, mets):
     for x in sorted(wg_peers(), key=lambda x: int(x["ip"].rsplit(".", 1)[1])):
         a = agg.get(x["pub"], {"rx": 0, "tx": 0, "hs": 0, "ep": None, "node": None})
         peers.append({"n": str(int(x["ip"].rsplit(".", 1)[1]) - 1), "ip": x["ip"], "name": x.get("name"),
+                      "adblock": bool(x.get("adblock")),
                       "hsAgo": (now_s - a["hs"]) if a["hs"] > 0 else None,
                       "rx": a["rx"], "tx": a["tx"], "ep": a["ep"], "node": a["node"]})
 
@@ -323,6 +325,8 @@ def render_html(d):
     peers = []
     for p in d["peers"]:
         head = '%s %s %s ' % (span("k", "[peer %s]" % p["n"]), p["ip"], span("path", p.get("name") or ""))
+        if p.get("adblock"):
+            head += span("ok", "adblock") + " "
         if p["hsAgo"] is None:
             peers.append(head + span("dim", "○ idle") + "\n  " + span("dim", "no handshake since boot"))
             continue
@@ -392,7 +396,8 @@ def peer_script(req):
 
 def push_sync(codes=None):
     """켜져 있는 서버의 WireGuard 피어를 파라미터 목록에 맞춘다(기다리지 않음)."""
-    req = {"op": "sync", "peers": [{"pub": x["pub"], "ip": x["ip"]} for x in get_param(WG_PEERS, {"peers": []})["peers"]]}
+    req = {"op": "sync", "peers": [{"pub": x["pub"], "ip": x["ip"], "adblock": bool(x.get("adblock"))}
+                                   for x in get_param(WG_PEERS, {"peers": []})["peers"]]}
     script = peer_script(req)
     pushed = []
     for n in NODES:
@@ -442,19 +447,27 @@ def peer_list_admin(op, req):
         peers.remove(mine)
         put_param(WG_PEERS, data)
         return {"ok": True, "ip": ip, "pushed": push_sync()}
+    if op == "flags":
+        if "adblock" in req:
+            if str(req["adblock"]).strip().lower() in ("1", "true", "yes", "on"):
+                mine["adblock"] = True
+            else:
+                mine.pop("adblock", None)
+        put_param(WG_PEERS, data)
+        return {"ok": True, "ip": ip, "adblock": bool(mine.get("adblock")), "pushed": push_sync()}
     mine["name"] = name or "peer %d" % (int(ip.rsplit(".", 1)[1]) - 1)
     put_param(WG_PEERS, data)
     return {"ok": True, "ip": ip, "name": mine["name"]}
 
 
 def peer_admin(req):
-    """add/remove/rename은 피어 목록(파라미터), kick/reset은 서울 서버에서 nago-peer로."""
+    """add/remove/rename/flags는 피어 목록(파라미터), kick/reset은 서울 서버에서 nago-peer로."""
     op = req.get("op")
     if op not in PEER_OPS:
         raise ApiError(400, "unknown op")
-    allowed = {"op", "pub", "name", "ip", "seconds"}
+    allowed = {"op", "pub", "name", "ip", "seconds", "adblock"}
     req = {k: str(v)[:100] for k, v in req.items() if k in allowed}
-    if op in ("add", "remove", "rename"):
+    if op in ("add", "remove", "rename", "flags"):
         out = peer_list_admin(op, req)
         _cache.pop("live", None)
         return out
