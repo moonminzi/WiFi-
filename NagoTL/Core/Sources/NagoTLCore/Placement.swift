@@ -52,13 +52,16 @@ extension Typesetter {
     }
 
     /// 덩어리 하나의 번역을 어떤 크기·색·굵기로 어디에 쓸지 정한다
-    public static func place(_ text: String, for r: Refined, kind: BlockKind, metrics: GlyphMetrics) -> PlacedText {
-        var p = placed(printable(text), for: r, kind: kind, metrics: metrics)
+    /// avoid: 다른 덩어리가 차지한 자리(그림 위 글을 넓힐 때 그쪽으로는 넓히지 않는다 — 글이 겹치지 않게)
+    public static func place(_ text: String, for r: Refined, kind: BlockKind, metrics: GlyphMetrics,
+                             avoid: [IRect] = []) -> PlacedText {
+        var p = placed(printable(text), for: r, kind: kind, metrics: metrics, avoid: avoid)
         p.face = face(for: r, kind: kind)
         return p
     }
 
-    static func placed(_ text: String, for r: Refined, kind: BlockKind, metrics: GlyphMetrics) -> PlacedText {
+    static func placed(_ text: String, for r: Refined, kind: BlockKind, metrics: GlyphMetrics,
+                       avoid: [IRect] = []) -> PlacedText {
         // 원문 그대로 두는 덩어리는 아무것도 그리지 않는다
         if r.mode == .keep {
             return PlacedText(layout: TextLayout(fontSize: 0, lineHeight: 0, lines: [], overflow: false), color: r.ink, weight: 400)
@@ -70,8 +73,13 @@ extension Typesetter {
         // 짧은 줄이 길게 늘어서지 않게 쓴다
         var shape = r.shape
         if r.mode == .art, Double(r.layoutRect.w) < r.glyphSize * 8.5 {
-            let grow = Int((r.glyphSize * 8.5 - Double(r.layoutRect.w)) / 2)
-            shape = LayoutShape(rect: r.layoutRect.expanded(dx: grow, dy: 0))
+            var grow = Int((r.glyphSize * 8.5 - Double(r.layoutRect.w)) / 2)
+            // 이웃 덩어리 자리에 닿지 않을 만큼만(원래 자리와 이미 겹친 이웃은 빼고 본다)
+            let others = avoid.filter { $0.intersection(r.layoutRect).area == 0 }
+            while grow > 0, others.contains(where: { $0.intersection(r.layoutRect.expanded(dx: grow, dy: 0)).area > 0 }) {
+                grow -= max(2, grow / 6)
+            }
+            if grow > 0 { shape = LayoutShape(rect: r.layoutRect.expanded(dx: grow, dy: 0)) }
         }
         let layout = Typesetter.layout(text, shape: shape, maxSize: hi, minSize: lo, metrics: metrics)
         switch r.mode {

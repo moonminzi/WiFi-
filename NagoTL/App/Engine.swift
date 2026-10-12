@@ -563,10 +563,14 @@ enum Pipeline {
         let refined = Refiner.refinePage(bitmap, blocks: active.map { $0.1.pageBlock }, translateSFX: translateSFX)
         var out = bitmap
         Refiner.erase(&out, refined)
-        let placed = zip(active, refined).map { a, r -> PlacedText in
+        let placed = zip(active, refined).enumerated().map { k, ar -> PlacedText in
+            let (a, r) = ar
             // 쓰임에 맞는 글꼴(그 글꼴에 없는 글자가 있으면 다른 글꼴)로 재고 그린다
             let name = FontBook.resolvedName(face: Typesetter.face(for: r, kind: a.1.blockKind), text: a.2)
-            var p = Typesetter.place(a.2, for: r, kind: a.1.blockKind, metrics: FontBook.metrics(fontName: name))
+            // 다른 덩어리 자리로는 넓히지 않는다(글끼리 겹치지 않게)
+            let others = refined.indices.filter { $0 != k }.map { refined[$0].textBox }
+            var p = Typesetter.place(a.2, for: r, kind: a.1.blockKind, metrics: FontBook.metrics(fontName: name),
+                                     avoid: others)
             p.fontName = name
             // 그림 밖으로 나간 글은 안으로
             p.layout = p.layout.moved(inside: bitmap.bounds)
