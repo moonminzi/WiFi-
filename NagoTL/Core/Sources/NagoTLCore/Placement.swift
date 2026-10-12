@@ -66,7 +66,13 @@ extension Typesetter {
         var (hi, lo) = sizeRange(r)
         // 효과음은 원문이 차지하던 자리를 채울 만큼 크게(획 조각으로 잰 글자 크기는 효과음 글자보다 작다)
         if kind == .sfx && r.mode == .art { hi = max(hi, Double(min(r.layoutRect.w, r.layoutRect.h)) * 0.9) }
-        let layout = Typesetter.layout(text, shape: r.shape, maxSize: hi, minSize: lo, metrics: metrics)
+        // 말풍선 없는 그림 위 글자는 세로 원문의 좁은 열 대신 가로로 읽기 좋은 폭(글자 5~6개)까지 양옆으로 넓혀 쓴다
+        var shape = r.shape
+        if r.mode == .art, Double(r.layoutRect.w) < r.glyphSize * 5.5 {
+            let grow = Int((r.glyphSize * 5.5 - Double(r.layoutRect.w)) / 2)
+            shape = LayoutShape(rect: r.layoutRect.expanded(dx: grow, dy: 0))
+        }
+        let layout = Typesetter.layout(text, shape: shape, maxSize: hi, minSize: lo, metrics: metrics)
         switch r.mode {
         case .clean:
             let weight = kind == .narration || kind == .caption ? 600 : 700

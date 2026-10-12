@@ -230,7 +230,8 @@ public enum Typesetter {
         if let w = whole, w.fontSize >= hi0 - 0.01 { return w }
         let split = largest(paras, shape: shape, lo: lo0, hi: hi0, space: space, split: true)
         switch (whole, split) {
-        case let (w?, s?): return w.fontSize >= s.fontSize * 0.75 ? w : s
+        // 낱말(어절) 중간은 자르지 않는다("싫어/요"처럼 끊기면 읽히지 않는다) — 띄어쓰기로 들어가면 늘 그쪽
+        case let (w?, _): return w
         case let (w?, nil): return w
         case let (nil, s?): return s
         default: return overflowLayout(paras, shape: shape, size: lo0, space: space)
