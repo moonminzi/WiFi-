@@ -143,6 +143,13 @@ public enum Refiner {
         if block.glyph > 0, let r = artText(bmp, block: block, box: box) { return r }
         let (bg, uniformity) = dominantColor(bmp, box)
         if uniformity >= 0.35, let r = closedBubble(bmp, box: box, bg: bg, context: &ctx) { return r }
+        // AI 상자가 말풍선·나레이션 칸보다 크게 잡혀(칸 테두리·바깥 그림까지) 못 찾았으면 안쪽만 보고 한 번 더 —
+        // 못 찾으면 칸째 그림으로 덮고 글이 칸 밖까지 커진다
+        let core = box.expanded(dx: -box.w / 5, dy: -box.h / 8)
+        if core.w >= 8, core.h >= 8 {
+            let (bg2, u2) = dominantColor(bmp, core)
+            if u2 >= 0.5, let r = closedBubble(bmp, box: core, bg: bg2, context: &ctx) { return r }
+        }
         // 상자 둘레도 같은 바탕일 때만 "빈 바탕 위 글자"(흰 테두리가 많은 그림 위 글자를 흰 바탕 글자로 보지 않게)
         if uniformity >= 0.55, surroundShare(bmp, box: box, color: bg) >= 0.45, var r = openText(bmp, box: box, bg: bg) {
             r.vertical = block.vertical
