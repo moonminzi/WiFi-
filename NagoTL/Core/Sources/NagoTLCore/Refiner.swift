@@ -138,10 +138,18 @@ public enum Refiner {
             guard ctx.translateSFX, let r = artText(bmp, block: block, box: box, strict: true) else { return keep(box) }
             return r
         }
-        // 테두리 두른 글자를 그림에서 찾았으면 같은 모양(색·테두리·세로)으로 다시 쓴다 — 바탕이 고른 벽 위라도
-        // (고른 벽을 닫힌 말풍선으로 잘못 보지 않게 말풍선보다 먼저)
-        if block.glyph > 0, let r = artText(bmp, block: block, box: box) { return r }
         let (bg, uniformity) = dominantColor(bmp, box)
+        // 테두리 두른 글자를 그림에서 찾았으면 같은 모양(색·테두리)으로 다시 쓴다 — 바탕이 고른 벽 위라도.
+        // 다만 글을 꼭 감싼 말풍선·나레이션 칸 안이면 칸 글자다(넓은 벽은 칸으로 보지 않는다)
+        if block.glyph > 0 {
+            var trial = ctx
+            if uniformity >= 0.35, let r = closedBubble(bmp, box: box, bg: bg, context: &trial),
+               r.layoutRect.area <= box.area * 6 {
+                ctx = trial
+                return r
+            }
+            if let r = artText(bmp, block: block, box: box) { return r }
+        }
         if uniformity >= 0.35, let r = closedBubble(bmp, box: box, bg: bg, context: &ctx) { return r }
         // AI 상자가 말풍선·나레이션 칸보다 크게 잡혀(칸 테두리·바깥 그림까지) 못 찾았으면 안쪽만 보고 한 번 더 —
         // 못 찾으면 칸째 그림으로 덮고 글이 칸 밖까지 커진다
