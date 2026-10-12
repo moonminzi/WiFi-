@@ -28,7 +28,7 @@ final class SFXTests: XCTestCase {
             }
             XCTAssertLessThan(Double(left) / Double(total), 0.02, "hints \(hints) left \(left)/\(total)")
             let p = Typesetter.place("히죽히죽♥", for: r, kind: .sfx, metrics: ApproxMetrics())
-            XCTAssertTrue(p.layout.vertical)
+            XCTAssertFalse(p.layout.vertical)
             XCTAssertFalse(p.layout.lines.isEmpty)
             XCTAssertNil(p.plate)
             XCTAssertEqual(p.outline, r.outline)

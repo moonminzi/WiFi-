@@ -104,15 +104,9 @@ extension Typesetter {
         return out
     }
 
-    /// 원문이 세로쓰기면 세로 배치와 견줘 더 나은 쪽. 좁고 긴 자리면 가로는 한 줄에 한두 글자로 쪼개지니
-    /// 세로가 너무 작아지지 않는 한 세로, 둘 다 넘치면 세로(가로로 넘치면 깨알 같은 한 줄이 된다)
+    /// 한글은 원문이 세로쓰기여도 가로로 쓴다(짧은 줄을 가운데 맞춰 쌓는 한국 만화 식자 — 세로 한글은 읽기 어색하다)
     static func preferVertical(_ text: String, _ r: Refined, _ horizontal: TextLayout, hi: Double, lo: Double) -> TextLayout {
-        guard r.vertical else { return horizontal }
-        let v = Typesetter.layoutVertical(text, rect: r.layoutRect, maxSize: hi, minSize: lo)
-        let tall = r.layoutRect.h >= r.layoutRect.w * 3 / 2
-        if !v.overflow && (horizontal.overflow || v.fontSize >= horizontal.fontSize * (tall ? 0.75 : 1.08)) { return v }
-        if v.overflow && horizontal.overflow && tall { return v }
-        return horizontal
+        horizontal
     }
 
     /// 글자 크기 범위(최대, 최소)

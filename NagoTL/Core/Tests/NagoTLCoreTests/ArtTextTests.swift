@@ -187,14 +187,14 @@ final class ArtTextTests: XCTestCase {
     }
 
     /// 좁고 긴 그림 위 세로 글자는 한글도 세로가 더 크게 들어가면 세로로
-    func testArtPlacementPrefersVerticalWhenTallAndNarrow() {
+    func testArtPlacementIsHorizontalKoreanWithOriginalColors() {
         var cv = ArtFixtures.illustration(220, 520)
         let (box, _) = ArtFixtures.outlinedText(&cv, right: 170, top: 30, columns: [12, 11], size: 32,
                                     fill: Self.magenta, outline: .white, width: 3, seed: 8)
         let r = Refiner.refine(cv.bmp, block: PageBlock(box: box, kind: .speech, fill: Self.magenta, outline: .white,
                                                         vertical: true))
         let p = Typesetter.place("잘됐네요~ 다카하시 군, 오늘부터 너도 원숭이야.", for: r, kind: .speech, metrics: ApproxMetrics())
-        XCTAssertTrue(p.layout.vertical)
+        XCTAssertFalse(p.layout.vertical)
         XCTAssertEqual(p.color.distance2(Self.magenta) < 50 * 50, true)
         XCTAssertEqual(p.outline, .white)
         XCTAssertGreaterThan(p.outlineWidth, 0.1)

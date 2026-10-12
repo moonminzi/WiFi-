@@ -38,7 +38,7 @@ final class LocatorTests: XCTestCase {
             // 글자 크기는 원문 글자 크기 근처(상자가 틀려도 터무니없이 크거나 작지 않게)
             XCTAssertEqual(r.glyphSize, Double(size), accuracy: Double(size) * 0.35, shape)
             let p = Typesetter.place("그러니까 이건 돌려받을게요. 그럼 안녕히 계세요♥", for: r, kind: .speech, metrics: ApproxMetrics())
-            XCTAssertTrue(p.layout.vertical, shape)
+            XCTAssertFalse(p.layout.vertical, shape)
             XCTAssertGreaterThan(p.layout.fontSize, Double(size) * 0.6, shape)
         }
     }
