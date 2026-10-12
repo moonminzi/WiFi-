@@ -131,17 +131,153 @@ enum ClaudeClient {
     }
 }
 
-/// 페이지 하나: 그림 준비 → Claude(긴 그림은 조각마다) → 원문 지우기 → 한글 앉히기 → 저장
+/// Gemini·OpenAI 호환 전송(스트리밍 없이 한 번에 — 한 쪽 답은 길지 않다)
+enum AIClient {
+    static func send(_ req: URLRequest) async throws -> Data {
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await ClaudeClient.session.data(for: req)
+        } catch {
+            throw ClaudeClient.map(error)
+        }
+        guard let http = response as? HTTPURLResponse else { throw TranslateError.network("응답이 없어요") }
+        guard http.statusCode == 200 else {
+            throw TranslateError.from(status: http.statusCode, body: data,
+                                      retryAfter: http.value(forHTTPHeaderField: "retry-after"))
+        }
+        return data
+    }
+
+    static func post(_ url: URL, headers: [String: String], body: Data) async throws -> Data {
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.httpBody = body
+        req.timeoutInterval = 300
+        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        return try await send(req)
+    }
+
+    /// 페이지 하나(그림) — 상자는 0~1000
+    static func page(_ r: KeyedRoute, imageJPEG: Data, context: TranslationContext,
+                     mode: ClaudeAPI.Mode) async throws -> AIReply {
+        let route = r.route
+        switch route.provider {
+        case .gemini:
+            guard let url = GeminiAPI.url(base: route.baseURL, model: route.model) else {
+                throw TranslateError.invalidRequest("주소가 잘못됐어요")
+            }
+            let body = GeminiAPI.pageBody(imageJPEG: imageJPEG, context: context, mode: mode)
+            let data = try await post(url, headers: GeminiAPI.headers(apiKey: r.key), body: body)
+            return try GeminiAPI.parse(data, model: route.model, freeTier: route.freeTier)
+        case .openai:
+            guard let url = OpenAIAPI.url(base: route.baseURL) else { throw TranslateError.invalidRequest("주소가 잘못됐어요") }
+            let body = OpenAIAPI.pageBody(imageJPEG: imageJPEG, model: route.model, context: context,
+                                          baseURL: route.baseURL, mode: mode)
+            let data = try await post(url, headers: OpenAIAPI.headers(apiKey: r.key), body: body)
+            return try OpenAIAPI.parse(data, model: route.model, freeTier: route.freeTier)
+        case .claude:
+            throw TranslateError.invalidRequest("Claude는 스트리밍 전송으로")
+        }
+    }
+
+    /// 글만(다른 표현 받기)
+    static func text(_ r: KeyedRoute, prompt: String, schema: [String: Any], mode: ClaudeAPI.Mode) async throws -> AIReply {
+        let route = r.route
+        switch route.provider {
+        case .gemini:
+            guard let url = GeminiAPI.url(base: route.baseURL, model: route.model) else {
+                throw TranslateError.invalidRequest("주소가 잘못됐어요")
+            }
+            let data = try await post(url, headers: GeminiAPI.headers(apiKey: r.key),
+                                      body: GeminiAPI.textBody(prompt: prompt, schema: schema, mode: mode))
+            return try GeminiAPI.parse(data, model: route.model, freeTier: route.freeTier)
+        case .openai:
+            guard let url = OpenAIAPI.url(base: route.baseURL) else { throw TranslateError.invalidRequest("주소가 잘못됐어요") }
+            let body = OpenAIAPI.textBody(model: route.model, prompt: prompt, schema: schema, baseURL: route.baseURL, mode: mode)
+            let data = try await post(url, headers: OpenAIAPI.headers(apiKey: r.key), body: body)
+            return try OpenAIAPI.parse(data, model: route.model, freeTier: route.freeTier)
+        case .claude:
+            throw TranslateError.invalidRequest("Claude는 스트리밍 전송으로")
+        }
+    }
+
+    /// 말풍선 하나의 다른 표현들 — 기본 AI로(Claude면 Claude 전송)
+    static func alternatives(_ r: KeyedRoute, source: String, current: String, kind: BlockKind,
+                             context: TranslationContext, summary: String) async throws -> ([String], Usage) {
+        if r.route.provider == .claude {
+            return try await ClaudeClient.alternatives(source: source, current: current, kind: kind, context: context,
+                                                       summary: summary, apiKey: r.key)
+        }
+        struct Answer: Decodable { var alternatives: [String] }
+        let prompt = PageRequest.alternativesPrompt(source: source, current: current, kind: kind, context: context,
+                                                    pageSummary: summary)
+        var mode = ClaudeAPI.Mode.full
+        var used = Usage()
+        let answer: Answer = try await ClaudeClient.withRetries(3) { _ in
+            do {
+                let reply = try await text(r, prompt: prompt, schema: PageRequest.alternativesSchema, mode: mode)
+                used = used + reply.usage
+                return try PageRequest.decodeJSON(Answer.self, from: reply.text)
+            } catch let e as TranslateError {
+                if case .invalidRequest = e, mode == .full {
+                    mode = .basic
+                    throw TranslateError.server(400, "기본 요청으로 다시")
+                }
+                throw e
+            }
+        }
+        return (answer.alternatives, used)
+    }
+
+    /// 쓸 수 있는 모델 이름들(키 확인도 겸한다 — 돈이 들지 않는다)
+    static func models(_ p: Provider, key: String, baseURL: String) async throws -> [String] {
+        let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? p.defaultBaseURL : baseURL
+        let url: URL?
+        let headers: [String: String]
+        switch p {
+        case .claude: return [ClaudeAPI.Engine.standard.model, ClaudeAPI.Engine.premium.model]
+        case .gemini:
+            url = GeminiAPI.modelsURL(base: base)
+            headers = GeminiAPI.headers(apiKey: key)
+        case .openai:
+            url = OpenAIAPI.modelsURL(base: base)
+            headers = OpenAIAPI.headers(apiKey: key)
+        }
+        guard let url else { throw TranslateError.invalidRequest("주소가 잘못됐어요") }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 30
+        for (k, v) in headers where k != "content-type" { req.setValue(v, forHTTPHeaderField: k) }
+        let data = try await send(req)
+        return p == .gemini ? GeminiAPI.parseModels(data) : OpenAIAPI.parseModels(data)
+    }
+
+    /// 키 확인: 맞으면 nil, 아니면 이유
+    static func checkKey(_ p: Provider, key: String, baseURL: String) async -> String? {
+        if p == .claude { return await ClaudeClient.checkKey(key) }
+        do {
+            _ = try await models(p, key: key, baseURL: baseURL)
+            return nil
+        } catch {
+            return ClaudeClient.map(error).localizedDescription
+        }
+    }
+}
+
+/// 페이지 하나: 그림 준비 → 번역 AI(긴 그림은 조각마다) → 원문 지우기 → 한글 앉히기 → 저장
 enum Pipeline {
     struct Job: Sendable {
         let original: URL
         let output: URL
         let thumb: URL
         let context: TranslationContext
-        let apiKey: String
+        /// 쓸 AI 순서(기본 → 대체). 앞의 것이 실패·거절하면 다음 것으로
+        let routes: [KeyedRoute]
         let edits: [String: BlockEdit]
         /// 다시 번역할 때 전의 답(고친 번역을 같은 원문 말풍선으로 옮기려고)
         let previous: PageAnswer?
+        /// 기본/고급
         let engine: ClaudeAPI.Engine
     }
 
@@ -153,6 +289,8 @@ enum Pipeline {
         var hits: [[Int]]
         var edits: [String: BlockEdit]
         var engine: ClaudeAPI.Engine
+        /// 실제로 번역한 AI("Gemini · gemini-2.5-flash")
+        var servedBy: String
     }
 
     /// 말풍선 번호가 바뀌어도 사용자가 고친 것은 원문이 같은 말풍선을 따라간다
@@ -182,23 +320,25 @@ enum Pipeline {
         // 조각마다 Claude에게(긴 웹툰은 3개씩 같이)
         var answers = [PageAnswer?](repeating: nil, count: tiles.count)
         var usage = Usage()
-        try await withThrowingTaskGroup(of: (Int, PageAnswer, Usage).self) { group in
+        var servedBy: [String] = []
+        try await withThrowingTaskGroup(of: (Int, PageAnswer, Usage, String).self) { group in
             var next = 0
             func launch() {
                 let i = next
                 next += 1
                 let tile = tiles[i]
                 group.addTask {
-                    let (a, u) = try await Pipeline.ask(work.cg, tile: tile, index: i, count: tiles.count, job: job) { text in
+                    let (a, u, by) = try await Pipeline.ask(work.cg, tile: tile, index: i, count: tiles.count, job: job) { text in
                         status(tiles.count > 1 ? "\(i + 1)/\(tiles.count) \(text)" : text)
                     }
-                    return (i, a, u)
+                    return (i, a, u, by)
                 }
             }
             for _ in 0..<min(3, tiles.count) { launch() }
             while let r = try await group.next() {
                 answers[r.0] = r.1
                 usage = usage + r.2
+                if !servedBy.contains(r.3) { servedBy.append(r.3) }
                 if next < tiles.count { launch() }
             }
         }
@@ -215,12 +355,73 @@ enum Pipeline {
         status("그리는 중")
         let edits = remap(job.edits, from: job.previous, to: answer)
         let hits = try paint(work.bitmap, answer: answer, edits: edits, output: job.output, thumb: job.thumb)
-        return Result(answer: answer, width: w, height: h, usage: usage, hits: hits, edits: edits, engine: job.engine)
+        return Result(answer: answer, width: w, height: h, usage: usage, hits: hits, edits: edits, engine: job.engine,
+                      servedBy: servedBy.joined(separator: " + "))
     }
 
-    /// 조각 하나를 보내고 답의 상자를 작업 그림 좌표로 바꾼다
+    /// 조각 하나를 보내고 답의 상자를 작업 그림 좌표로 바꾼다. 기본 AI가 실패·거절하면 대체 AI로.
+    /// 돌려주는 것: 답, 쓴 토큰·비용, 답한 AI 이름
     static func ask(_ image: CGImage, tile: IRect, index: Int, count: Int, job: Job,
-                    status: @escaping @Sendable (String) -> Void) async throws -> (PageAnswer, Usage) {
+                    status: @escaping @Sendable (String) -> Void) async throws -> (PageAnswer, Usage, String) {
+        var failed: TranslateError?
+        for (k, r) in job.routes.enumerated() {
+            do {
+                if let f = failed { status("다른 AI로 다시 · \(r.route.provider.label) (\(f.localizedDescription.prefix(40)))") }
+                if r.route.provider == .claude {
+                    return try await askClaude(image, tile: tile, index: index, count: count, job: job, key: r.key,
+                                               status: status)
+                }
+                return try await askOther(image, tile: tile, index: index, count: count, job: job, route: r, status: status)
+            } catch {
+                // 거절·오류면 다음 AI로(취소는 그대로 멈춘다)
+                let e = ClaudeClient.map(error)
+                guard e != .cancelled, k + 1 < job.routes.count else { throw e }
+                failed = e
+            }
+        }
+        throw failed ?? TranslateError.badKey
+    }
+
+    /// Gemini·OpenAI 호환: 긴 변 2000px 안쪽으로 보내고 상자는 0~1000으로 받는다(서버가 그림을 더 줄여도 맞는다)
+    static func askOther(_ image: CGImage, tile: IRect, index: Int, count: Int, job: Job, route: KeyedRoute,
+                         status: @escaping @Sendable (String) -> Void) async throws -> (PageAnswer, Usage, String) {
+        guard let crop = image.cropping(to: CGRect(x: tile.x, y: tile.y, width: tile.w, height: tile.h)) else {
+            throw TranslateError.badResponse("그림 자르기 실패")
+        }
+        let scale = min(1, 2000 / Double(max(tile.w, tile.h)))
+        let w = max(1, Int(Double(tile.w) * scale)), h = max(1, Int(Double(tile.h) * scale))
+        guard let sized = Pixels.resized(crop, width: w, height: h), let jpeg = Pixels.jpeg(sized, quality: 0.88) else {
+            throw TranslateError.badResponse("그림 변환 실패")
+        }
+        var ctx = job.context
+        if count > 1 { ctx.segment = (index, count) }
+        var used = Usage()
+        var mode = ClaudeAPI.Mode.full
+        let name = route.route.provider.label
+        let reply: AIReply = try await ClaudeClient.withRetries(4) { _ in
+            status("\(name)에 보내는 중")
+            do {
+                let r = try await AIClient.page(route, imageJPEG: jpeg, context: ctx, mode: mode)
+                used = used + r.usage
+                _ = try PageRequest.decodeJSON(PageAnswer.self, from: r.text)
+                return r
+            } catch let e as TranslateError {
+                // 구조화 출력 같은 기능을 못 쓰는 모델·서버면 JSON만 쓰라고 지시해서 한 번 더
+                if case .invalidRequest = e, mode == .full {
+                    mode = .basic
+                    throw TranslateError.server(400, "기본 요청으로 다시")
+                }
+                throw e
+            }
+        }
+        let answer = try PageRequest.decodeJSON(PageAnswer.self, from: reply.text)
+        let served = AIRoute(provider: route.route.provider, model: reply.model).label
+        return (place(answer, tile: tile, sentWidth: 1000, sentHeight: 1000), used, served)
+    }
+
+    /// Claude: 서버가 줄이는 규칙대로 크기를 맞춰 보내 상자를 그림 픽셀로 받는다(스트리밍)
+    static func askClaude(_ image: CGImage, tile: IRect, index: Int, count: Int, job: Job, key: String,
+                          status: @escaping @Sendable (String) -> Void) async throws -> (PageAnswer, Usage, String) {
         guard let crop = image.cropping(to: CGRect(x: tile.x, y: tile.y, width: tile.w, height: tile.h)) else {
             throw TranslateError.badResponse("그림 자르기 실패")
         }
@@ -239,7 +440,7 @@ enum Pipeline {
                                         maxTokens: attempt == 0 ? 32000 : 64000, mode: mode, engine: job.engine)
             status("보내는 중")
             do {
-                let acc = try await ClaudeClient.stream(body, apiKey: job.apiKey, mode: mode, engine: job.engine) { acc in
+                let acc = try await ClaudeClient.stream(body, apiKey: key, mode: mode, engine: job.engine) { acc in
                     let n = acc.text.count
                     status(n > 0 ? "번역 쓰는 중 \(n)자" : (acc.thinking ? "읽고 생각하는 중" : "기다리는 중"))
                 }
@@ -261,8 +462,15 @@ enum Pipeline {
                 throw e
             }
         }
-        var answer = try acc.decode(PageAnswer.self)
-        let sx = Double(tile.w) / Double(sw), sy = Double(tile.h) / Double(sh)
+        let answer = try acc.decode(PageAnswer.self)
+        let served = AIRoute(provider: .claude, model: acc.model ?? job.engine.model).label
+        return (place(answer, tile: tile, sentWidth: sw, sentHeight: sh), used, served)
+    }
+
+    /// 보낸 그림 좌표의 상자를 작업 그림 좌표로(빈 번역·아주 작은 상자는 뺀다)
+    static func place(_ answer: PageAnswer, tile: IRect, sentWidth sw: Int, sentHeight sh: Int) -> PageAnswer {
+        var answer = answer
+        let sx = Double(tile.w) / Double(max(1, sw)), sy = Double(tile.h) / Double(max(1, sh))
         answer.blocks = answer.blocks.compactMap { b in
             var b = b
             let r = b.box.rect
@@ -275,7 +483,7 @@ enum Pipeline {
             b.box = .init(x0: x0, y0: y0, x1: x1, y1: y1)
             return b
         }
-        return (answer, used)
+        return answer
     }
 
     /// 설정: 효과음·추임새도 번역해 그릴지(UserDefaults, 기본 켬)
@@ -297,7 +505,8 @@ enum Pipeline {
         var out = bitmap
         Refiner.erase(&out, refined)
         let placed = zip(active, refined).map { a, r in
-            Typesetter.place(a.2, for: r, kind: a.1.blockKind, metrics: FontBook.metrics)
+            Typesetter.place(a.2, for: r, kind: a.1.blockKind,
+                             metrics: FontBook.metrics(for: Typesetter.face(for: r, kind: a.1.blockKind)))
         }
         guard let base = Pixels.cgImage(out), let img = Painter.draw(base: base, texts: placed),
               let data = Pixels.jpeg(img, quality: 0.92) else { throw TranslateError.badResponse("그리기 실패") }
@@ -408,15 +617,16 @@ final class Translator: ObservableObject {
 
     private func run(book: String, page: String, engine: ClaudeAPI.Engine) async {
         let lib = Library.shared
-        guard let key = Keychain.apiKey, !key.isEmpty else {
+        let routes = AISettings.routes(tier: engine)
+        guard let first = routes.first else {
             lib.update(book: book, page: page) { rec in
                 rec.status = .failed
-                rec.error = "설정에서 Claude API 키를 넣어 주세요."
+                rec.error = "설정에서 번역 AI(\(AISettings.primary.label)) API 키를 넣어 주세요."
             }
             return
         }
         // 정해 둔 예산을 넘지 않게
-        if let stop = Budget.block(for: engine) {
+        if let stop = Budget.block(estimate: first.route.estimatedPageCost) {
             lib.update(book: book, page: page) { rec in
                 rec.status = rec.answer == nil ? .failed : .done
                 rec.error = stop
@@ -428,7 +638,7 @@ final class Translator: ObservableObject {
         lib.update(book: book, page: page) { $0.status = .working }
         let job = Pipeline.Job(original: Paths.original(book, rec.file), output: Paths.output(book, page),
                                thumb: Paths.thumb(book, page), context: lib.context(book: book, page: page),
-                               apiKey: key, edits: rec.edits, previous: rec.answer, engine: engine)
+                               routes: routes, edits: rec.edits, previous: rec.answer, engine: engine)
         do {
             let result = try await Pipeline.translate(job) { text in
                 Task { @MainActor in

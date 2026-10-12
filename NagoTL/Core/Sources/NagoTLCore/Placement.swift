@@ -1,11 +1,23 @@
 import Foundation
 
+/// 글자의 쓰임 — 앱이 쓰임마다 사용자가 고른 글꼴로 그린다
+public enum TextFace: String, Codable, Sendable, CaseIterable {
+    /// 대사·생각·나레이션(만화 글꼴)
+    case dialogue
+    /// 효과음·추임새(굵은 글꼴)
+    case sfx
+    /// 간판·사진 속 글자(반듯한 고딕)
+    case plain
+}
+
 /// 그릴 글자 한 덩어리 — 앱은 이걸 CoreText로 그대로 그린다
 public struct PlacedText: Sendable, Codable, Equatable {
     public var layout: TextLayout
     public var color: RGBA
-    /// 글씨 굵기(400 보통, 600 중간, 700 굵게, 800 아주 굵게)
+    /// 글씨 굵기(400 보통, 600 중간, 700 굵게, 800 아주 굵게) — 굵기가 하나뿐인 글꼴은 무시
     public var weight: Int
+    /// 어떤 글꼴로 그릴지
+    public var face: TextFace = .dialogue
     /// 글자 테두리 색과 두께(글자 크기 배수). 말풍선 밖으로 넘칠 때·효과음에 쓴다
     public var outline: RGBA?
     public var outlineWidth: Double
@@ -14,10 +26,11 @@ public struct PlacedText: Sendable, Codable, Equatable {
     public var plateAlpha: Double
 
     public init(layout: TextLayout, color: RGBA, weight: Int, outline: RGBA? = nil, outlineWidth: Double = 0,
-                plate: RGBA? = nil, plateAlpha: Double = 0) {
+                plate: RGBA? = nil, plateAlpha: Double = 0, face: TextFace = .dialogue) {
         self.layout = layout
         self.color = color
         self.weight = weight
+        self.face = face
         self.outline = outline
         self.outlineWidth = outlineWidth
         self.plate = plate
@@ -26,8 +39,24 @@ public struct PlacedText: Sendable, Codable, Equatable {
 }
 
 extension Typesetter {
+    /// 이 덩어리를 어떤 글꼴(쓰임)로 쓸지. 앱은 이 쓰임의 글꼴 폭(metrics)으로 place를 부른다
+    public static func face(for r: Refined, kind: BlockKind) -> TextFace {
+        switch kind {
+        case .sfx: return .sfx
+        case .sign: return .plain
+        case .other: return r.mode == .label ? .plain : .dialogue
+        default: return .dialogue
+        }
+    }
+
     /// 덩어리 하나의 번역을 어떤 크기·색·굵기로 어디에 쓸지 정한다
     public static func place(_ text: String, for r: Refined, kind: BlockKind, metrics: GlyphMetrics) -> PlacedText {
+        var p = placed(text, for: r, kind: kind, metrics: metrics)
+        p.face = face(for: r, kind: kind)
+        return p
+    }
+
+    static func placed(_ text: String, for r: Refined, kind: BlockKind, metrics: GlyphMetrics) -> PlacedText {
         // 원문 그대로 두는 덩어리는 아무것도 그리지 않는다
         if r.mode == .keep {
             return PlacedText(layout: TextLayout(fontSize: 0, lineHeight: 0, lines: [], overflow: false), color: r.ink, weight: 400)

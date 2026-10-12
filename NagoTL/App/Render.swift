@@ -124,9 +124,53 @@ enum Pixels {
     }
 }
 
-/// 한글 글꼴(시스템 Apple SD 산돌고딕 Neo — 모든 한글 글자가 있고 굵기가 여럿)
+/// 한글 글꼴: 만화용 글꼴(SIL OFL, 앱에 넣음)을 쓰임(대사·효과음)마다 사용자가 고르고,
+/// 간판·사진 속 글자는 시스템 Apple SD 산돌고딕 Neo(굵기가 여럿)
 enum FontBook {
-    static func name(_ weight: Int) -> String {
+    enum Choice: String, CaseIterable, Identifiable {
+        case jua, blackHanSans, doHyeon, nanumGothic, nanumPen, system
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .jua: "주아"
+            case .blackHanSans: "검은고딕"
+            case .doHyeon: "도현"
+            case .nanumGothic: "나눔고딕 ExtraBold"
+            case .nanumPen: "나눔손글씨 펜"
+            case .system: "시스템 고딕(산돌고딕 Neo)"
+            }
+        }
+
+        /// 앱에 넣은 글꼴의 PostScript 이름(시스템 글꼴은 굵기마다 따로라 nil)
+        var postScript: String? {
+            switch self {
+            case .jua: "Jua-Regular"
+            case .blackHanSans: "BlackHanSans-Regular"
+            case .doHyeon: "DoHyeon-Regular"
+            case .nanumGothic: "NanumGothicExtraBold"
+            case .nanumPen: "NanumPen-Regular"
+            case .system: nil
+            }
+        }
+    }
+
+    static let dialogueKey = "tl.font.dialogue"
+    static let sfxKey = "tl.font.sfx"
+    static let dialogueOptions: [Choice] = [.jua, .nanumGothic, .doHyeon, .nanumPen, .system]
+    static let sfxOptions: [Choice] = [.blackHanSans, .jua, .doHyeon, .nanumGothic, .system]
+
+    /// 쓰임마다 고른 글꼴(기본: 대사 주아, 효과음 검은고딕)
+    static func choice(for face: TextFace) -> Choice {
+        switch face {
+        case .dialogue: Choice(rawValue: UserDefaults.standard.string(forKey: dialogueKey) ?? "") ?? .jua
+        case .sfx: Choice(rawValue: UserDefaults.standard.string(forKey: sfxKey) ?? "") ?? .blackHanSans
+        case .plain: .system
+        }
+    }
+
+    static func systemName(_ weight: Int) -> String {
         switch weight {
         case ..<500: "AppleSDGothicNeo-Medium"
         case ..<650: "AppleSDGothicNeo-SemiBold"
@@ -135,11 +179,25 @@ enum FontBook {
         }
     }
 
-    static func font(weight: Int, size: CGFloat) -> CTFont {
-        CTFontCreateWithName(name(weight) as CFString, size, nil)
+    static func fontName(_ choice: Choice, weight: Int) -> String { choice.postScript ?? systemName(weight) }
+
+    static func font(face: TextFace, weight: Int, size: CGFloat) -> CTFont {
+        CTFontCreateWithName(fontName(choice(for: face), weight: weight) as CFString, size, nil)
     }
 
-    static let metrics = CTMetrics(fontName: name(700))
+    private static var metricsCache: [String: CTMetrics] = [:]
+    private static let lock = NSLock()
+
+    /// 그 쓰임의 글꼴로 잰 글자 폭(줄 나누기·크기 찾기에 쓴다)
+    static func metrics(for face: TextFace) -> CTMetrics {
+        let name = fontName(choice(for: face), weight: 700)
+        lock.lock()
+        defer { lock.unlock() }
+        if let m = metricsCache[name] { return m }
+        let m = CTMetrics(fontName: name)
+        metricsCache[name] = m
+        return m
+    }
 }
 
 /// CoreText 글꼴의 실제 글자 폭(글자 크기 1 기준)
@@ -196,7 +254,7 @@ enum Painter {
     static func draw(_ t: PlacedText, in ctx: CGContext) {
         guard !t.layout.lines.isEmpty else { return }
         let size = CGFloat(t.layout.fontSize)
-        let font = FontBook.font(weight: t.weight, size: size)
+        let font = FontBook.font(face: t.face, weight: t.weight, size: size)
         if t.layout.vertical {
             drawVertical(t, font: font, in: ctx)
             return

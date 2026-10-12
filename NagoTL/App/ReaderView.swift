@@ -108,8 +108,7 @@ struct ReaderView: View {
                         Label(page.answer == nil ? "이 쪽 번역" : "이 쪽 다시 번역", systemImage: "arrow.clockwise")
                     }
                     Button { translator.enqueue(book: bookID, pages: [page.id], front: true, engine: .premium) } label: {
-                        Label("고급 번역 · Opus 5.5 (약 " + Usage.money(ClaudeAPI.Engine.premium.estimatedPageCost) + ")",
-                              systemImage: "sparkles")
+                        Label(premiumTitle, systemImage: "sparkles")
                     }
                     if page.answer != nil {
                         Button { Task { await translator.repaint(book: bookID, page: page.id) } } label: {
@@ -138,6 +137,13 @@ struct ReaderView: View {
         }
     }
 
+    /// "고급 번역 · Opus 5.5 (약 $0.12)"
+    private var premiumTitle: String {
+        let name = AISettings.displayName(AISettings.primary, tier: .premium)
+        let cost = Usage.money(AISettings.estimatedPageCost(tier: .premium))
+        return "고급 번역 · \(name) (약 \(cost))"
+    }
+
     @ViewBuilder private func status(_ page: PageRecord) -> some View {
         if let live = translator.live[page.id] {
             StatusLine(kind: .running, text: live)
@@ -145,7 +151,7 @@ struct ReaderView: View {
             switch page.status {
             case .pending:
                 HStack {
-                    StatusLine(kind: .warn, text: Keychain.apiKey == nil ? "설정에서 API 키를 넣어 주세요" : "아직 번역 안 됨")
+                    StatusLine(kind: .warn, text: AISettings.ready ? "아직 번역 안 됨" : "설정에서 번역 AI 키를 넣어 주세요")
                     Button("번역") { translator.enqueue(book: bookID, pages: [page.id], front: true) }
                         .buttonStyle(.term)
                 }
@@ -160,7 +166,7 @@ struct ReaderView: View {
                         Button("다시 시도") { translator.enqueue(book: bookID, pages: [page.id], front: true) }
                             .buttonStyle(.term)
                         // 기본 엔진이 거절하거나 잘 못 읽은 쪽은 고급 엔진으로
-                        Button("고급 번역 (약 " + Usage.money(ClaudeAPI.Engine.premium.estimatedPageCost) + ")") {
+                        Button(premiumTitle) {
                             translator.enqueue(book: bookID, pages: [page.id], front: true, engine: .premium)
                         }
                         .buttonStyle(.term)
@@ -171,7 +177,7 @@ struct ReaderView: View {
                     StatusLine(kind: .warn, text: note)
                 } else {
                     Text(showOriginal ? "원문 보는 중 — 번역 단추로 돌아가요"
-                        : "말풍선을 누르면 원문·고치기 · \((page.engine ?? .standard).label) · 이 쪽 \(page.usage.costText)")
+                        : "말풍선을 누르면 원문·고치기 · \(page.servedBy ?? (page.engine ?? .standard).label) · 이 쪽 \(page.usage.costText)")
                         .font(Term.mono(11.5))
                         .foregroundStyle(Term.muted)
                 }
@@ -183,7 +189,7 @@ struct ReaderView: View {
 
     /// 보고 있는 쪽과 다음 두 쪽은 미리 번역해 둔다
     private func readAhead(_ pages: [PageRecord]) {
-        guard !pages.isEmpty, Keychain.apiKey != nil else { return }
+        guard !pages.isEmpty, AISettings.ready else { return }
         let ahead = Array(pages[index..<min(pages.count, index + 3)])
         let need = ahead.filter { $0.status == .pending }.map(\.id)
         if !need.isEmpty { translator.enqueue(book: bookID, pages: need, front: true) }
@@ -478,8 +484,8 @@ struct BlockSheet: View {
     }
 
     private func loadAlternatives(_ block: PageAnswer.Block) async {
-        guard let key = Keychain.apiKey else {
-            altError = "설정에서 API 키를 넣어 주세요"
+        guard let route = AISettings.routes(tier: .standard).first else {
+            altError = "설정에서 번역 AI 키를 넣어 주세요"
             return
         }
         loading = true
@@ -487,9 +493,9 @@ struct BlockSheet: View {
         defer { loading = false }
         do {
             let ctx = library.context(book: bookID, page: target.page)
-            let (alts, usage) = try await ClaudeClient.alternatives(
-                source: block.source, current: text, kind: block.blockKind, context: ctx,
-                summary: page?.answer?.page_summary ?? "", apiKey: key)
+            let (alts, usage) = try await AIClient.alternatives(
+                route, source: block.source, current: text, kind: block.blockKind, context: ctx,
+                summary: page?.answer?.page_summary ?? "")
             alternatives = alts.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
             library.update(book: bookID, page: target.page) { $0.usage = $0.usage + usage }
             library.updateBook(bookID) { $0.usage = $0.usage + usage }

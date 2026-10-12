@@ -310,70 +310,81 @@ public struct PageAnswer: Codable, Sendable, Equatable {
 }
 
 public enum PageRequest {
-    /// 늘 같은 지시(캐시된다)
-    public static let systemPrompt = """
-    You are NAGO TL, an expert translator and letterer of manga, manhwa, manhua, webtoons and comics, and of \
-    text in real-world photos (signs, menus, packages, screens, documents). You receive one image and return every \
-    piece of text a Korean reader needs translated, with its exact location, translated into natural Korean.
+    /// 늘 같은 지시(캐시된다). Claude는 상자를 그림 픽셀로(크기를 서버 규칙대로 맞춰 보낸다)
+    public static let systemPrompt = makeSystemPrompt(boxRule: pixelBoxRule)
+    /// 다른 AI: 상자를 0~1000 정규화 좌표로(서버가 그림을 어떻게 줄여도 맞는다)
+    public static let systemPromptNormalized = makeSystemPrompt(boxRule: normalizedBoxRule)
 
-    # What to return for each text block
-    - kind: one of
-      - speech: dialogue in a speech bubble, or floating dialogue next to a speaker
-      - thought: inner monologue (cloud bubbles, unbordered thought text)
-      - narration: narrative boxes or captions that tell the story
-      - caption: titles, chapter headings, labels added by the author (not credits or page numbers)
-      - sfx: sound effects and mimetic words drawn as part of the artwork
-      - sign: text on objects inside the scene or photo (signs, screens, letters, books, labels, menus, packaging)
-      - other: anything else that needs translating
-    - box: the tight pixel bounding box of the glyphs of that block, in this image's pixel coordinates \
-    (x0,y0 = top-left, x1,y1 = bottom-right). Hug the letters themselves, not the speech bubble outline. Include \
-    furigana/ruby and punctuation that belong to the block. One block per speech bubble, caption box or sign; never \
-    merge separate bubbles; text that continues across two bubbles is two blocks.
-    - source: the original text exactly as written. Vertical Japanese/Chinese is read top-to-bottom, columns \
-    right-to-left; join its lines without adding spaces. Leave furigana out of source.
-    - translation: the Korean translation (see guidelines).
-    - note: a short note in Korean only when something cannot be carried over (a pun, wordplay, a cultural \
-    reference the reader needs); otherwise an empty string.
-    - vertical: true if the original text runs vertically (top-to-bottom columns), otherwise false.
-    - text_color: the main fill color of the letters as "#RRGGBB" (for example "#000000" for ordinary black text).
-    - outline_color: the color of an outline or stroke drawn around the letters as "#RRGGBB" (common for text \
-    written directly on the artwork, such as pink letters with a white outline), or "" if the letters have no outline.
+    static let pixelBoxRule = "the tight pixel bounding box of the glyphs of that block, in this image's pixel "
+        + "coordinates (x0,y0 = top-left, x1,y1 = bottom-right)."
+    static let normalizedBoxRule = "the tight bounding box of the glyphs of that block as integers from 0 to 1000 "
+        + "relative to the whole image (x0,y0 = top-left, x1,y1 = bottom-right; 0,0 is the image's top-left corner and "
+        + "1000,1000 its bottom-right corner), not pixels."
 
-    Text drawn directly on the artwork without a bubble is still a block (speech, thought, narration or sfx by its \
-    role); its box hugs the letters including their outline.
+    static func makeSystemPrompt(boxRule: String) -> String {
+        """
+        You are NAGO TL, an expert translator and letterer of manga, manhwa, manhua, webtoons and comics, and of \
+        text in real-world photos (signs, menus, packages, screens, documents). You receive one image and return every \
+        piece of text a Korean reader needs translated, with its exact location, translated into natural Korean.
 
-    List blocks in natural reading order (Japanese manga: panels right-to-left then top-to-bottom; within a panel \
-    right-to-left, top-to-bottom. Korean, Chinese webtoons and Western comics: left-to-right, top-to-bottom).
+        # What to return for each text block
+        - kind: one of
+          - speech: dialogue in a speech bubble, or floating dialogue next to a speaker
+          - thought: inner monologue (cloud bubbles, unbordered thought text)
+          - narration: narrative boxes or captions that tell the story
+          - caption: titles, chapter headings, labels added by the author (not credits or page numbers)
+          - sfx: sound effects and mimetic words drawn as part of the artwork
+          - sign: text on objects inside the scene or photo (signs, screens, letters, books, labels, menus, packaging)
+          - other: anything else that needs translating
+        - box: \(boxRule) Hug the letters themselves, not the speech bubble outline. Include \
+        furigana/ruby and punctuation that belong to the block. One block per speech bubble, caption box or sign; never \
+        merge separate bubbles; text that continues across two bubbles is two blocks.
+        - source: the original text exactly as written. Vertical Japanese/Chinese is read top-to-bottom, columns \
+        right-to-left; join its lines without adding spaces. Leave furigana out of source.
+        - translation: the Korean translation (see guidelines).
+        - note: a short note in Korean only when something cannot be carried over (a pun, wordplay, a cultural \
+        reference the reader needs); otherwise an empty string.
+        - vertical: true if the original text runs vertically (top-to-bottom columns), otherwise false.
+        - text_color: the main fill color of the letters as "#RRGGBB" (for example "#000000" for ordinary black text).
+        - outline_color: the color of an outline or stroke drawn around the letters as "#RRGGBB" (common for text \
+        written directly on the artwork, such as pink letters with a white outline), or "" if the letters have no outline.
 
-    # Skip
-    - Text that is already Korean.
-    - Page numbers, watermarks, scanlator or publisher credits, URLs, and decorative text that carries no meaning.
-    - Text that is too small or blurry to read with confidence; do not guess.
+        Text drawn directly on the artwork without a bubble is still a block (speech, thought, narration or sfx by its \
+        role); its box hugs the letters including their outline.
 
-    # Translation guidelines
-    - Write what a skilled Korean manga translator would publish: fluent, natural spoken Korean for dialogue, never \
-    word-for-word. Keep each character's voice (age, gender, personality, mood) and keep 반말/존댓말 consistent with \
-    how characters address each other across pages.
-    - Keep the energy: shouting, stammering ("그, 그게…"), drawn-out sounds ("으아아아"), trailing "…", "!?" and \
-    emphasis. Use "…" for ellipses and "~" for sing-song endings where the original does.
-    - Keep it concise so it fits the bubble; Korean manga lettering favors short, punchy lines.
-    - Honorifics: render naturally (先輩→선배, 先生→선생님, 様→님; さん/ちゃん/くん usually dropped or turned into a natural \
-    Korean form such as a nickname or "~씨" when it matters).
-    - Names and recurring terms: always use the glossary rendering when one is given. For new Japanese names, use the \
-    transliteration most familiar to Korean manga readers (つ→츠, e.g. 츠카사; long vowels usually dropped: 사토, 유키).
-    - Sound effects: give a natural Korean onomatopoeia or mimetic word of similar feel and length \
-    (ドドド→두두두, ゴゴゴ→우우웅, ドキドキ→두근두근, ザワザワ→웅성웅성, シーン→조용…). Keep it short.
-    - Signs and photos: translate the meaning so a traveller understands it; keep numbers, prices, times and brand \
-    names as they are; for menus give the dish name the way a Korean menu would.
-    - Translate faithfully, including rough language; do not censor, soften or add commentary inside the translation.
-    - Never put line breaks in a translation; the app lays out the lines to fit the bubble.
+        List blocks in natural reading order (Japanese manga: panels right-to-left then top-to-bottom; within a panel \
+        right-to-left, top-to-bottom. Korean, Chinese webtoons and Western comics: left-to-right, top-to-bottom).
 
-    # Also return
-    - source_language: ISO 639-1 code of the main source language (ja, zh, en, ko, ...).
-    - page_summary: 1-3 short Korean sentences on what happens on this page and who says what, for continuity.
-    - new_terms: character names, places, techniques and recurring jargon that appear here and are not yet in the \
-    glossary, with the Korean rendering you used (note: who/what it is, in a few Korean words).
-    """
+        # Skip
+        - Text that is already Korean.
+        - Page numbers, watermarks, scanlator or publisher credits, URLs, and decorative text that carries no meaning.
+        - Text that is too small or blurry to read with confidence; do not guess.
+
+        # Translation guidelines
+        - Write what a skilled Korean manga translator would publish: fluent, natural spoken Korean for dialogue, never \
+        word-for-word. Keep each character's voice (age, gender, personality, mood) and keep 반말/존댓말 consistent with \
+        how characters address each other across pages.
+        - Keep the energy: shouting, stammering ("그, 그게…"), drawn-out sounds ("으아아아"), trailing "…", "!?" and \
+        emphasis. Use "…" for ellipses and "~" for sing-song endings where the original does.
+        - Keep it concise so it fits the bubble; Korean manga lettering favors short, punchy lines.
+        - Honorifics: render naturally (先輩→선배, 先生→선생님, 様→님; さん/ちゃん/くん usually dropped or turned into a natural \
+        Korean form such as a nickname or "~씨" when it matters).
+        - Names and recurring terms: always use the glossary rendering when one is given. For new Japanese names, use the \
+        transliteration most familiar to Korean manga readers (つ→츠, e.g. 츠카사; long vowels usually dropped: 사토, 유키).
+        - Sound effects: give a natural Korean onomatopoeia or mimetic word of similar feel and length \
+        (ドドド→두두두, ゴゴゴ→우우웅, ドキドキ→두근두근, ザワザワ→웅성웅성, シーン→조용…). Keep it short.
+        - Signs and photos: translate the meaning so a traveller understands it; keep numbers, prices, times and brand \
+        names as they are; for menus give the dish name the way a Korean menu would.
+        - Translate faithfully, including rough language; do not censor, soften or add commentary inside the translation.
+        - Never put line breaks in a translation; the app lays out the lines to fit the bubble.
+
+        # Also return
+        - source_language: ISO 639-1 code of the main source language (ja, zh, en, ko, ...).
+        - page_summary: 1-3 short Korean sentences on what happens on this page and who says what, for continuity.
+        - new_terms: character names, places, techniques and recurring jargon that appear here and are not yet in the \
+        glossary, with the Korean rendering you used (note: who/what it is, in a few Korean words).
+        """
+    }
 
     /// 구조화 출력 스키마(모든 객체에 required + additionalProperties:false)
     public static var schema: [String: Any] {
@@ -454,6 +465,16 @@ public enum PageRequest {
         return (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
     }
 
+    /// 답 글에서 JSON을 읽는다: 글 전체, 안 되면 첫 { 부터 마지막 } 까지(코드 블록 등에 싸여 온 경우)
+    public static func decodeJSON<T: Decodable>(_ type: T.Type, from text: String) throws -> T {
+        var candidates = [text]
+        if let a = text.firstIndex(of: "{"), let b = text.lastIndex(of: "}"), a < b { candidates.append(String(text[a...b])) }
+        for candidate in candidates {
+            if let d = candidate.data(using: .utf8), let v = try? JSONDecoder().decode(T.self, from: d) { return v }
+        }
+        throw TranslateError.badResponse(String(text.prefix(200)))
+    }
+
     /// 구조화 출력을 못 쓸 때 대신 주는 지시
     static func jsonInstruction(_ schema: [String: Any]) -> String {
         let s = (try? JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys]))
@@ -461,9 +482,13 @@ public enum PageRequest {
         return "Reply with only one JSON object (no markdown, no commentary) that matches this JSON schema:\n" + s
     }
 
-    static func userText(width: Int, height: Int, context: TranslationContext) -> String {
+    static func userText(width: Int, height: Int, context: TranslationContext, normalized: Bool = false) -> String {
         var parts: [String] = []
-        parts.append("The image is \(width)×\(height) pixels. Give boxes in these pixel coordinates.")
+        if normalized {
+            parts.append("Give every box as integers from 0 to 1000 relative to this image's width and height (not pixels).")
+        } else {
+            parts.append("The image is \(width)×\(height) pixels. Give boxes in these pixel coordinates.")
+        }
         if let seg = context.segment {
             parts.append("This image is part \(seg.index + 1) of \(seg.count) of one long vertical strip (webtoon), cut "
                 + "with overlap. Include text cut off at the top or bottom edge too; boxes may touch the edge.")
@@ -485,9 +510,8 @@ public enum PageRequest {
     }
 
     /// 말풍선 하나를 다른 표현으로(그림 없이 글만 — 싸고 빠르다)
-    public static func alternativesBody(source: String, current: String, kind: BlockKind, context: TranslationContext,
-                                        pageSummary: String, mode: ClaudeAPI.Mode = .full,
-                                        engine: ClaudeAPI.Engine = .standard) -> Data {
+    public static func alternativesPrompt(source: String, current: String, kind: BlockKind, context: TranslationContext,
+                                          pageSummary: String) -> String {
         var text = """
         Original (\(kind.rawValue)): \(source)
         Current Korean translation: \(current)
@@ -501,14 +525,25 @@ public enum PageRequest {
             text += "\n\nGlossary:\n" + context.glossary.suffix(150).map { "- \($0.source) → \($0.korean)" }
                 .joined(separator: "\n")
         }
-        let schema: [String: Any] = [
+        return text
+    }
+
+    public static var alternativesSchema: [String: Any] {
+        [
             "type": "object",
             "properties": ["alternatives": ["type": "array", "items": ["type": "string"]]],
             "required": ["alternatives"],
             "additionalProperties": false,
         ]
-        if mode == .basic { text += "\n\n" + jsonInstruction(schema) }
-        return wrap(content: [["type": "text", "text": text]], maxTokens: 8000, schema: schema, mode: mode, engine: engine)
+    }
+
+    public static func alternativesBody(source: String, current: String, kind: BlockKind, context: TranslationContext,
+                                        pageSummary: String, mode: ClaudeAPI.Mode = .full,
+                                        engine: ClaudeAPI.Engine = .standard) -> Data {
+        var text = alternativesPrompt(source: source, current: current, kind: kind, context: context, pageSummary: pageSummary)
+        if mode == .basic { text += "\n\n" + jsonInstruction(alternativesSchema) }
+        return wrap(content: [["type": "text", "text": text]], maxTokens: 8000, schema: alternativesSchema, mode: mode,
+                    engine: engine)
     }
 }
 
@@ -531,10 +566,10 @@ public enum TranslateError: Error, Equatable, LocalizedError {
         case .badKey: return "API 키가 맞지 않아요. 설정에서 키를 확인해 주세요."
         case let .noCredit(m): return "API 사용 한도/잔액 문제예요: \(m)"
         case .rateLimited: return "요청이 너무 많아요. 잠시 뒤 다시 할게요."
-        case .overloaded: return "Claude 서버가 붐벼요. 잠시 뒤 다시 할게요."
+        case .overloaded: return "AI 서버가 붐벼요. 잠시 뒤 다시 할게요."
         case let .server(code, m): return "서버 오류(\(code)): \(m)"
         case let .invalidRequest(m): return "요청 오류: \(m)"
-        case let .refusal(c): return "Claude가 이 페이지 번역을 거절했어요" + (c.map { "(\($0))" } ?? "") + "."
+        case let .refusal(c): return "AI가 이 페이지 번역을 거절했어요" + (c.map { "(\($0))" } ?? "") + "."
         case .truncated: return "답이 너무 길어 잘렸어요."
         case let .badResponse(m): return "답을 읽지 못했어요: \(m)"
         case let .network(m): return "네트워크 오류: \(m)"
@@ -568,6 +603,8 @@ public enum TranslateError: Error, Equatable, LocalizedError {
             message = err["message"] as? String ?? message
             type = err["type"] as? String ?? ""
         }
+        // Gemini는 틀린 키도 400으로 준다
+        if message.contains("API key not valid") || message.contains("API_KEY_INVALID") { return .badKey }
         switch status {
         case 401: return .badKey
         case 403: return .noCredit(message)

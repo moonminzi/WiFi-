@@ -34,8 +34,10 @@ struct PageRecord: Codable, Identifiable, Equatable {
     var translatedAt: Date?
     /// 그림을 다시 그릴 때마다 올린다(화면 새로고침용)
     var version = 0
-    /// 지금 번역을 만든 엔진(기본 Haiku / 고급 Opus)
+    /// 지금 번역을 만든 등급(기본 / 고급)
     var engine: ClaudeAPI.Engine?
+    /// 실제로 번역한 AI("Gemini · gemini-2.5-flash")
+    var servedBy: String?
 }
 
 /// 책(또는 사진 모음)
@@ -270,6 +272,7 @@ final class Library: ObservableObject {
             rec.translatedAt = Date()
             rec.version += 1
             rec.engine = result.engine
+            rec.servedBy = result.servedBy.isEmpty ? nil : result.servedBy
         }
         Budget.add(result.usage.dollars)
         updateBook(bookID) { b in
@@ -328,8 +331,8 @@ enum Budget {
     }
 
     /// 이 엔진으로 한 쪽을 더 하면 한도를 넘는가 — 넘으면 안내 문구
-    static func block(for engine: ClaudeAPI.Engine) -> String? {
-        guard spent + engine.estimatedPageCost > limit else { return nil }
+    static func block(estimate: Double) -> String? {
+        guard spent + estimate > limit else { return nil }
         return String(format: "예산 $%.2f 중 $%.2f를 썼어요. 설정에서 예산을 늘리면 이어서 번역해요.", limit, spent)
     }
 }

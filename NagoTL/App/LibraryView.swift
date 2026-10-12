@@ -15,7 +15,7 @@ struct LibraryView: View {
 
     var body: some View {
         TermPage(path: "library") {
-            if Keychain.apiKey == nil { keyBanner }
+            if !AISettings.ready { keyBanner }
             addBlock
             let books = library.books.filter { $0.kind == .book }
             if books.isEmpty {
@@ -67,8 +67,8 @@ struct LibraryView: View {
 
     private var keyBanner: some View {
         TermBlock(label: "setup") {
-            StatusLine(kind: .warn, text: "Claude API 키가 없어요")
-            Text("번역은 Claude(Anthropic)가 해요. 설정 탭에서 API 키를 한 번만 넣으면 돼요.")
+            StatusLine(kind: .warn, text: "번역 AI 키가 없어요")
+            Text("번역은 Claude·Gemini·OpenAI 호환 AI 중 고른 것이 해요. 설정 탭에서 API 키를 한 번만 넣으면 돼요.")
                 .font(Term.mono(12))
                 .foregroundStyle(Term.muted)
             Button { router.tab = .settings } label: { Label("설정으로", systemImage: "key") }

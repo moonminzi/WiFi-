@@ -30,7 +30,7 @@ struct PhotoView: View {
                     .buttonStyle(TermButtonStyle(kind: CameraPicker.available ? .secondary : .primary, fill: true))
                 }
                 if busy { StatusLine(kind: .running, text: "준비 중") }
-                if Keychain.apiKey == nil { StatusLine(kind: .warn, text: "설정 탭에서 Claude API 키를 먼저 넣어 주세요") }
+                if !AISettings.ready { StatusLine(kind: .warn, text: "설정 탭에서 번역 AI 키를 먼저 넣어 주세요") }
             }
             if let bookID, !pages.isEmpty {
                 TermBlock(label: "recent (\(pages.count))") {
@@ -68,7 +68,7 @@ struct PhotoView: View {
         let id = library.photosBookID()
         let ids = await Importer.importImages([data], book: id, atFront: true)
         guard let page = ids.first else { return library.show("사진을 저장하지 못했어요") }
-        if Keychain.apiKey != nil { translator.enqueue(book: id, pages: [page], front: true) }
+        if AISettings.ready { translator.enqueue(book: id, pages: [page], front: true) }
         router.reader = ReaderTarget(book: id, start: 0)
     }
 }

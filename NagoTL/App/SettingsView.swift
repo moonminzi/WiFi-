@@ -3,52 +3,20 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var library: Library
-    @State private var key = ""
-    @State private var saved = Keychain.apiKey
-    @State private var checking = false
-    @State private var check: (ok: Bool, text: String)?
     @AppStorage(Budget.limitKey) private var budget = 5.0
     @AppStorage(Budget.spentKey) private var spent = 0.0
     @AppStorage(Pipeline.sfxKey) private var translateSFX = true
+    @AppStorage(FontBook.dialogueKey) private var dialogueFont: FontBook.Choice = .jua
+    @AppStorage(FontBook.sfxKey) private var sfxFont: FontBook.Choice = .blackHanSans
+    // 고른 AI가 바뀌면 아래 요약도 다시 그리게
+    @AppStorage(AISettings.primaryKey) private var primary: Provider = .claude
+    @AppStorage(AISettings.fallbackKey) private var fallback = ""
     @State private var budgetText = ""
     @State private var confirmReset = false
 
     var body: some View {
         TermPage(path: "settings") {
-            TermBlock(label: "claude api key") {
-                if let saved {
-                    StatusLine(kind: .ok, text: "저장됨 · …" + String(saved.suffix(6)))
-                } else {
-                    StatusLine(kind: .warn, text: "키가 없어요 — 번역하려면 필요해요")
-                }
-                TermField(key: "key", text: $key, placeholder: "sk-ant-…", secure: true)
-                HStack(spacing: 8) {
-                    Button {
-                        Keychain.apiKey = key
-                        saved = Keychain.apiKey
-                        key = ""
-                        Task { await verify() }
-                    } label: { Label("저장", systemImage: "key") }
-                        .buttonStyle(TermButtonStyle(kind: .primary))
-                        .disabled(key.trimmingCharacters(in: .whitespaces).isEmpty)
-                    Button { Task { await verify() } } label: { Label("확인", systemImage: "checkmark.shield") }
-                        .buttonStyle(.term)
-                        .disabled(saved == nil || checking)
-                    if saved != nil {
-                        Button {
-                            Keychain.apiKey = nil
-                            saved = nil
-                            check = nil
-                        } label: { Label("지우기", systemImage: "trash") }
-                            .buttonStyle(.termDanger)
-                    }
-                }
-                if checking { StatusLine(kind: .running, text: "확인 중") }
-                if let check { StatusLine(kind: check.ok ? .ok : .error, text: check.text) }
-                Text("console.anthropic.com → API Keys에서 만들어요. 키는 이 아이폰 키체인에만 저장되고 다른 곳에 보내지 않아요(번역 요청 때 Anthropic에만).")
-                    .font(Term.mono(11.5))
-                    .foregroundStyle(Term.muted)
-            }
+            AISection()
 
             TermBlock(label: "budget") {
                 let left = max(0, budget - spent)
@@ -65,13 +33,27 @@ struct SettingsView: View {
                 }
                 .font(Term.mono(15))
                 line("spent", Usage.money(spent) + " / " + Usage.money(budget))
-                line("left", Usage.money(left) + String(format: " · 기본 번역으로 약 %d쪽",
-                                                          Int(left / ClaudeAPI.Engine.standard.estimatedPageCost)))
-                Text("이 한도를 넘으면 번역을 멈춰요. 실제 잔액은 Anthropic 콘솔(Billing)이 기준이고, 여기 숫자는 앱이 센 어림값이에요.")
+                line("left", leftLine(left))
+                Text("이 한도를 넘으면 번역을 멈춰요. 실제 잔액은 각 AI 회사 콘솔(결제 화면)이 기준이고, 여기 숫자는 앱이 센 어림값이에요.")
                     .font(Term.mono(11.5))
                     .foregroundStyle(Term.muted)
                 Button { confirmReset = true } label: { Label("쓴 돈 0으로(새로 충전했을 때)", systemImage: "arrow.counterclockwise") }
                     .buttonStyle(.term)
+            }
+
+            TermBlock(label: "font") {
+                Text("대사·나레이션").font(Term.mono(12)).foregroundStyle(Term.key)
+                ForEach(FontBook.dialogueOptions) { c in
+                    fontRow(c, selected: dialogueFont == c, sample: "잘됐네요~ 오늘부터 너도 원숭이야!") { dialogueFont = c }
+                }
+                TermDivider()
+                Text("효과음·추임새").font(Term.mono(12)).foregroundStyle(Term.key)
+                ForEach(FontBook.sfxOptions) { c in
+                    fontRow(c, selected: sfxFont == c, sample: "히죽히죽♥ 덜컥!!") { sfxFont = c }
+                }
+                Text("간판·사진 속 글자는 반듯한 시스템 고딕으로 써요. 바꾼 뒤 이미 번역한 쪽은 책 화면 더보기 → 모두 다시 그리기(무료).")
+                    .font(Term.mono(11.5))
+                    .foregroundStyle(Term.muted)
             }
 
             TermBlock(label: "sfx") {
@@ -86,8 +68,9 @@ struct SettingsView: View {
             }
 
             TermBlock(label: "engine") {
-                line("기본", "Claude Haiku 5.5 — 한 쪽에 약 0.3센트")
-                line("고급", "Claude Opus 5.5 — 한 쪽에 약 12센트, 뷰어 ⋯ 메뉴에서 그 쪽만")
+                line("기본", engineLine(.standard))
+                line("고급", engineLine(.premium) + ", 뷰어 ⋯ 메뉴에서 그 쪽만")
+                line("대체", fallbackLine)
                 line("read", "그림 전체를 보고 세로쓰기·손글씨·효과음까지 읽음")
                 line("translate", "앞 쪽 줄거리·용어집을 기억하며 자연스러운 한국어로")
                 line("letter", "말풍선 모양을 찾아 원문만 지우고 한글을 모양대로 앉힘")
@@ -121,20 +104,50 @@ struct SettingsView: View {
         budgetText = String(format: "%g", budget)
     }
 
+    /// 글꼴 하나(그 글꼴로 쓴 보기 글 + 고름 표시)
+    private func fontRow(_ c: FontBook.Choice, selected: Bool, sample: String,
+                         action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? Term.green : Term.muted)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(c.label).font(Term.mono(11.5)).foregroundStyle(Term.muted)
+                    Text(sample)
+                        .font(c.postScript.map { Font.custom($0, size: 20) } ?? .system(size: 20, weight: .bold))
+                        .foregroundStyle(Term.text)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func leftLine(_ left: Double) -> String {
+        let perPage = AISettings.estimatedPageCost()
+        guard perPage > 0 else { return "\(Usage.money(left)) · 지금 AI는 무료 등급" }
+        return "\(Usage.money(left)) · 기본 번역으로 약 \(Int(left / perPage))쪽"
+    }
+
+    private func engineLine(_ tier: ClaudeAPI.Engine) -> String {
+        let name = AISettings.displayName(primary, tier: tier)
+        let cost = Usage.money(AISettings.estimatedPageCost(tier: tier))
+        return "\(primary.label) \(name) — 한 쪽에 약 \(cost)"
+    }
+
+    private var fallbackLine: String {
+        guard let p = Provider(rawValue: fallback), p != primary else { return "없음" }
+        return "\(p.label) — 기본이 거절·오류면 이걸로 다시"
+    }
+
     private func line(_ k: String, _ v: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(k).foregroundStyle(Term.key).frame(width: 74, alignment: .leading)
             Text(v).foregroundStyle(Term.text)
         }
         .font(Term.mono(12.5))
-    }
-
-    private func verify() async {
-        guard let k = Keychain.apiKey else { return }
-        checking = true
-        check = nil
-        let err = await ClaudeClient.checkKey(k)
-        checking = false
-        check = err == nil ? (true, "키가 맞아요") : (false, err!)
     }
 }

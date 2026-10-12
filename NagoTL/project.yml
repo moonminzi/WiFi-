@@ -41,6 +41,12 @@ targets:
           - JetBrainsMono-Regular.ttf
           - JetBrainsMono-SemiBold.ttf
           - JetBrainsMono-Bold.ttf
+          # 만화용 한글 글꼴(SIL OFL 1.1, App/Fonts에 라이선스)
+          - Jua-Regular.ttf
+          - BlackHanSans-Regular.ttf
+          - DoHyeon-Regular.ttf
+          - NanumGothic-ExtraBold.ttf
+          - NanumPenScript-Regular.ttf
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
