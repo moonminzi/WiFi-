@@ -110,6 +110,12 @@ struct ReaderView: View {
                     Button { translator.enqueue(book: bookID, pages: [page.id], front: true, engine: .premium) } label: {
                         Label(premiumTitle, systemImage: "sparkles")
                     }
+                    // 키를 넣어 둔 다른 AI로(기본 AI가 엉뚱한 곳을 가리키거나 빠뜨린 쪽)
+                    ForEach(otherAIs, id: \.self) { p in
+                        Button { translator.enqueue(book: bookID, pages: [page.id], front: true, using: p) } label: {
+                            Label(otherTitle(p), systemImage: "arrow.triangle.2.circlepath")
+                        }
+                    }
                     if page.answer != nil {
                         Button { Task { await translator.repaint(book: bookID, page: page.id) } } label: {
                             Label("다시 그리기 · 무료(번역 그대로)", systemImage: "paintbrush")
@@ -135,6 +141,15 @@ struct ReaderView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Term.bg.opacity(0.88))
         }
+    }
+
+    /// 기본 AI 말고 키를 넣어 둔 AI들
+    private var otherAIs: [Provider] { AISettings.keyed.filter { $0 != AISettings.primary } }
+
+    /// "Gemini로 다시 번역 (약 $0.003)"
+    private func otherTitle(_ p: Provider) -> String {
+        let cost = Usage.money(AISettings.route(p, tier: .standard).estimatedPageCost)
+        return "\(p.labelRo) 다시 번역 (약 \(cost))"
     }
 
     /// "고급 번역 · Opus 5.5 (약 $0.12)"

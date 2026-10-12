@@ -14,13 +14,19 @@ public struct PageBlock: Sendable, Equatable {
     public var outline: RGBA?
     /// 원문이 세로쓰기인지
     public var vertical: Bool
+    /// 원문 글자 수(띄어쓰기 빼고, 모르면 0) — 글자 크기 어림에 쓴다
+    public var chars: Int
+    /// 그림에서 찾은 원문 글자 하나 크기(Locator가 채운다, 모르면 0)
+    public var glyph: Double = 0
 
-    public init(box: IRect, kind: BlockKind, fill: RGBA? = nil, outline: RGBA? = nil, vertical: Bool = false) {
+    public init(box: IRect, kind: BlockKind, fill: RGBA? = nil, outline: RGBA? = nil, vertical: Bool = false,
+                chars: Int = 0) {
         self.box = box
         self.kind = kind
         self.fill = fill
         self.outline = outline
         self.vertical = vertical
+        self.chars = chars
     }
 }
 
@@ -63,6 +69,10 @@ public struct Refined: Sendable {
     public var outline: RGBA? = nil
     /// 원문이 세로쓰기였는지(그림 위 글자는 한글도 세로로 앉힐 수 있다)
     public var vertical = false
+    /// AI 상자 근처에서 테두리 글자를 찾아 상자를 옮겼는지
+    public var located = false
+    /// 글자 모양을 못 찾아 상자째 덮은 것(라벨) — 말풍선·그림 위 대사라면 상자가 엉뚱한 곳을 가리켰을 수 있다
+    public var fallback = false
 
     /// 번역 글자를 앉힐 모양
     public var shape: LayoutShape {
@@ -88,10 +98,22 @@ public enum Refiner {
     /// 페이지의 모든 덩어리를 원본 그림 기준으로 맞춘다(지우기 전에 한꺼번에).
     /// 한 말풍선에 덩어리가 여럿이면(이어진 말풍선 등) 말풍선을 덩어리마다 나눠 준다.
     public static func refinePage(_ bmp: Bitmap, blocks: [PageBlock], translateSFX: Bool = true) -> [Refined] {
+        // AI 상자가 어긋났으면 실제 글자 쪽으로 먼저 옮긴다
+        let snaps = Locator.snap(bmp, blocks: blocks)
+        let blocks = zip(blocks, snaps).map { b, s -> PageBlock in
+            var b = b
+            b.box = s.box
+            if s.located { b.glyph = s.glyph }
+            return b
+        }
         let boxes = blocks.map { $0.box.clamped(width: bmp.width, height: bmp.height) }
         var ctx = Context(boxes: boxes, translateSFX: translateSFX)
         var out: [Refined] = []
-        for b in blocks { out.append(refine(bmp, block: b, context: &ctx)) }
+        for (b, s) in zip(blocks, snaps) {
+            var r = refine(bmp, block: b, context: &ctx)
+            r.located = s.located
+            out.append(r)
+        }
         splitSharedRegions(&out, boxes: boxes)
         return out
     }
@@ -116,14 +138,28 @@ public enum Refiner {
             guard ctx.translateSFX, let r = artText(bmp, block: block, box: box, strict: true) else { return keep(box) }
             return r
         }
+        // 테두리 두른 글자를 그림에서 찾았으면 같은 모양(색·테두리·세로)으로 다시 쓴다 — 바탕이 고른 벽 위라도
+        // (고른 벽을 닫힌 말풍선으로 잘못 보지 않게 말풍선보다 먼저)
+        if block.glyph > 0, let r = artText(bmp, block: block, box: box) { return r }
         let (bg, uniformity) = dominantColor(bmp, box)
         if uniformity >= 0.35, let r = closedBubble(bmp, box: box, bg: bg, context: &ctx) { return r }
         // 상자 둘레도 같은 바탕일 때만 "빈 바탕 위 글자"(흰 테두리가 많은 그림 위 글자를 흰 바탕 글자로 보지 않게)
-        if uniformity >= 0.55, surroundShare(bmp, box: box, color: bg) >= 0.45, let r = openText(bmp, box: box, bg: bg) {
+        if uniformity >= 0.55, surroundShare(bmp, box: box, color: bg) >= 0.45, var r = openText(bmp, box: box, bg: bg) {
+            r.vertical = block.vertical
             return r
         }
         if let r = artText(bmp, block: block, box: box) { return r }
-        return label(bmp, block: block, box: box)
+        var r = label(bmp, block: block, box: box)
+        r.vertical = block.vertical
+        return r
+    }
+
+    /// 원문 글자 하나 크기 어림: 그림에서 찾은 값, 없으면 상자 넓이와 원문 글자 수로
+    static func expectedGlyph(_ block: PageBlock, box: IRect) -> Double? {
+        if block.glyph > 0 { return block.glyph }
+        guard block.chars > 0 else { return nil }
+        let g = (Double(box.area) / Double(block.chars)).squareRoot() * 0.9
+        return min(g, Double(min(box.w, box.h)))
     }
 
     /// 원문 그대로(지우지도 그리지도 않는다)
@@ -596,13 +632,21 @@ public enum Refiner {
                 inside = dominant(core.count > 0 ? core : mask, where: isFar) ?? dominant(mask, where: isFar)
             }
         }
-        // Claude가 알려 준 색은 고르는 데만 쓰고, 칠할 색은 그림에서 그 색에 가까운 실제 픽셀로(어림 색이 조금 달라도)
-        func snap(_ hint: RGBA) -> RGBA {
-            let near = dominant(mask) { x, y in bmp.color(x, y).distance2(hint) <= 70 * 70 }
-            return near ?? hint
+        // AI가 알려 준 색은 고르는 데만 쓰고, 칠할 색은 그림에서 그 색에 가까운 실제 픽셀로(어림 색이 조금 달라도).
+        // 그런 픽셀이 거의 없으면 AI가 색을 잘못 본 것 — 그림에서 고른 색을 쓴다
+        func snap(_ hint: RGBA) -> RGBA? {
+            var n = 0
+            for y in inner.y..<inner.maxY {
+                for x in inner.x..<inner.maxX where bmp.color(x, y).distance2(hint) <= 70 * 70 { n += 1 }
+            }
+            guard n >= max(minComp, inner.area / 200) else { return nil }
+            var all = RegionMask(rect: inner)
+            for i in all.bits.indices { all.bits[i] = true }
+            return dominant(mask) { x, y in bmp.color(x, y).distance2(hint) <= 70 * 70 }
+                ?? dominant(all) { x, y in bmp.color(x, y).distance2(hint) <= 70 * 70 }
         }
-        let fill = block.fill.map(snap) ?? inside ?? edge ?? .black
-        var outline = block.outline.map(snap) ?? (inside != nil ? edge : nil)
+        let fill = block.fill.flatMap(snap) ?? inside ?? edge ?? .black
+        var outline = block.outline.flatMap(snap) ?? (inside != nil ? edge : nil)
         if let o = outline, o.distance2(fill) < 80 * 80 { outline = nil }
         let ringAvg = Refiner.ringAverage(bmp, inner: inner, outer: outer)
 
@@ -615,6 +659,8 @@ public enum Refiner {
         var glyph = upperMedian(maskComponents(strokes).filter { $0.pixels.count >= minComp }
             .map { Double(max($0.box.w, $0.box.h)) }) ?? short * 0.4
         glyph = min(max(glyph, short * 0.25), max(short, 12))
+        // 획이 떨어진 글자는 조각이 글자보다 작다 — 그림에서 찾은 글자 크기(없으면 원문 글자 수로 본 크기)에 가깝게
+        if let g = expectedGlyph(block, box: box) { glyph = min(max(glyph, g * 0.8), g * 1.3) }
         // 테두리: 원문이 알려 주지 않았고 글자색 둘레가 한 가지 색으로 감싸여 있으면 그것(흰 옷깃처럼 둘레에도 있는 색이라
         // 위에서 글자색으로 못 잡았어도)
         if outline == nil {
@@ -720,18 +766,23 @@ public enum Refiner {
         }
         var ink = n > 0 ? RGBA(UInt8(sr / n), UInt8(sg / n), UInt8(sb / n)) : (avg.luminance > 128 ? .black : .white)
         if abs(ink.luminance - avg.luminance) < 100 { ink = avg.luminance > 128 ? .black : .white }
+        // 글자 크기: 상자 짧은 변을 그대로 쓰면 여러 열·줄을 덮은 상자에서 글자가 터무니없이 커진다
+        let glyph = min(expectedGlyph(block, box: box) ?? Double(min(box.w, box.h)), Double(min(box.w, box.h)))
         // 둘레가 그림·사진 결이면 매끈한 면(흰 판·단색 판처럼 보인다) 대신 둘레 그림 조각으로 상자를 메우고 테두리 글자로
         if rect.area <= 400_000, borderRoughness(bmp, rect: rect, patch: patch) > 14 {
             var all = RegionMask(rect: rect)
             for i in all.bits.indices { all.bits[i] = true }
+            // AI가 말한 색은 그림에 실제로 있을 때만(글자·테두리를 같은 색이라고 하면 덩어리로 그려진다)
+            let fill = block.fill.flatMap { Locator.actualColor(bmp, near: $0, in: box) } ?? ink
+            var outline = block.outline.flatMap { Locator.actualColor(bmp, near: $0, in: box.expanded(by: 4)) }
+            if let o = outline, o.distance2(fill) < 100 * 100 { outline = nil }
             return Refined(mode: .art, textBox: box, eraseMask: all, eraseSource: nil, patch: nil, background: avg,
-                           ink: block.fill ?? ink, region: nil, layoutRect: rect,
-                           glyphSize: Double(min(box.w, box.h)), closedBubble: false, outline: block.outline,
-                           vertical: block.vertical)
+                           ink: fill, region: nil, layoutRect: rect, glyphSize: glyph, closedBubble: false,
+                           outline: outline, vertical: block.vertical, fallback: true)
         }
         return Refined(mode: .label, textBox: box, eraseMask: nil, eraseSource: nil, patch: patch,
-                       background: avg, ink: ink, region: nil, layoutRect: rect,
-                       glyphSize: Double(min(box.w, box.h)), closedBubble: false)
+                       background: avg, ink: ink, region: nil, layoutRect: rect, glyphSize: glyph, closedBubble: false,
+                       fallback: true)
     }
 
     /// 상자 바로 바깥 3줄이 매끈한 면(둘레 색을 이은 면)과 얼마나 다른가(채널 평균 차) — 간판·종이는 작고 그림·사진 결은 크다

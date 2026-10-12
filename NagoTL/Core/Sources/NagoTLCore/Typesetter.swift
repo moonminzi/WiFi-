@@ -146,6 +146,26 @@ public struct TextLayout: Sendable, Equatable, Codable {
     }
 }
 
+extension TextLayout {
+    /// 그림 밖으로 나간 글을 덩어리째 안으로 민다(그림보다 크면 위·왼쪽을 맞춘다)
+    public func moved(inside r: IRect, margin: Double = 4) -> TextLayout {
+        guard !lines.isEmpty else { return self }
+        let b = bounds
+        func shift(_ lo: Double, _ len: Double, _ min0: Double, _ max0: Double) -> Double {
+            var d = 0.0
+            if lo + len > max0 { d = max0 - (lo + len) }
+            if lo + d < min0 { d = min0 - lo }
+            return d
+        }
+        let dx = shift(b.x, b.w, Double(r.x) + margin, Double(r.maxX) - margin)
+        let dy = shift(b.y, b.h, Double(r.y) + margin, Double(r.maxY) - margin)
+        guard dx != 0 || dy != 0 else { return self }
+        var out = self
+        out.lines = lines.map { LaidLine(text: $0.text, x: $0.x + dx, y: $0.y + dy, width: $0.width) }
+        return out
+    }
+}
+
 /// 세로쓰기 글자 폭: 한 글자가 한 칸(띄어쓰기는 짧게)
 public struct VerticalMetrics: GlyphMetrics {
     public init() {}

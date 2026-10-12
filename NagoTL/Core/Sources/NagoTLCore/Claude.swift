@@ -264,7 +264,8 @@ public struct PageAnswer: Codable, Sendable, Equatable {
 
         /// 지우기·그리기에 줄 덩어리(상자 + Claude가 본 글자 모양)
         public var pageBlock: PageBlock {
-            PageBlock(box: box.rect, kind: blockKind, fill: fillColor, outline: outlineColor, vertical: vertical)
+            PageBlock(box: box.rect, kind: blockKind, fill: fillColor, outline: outlineColor, vertical: vertical,
+                      chars: source.filter { !$0.isWhitespace }.count)
         }
     }
 

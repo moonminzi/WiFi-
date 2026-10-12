@@ -4,7 +4,8 @@ import SwiftUI
 /// 설정 탭의 번역 AI 고르기: 기본 AI, 막히면 쓸 대체 AI, AI마다 키·모델·주소
 struct AISection: View {
     @AppStorage(AISettings.primaryKey) private var primary: Provider = .claude
-    @AppStorage(AISettings.fallbackKey) private var fallback = ""
+    @AppStorage(AISettings.fallbackKey) private var fallback = AISettings.autoFallback
+    @AppStorage(AISettings.retryKey) private var retryMissing = true
     @State private var editing: Provider = AISettings.primary
 
     var body: some View {
@@ -13,6 +14,12 @@ struct AISection: View {
             TermChoice(options: primaryOptions, selection: $primary)
             Text("막히면 다시 할 AI(거절·오류일 때)").font(Term.mono(12)).foregroundStyle(Term.key)
             TermChoice(options: fallbackOptions, selection: $fallback)
+            Toggle(isOn: $retryMissing) {
+                Text("번역이 그림에 안 들어간 곳이 있으면 이 AI로 그 쪽을 한 번 더 받아 빈자리만 채우기")
+                    .font(Term.mono(12))
+                    .foregroundStyle(Term.text)
+            }
+            .tint(Term.green)
             TermDivider()
             Text("AI별 설정").font(Term.mono(12)).foregroundStyle(Term.key)
             TermChoice(options: editOptions, selection: $editing)
@@ -21,7 +28,7 @@ struct AISection: View {
         }
         .onChange(of: primary) { _, p in
             // 기본과 같은 걸 대체로 둘 수는 없다
-            if fallback == p.rawValue { fallback = "" }
+            if fallback == p.rawValue { fallback = AISettings.autoFallback }
             editing = p
         }
     }
@@ -33,7 +40,7 @@ extension AISection {
     }
 
     var fallbackOptions: [(label: String, value: String)] {
-        var out: [(label: String, value: String)] = [(label: "없음", value: "")]
+        var out: [(label: String, value: String)] = [(label: "자동", value: AISettings.autoFallback), (label: "없음", value: "")]
         for p in Provider.allCases where p != primary { out.append((label: p.label, value: p.rawValue)) }
         return out
     }

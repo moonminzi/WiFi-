@@ -53,7 +53,7 @@ extension Typesetter {
 
     /// 덩어리 하나의 번역을 어떤 크기·색·굵기로 어디에 쓸지 정한다
     public static func place(_ text: String, for r: Refined, kind: BlockKind, metrics: GlyphMetrics) -> PlacedText {
-        var p = placed(text, for: r, kind: kind, metrics: metrics)
+        var p = placed(printable(text), for: r, kind: kind, metrics: metrics)
         p.face = face(for: r, kind: kind)
         return p
     }
@@ -63,32 +63,56 @@ extension Typesetter {
         if r.mode == .keep {
             return PlacedText(layout: TextLayout(fontSize: 0, lineHeight: 0, lines: [], overflow: false), color: r.ink, weight: 400)
         }
-        let (hi, lo) = sizeRange(r)
+        var (hi, lo) = sizeRange(r)
+        // 효과음은 원문이 차지하던 자리를 채울 만큼 크게(획 조각으로 잰 글자 크기는 효과음 글자보다 작다)
+        if kind == .sfx && r.mode == .art { hi = max(hi, Double(min(r.layoutRect.w, r.layoutRect.h)) * 0.9) }
         let layout = Typesetter.layout(text, shape: r.shape, maxSize: hi, minSize: lo, metrics: metrics)
         switch r.mode {
         case .clean:
             let weight = kind == .narration || kind == .caption ? 600 : 700
+            // 말풍선 없는 세로 원문 자리는 세로로(가로로 쓰면 한 줄에 두세 글자씩 쪼개진다)
+            let chosen = r.closedBubble ? layout : preferVertical(text, r, layout, hi: hi, lo: lo)
             // 말풍선 밖으로 넘치면 바탕색 테두리로 읽히게
-            return PlacedText(layout: layout, color: r.ink, weight: weight,
-                              outline: layout.overflow ? r.background : nil, outlineWidth: layout.overflow ? 0.16 : 0)
+            return PlacedText(layout: chosen, color: r.ink, weight: weight,
+                              outline: chosen.overflow ? r.background : nil, outlineWidth: chosen.overflow ? 0.16 : 0)
         case .label:
-            return PlacedText(layout: layout, color: r.ink, weight: 700)
+            return PlacedText(layout: preferVertical(text, r, layout, hi: hi, lo: lo), color: r.ink, weight: 700)
         case .keep:
             return PlacedText(layout: TextLayout(fontSize: 0, lineHeight: 0, lines: [], overflow: false), color: r.ink, weight: 400)
         case .art:
             // 그림 위 글자: 원문이 세로이고 세로가 더 크게 들어가면 한글도 세로로
-            var chosen = layout
-            if r.vertical {
-                let v = Typesetter.layoutVertical(text, rect: r.layoutRect, maxSize: hi, minSize: lo)
-                // 좁고 긴 자리면 가로는 한 줄에 한두 글자로 쪼개진다 — 세로가 너무 작아지지 않는 한 세로
-                let tall = r.layoutRect.h >= r.layoutRect.w * 3 / 2
-                if !v.overflow && (chosen.overflow || v.fontSize >= chosen.fontSize * (tall ? 0.8 : 1.08)) { chosen = v }
-            }
+            let chosen = preferVertical(text, r, layout, hi: hi, lo: lo)
             // 원문 테두리색 그대로, 테두리가 없던 글자도 그림 위에서 읽히게 얇은 테두리
             let outline = r.outline ?? (r.ink.luminance > 140 ? RGBA(25, 25, 25) : .white)
             return PlacedText(layout: chosen, color: r.ink, weight: 800, outline: outline,
                               outlineWidth: r.outline != nil ? 0.16 : 0.10)
         }
+    }
+
+    /// 그릴 글자로: 색 그림 문자 하트(❤️ — 글꼴에 없어 빨간 그림 문자로 그려진다)는 글자색으로 칠해지는 ♥로
+    public static func printable(_ text: String) -> String {
+        var out = ""
+        for u in text.unicodeScalars {
+            switch u.value {
+            case 0xFE0F, 0xFE0E: continue
+            case 0x2764, 0x1F496, 0x1F497, 0x1F493, 0x1F495, 0x1F49E, 0x1F498, 0x1F49D, 0x1F9E1, 0x1F49B, 0x1F49A, 0x1F499, 0x1F49C:
+                out.unicodeScalars.append("\u{2665}")
+            default:
+                out.unicodeScalars.append(u)
+            }
+        }
+        return out
+    }
+
+    /// 원문이 세로쓰기면 세로 배치와 견줘 더 나은 쪽. 좁고 긴 자리면 가로는 한 줄에 한두 글자로 쪼개지니
+    /// 세로가 너무 작아지지 않는 한 세로, 둘 다 넘치면 세로(가로로 넘치면 깨알 같은 한 줄이 된다)
+    static func preferVertical(_ text: String, _ r: Refined, _ horizontal: TextLayout, hi: Double, lo: Double) -> TextLayout {
+        guard r.vertical else { return horizontal }
+        let v = Typesetter.layoutVertical(text, rect: r.layoutRect, maxSize: hi, minSize: lo)
+        let tall = r.layoutRect.h >= r.layoutRect.w * 3 / 2
+        if !v.overflow && (horizontal.overflow || v.fontSize >= horizontal.fontSize * (tall ? 0.75 : 1.08)) { return v }
+        if v.overflow && horizontal.overflow && tall { return v }
+        return horizontal
     }
 
     /// 글자 크기 범위(최대, 최소)

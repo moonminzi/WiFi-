@@ -279,6 +279,8 @@ enum Pipeline {
         let previous: PageAnswer?
         /// 기본/고급
         let engine: ClaudeAPI.Engine
+        /// 번역이 안 들어간 곳이 있으면 다른 AI로 한 번 더 받아 채울지
+        var retryMissing = true
     }
 
     struct Result: Sendable {
@@ -317,7 +319,46 @@ enum Pipeline {
         let w = work.bitmap.width, h = work.bitmap.height
         let tiles = Tiler.tiles(width: w, height: h)
 
-        // 조각마다 Claude에게(긴 웹툰은 3개씩 같이)
+        var (answer, usage, servedBy) = try await askPage(work.cg, tiles: tiles, height: h, job: job, routes: job.routes,
+                                                          status: status)
+        status("그리는 중")
+        var edits = remap(job.edits, from: job.previous, to: answer)
+        var drawn = try render(work.bitmap, answer: answer, edits: edits)
+        // 번역했는데 그림에 안 들어간 곳(원문이 그대로 남았거나 엉뚱한 곳을 가리킨 것)이 있으면
+        // 아직 안 쓴 다른 AI로 이 쪽을 한 번 더 받아, 잘 들어간 곳은 두고 빈자리만 채운다
+        if job.retryMissing, !drawn.failed.isEmpty,
+           let alt = job.routes.first(where: { r in !servedBy.contains { $0.hasPrefix(r.route.provider.label) } }) {
+            status("번역이 안 들어간 곳 \(drawn.failed.count)개 · \(alt.route.provider.labelRo) 한 번 더")
+            do {
+                let (other, used, by) = try await askPage(work.cg, tiles: tiles, height: h, job: job, routes: [alt],
+                                                          status: status)
+                usage = usage + used
+                let merged = Quality.merge(answer, failed: drawn.failed, areas: drawn.areas, with: other)
+                if merged.added > 0 {
+                    status("그리는 중")
+                    let e2 = remap(job.edits, from: job.previous, to: merged.answer)
+                    let d2 = try render(work.bitmap, answer: merged.answer, edits: e2)
+                    // 못 들어간 곳이 줄었거나, 늘지 않고 빠졌던 글을 채웠으면 합친 것으로
+                    if d2.failed.count <= drawn.failed.count {
+                        answer = merged.answer
+                        edits = e2
+                        drawn = d2
+                        for b in by where !servedBy.contains(b) { servedBy.append(b) }
+                    }
+                }
+            } catch {
+                // 다시 받기가 막혀도 처음 번역은 그대로 쓴다(취소만 멈춘다)
+                if ClaudeClient.map(error) == .cancelled { throw TranslateError.cancelled }
+            }
+        }
+        try save(drawn, output: job.output, thumb: job.thumb)
+        return Result(answer: answer, width: w, height: h, usage: usage, hits: drawn.hits, edits: edits, engine: job.engine,
+                      servedBy: servedBy.joined(separator: " + "))
+    }
+
+    /// 쪽 하나를 AI에게(긴 웹툰은 조각마다, 3개씩 같이). 돌려주는 것: 합친 답, 쓴 돈, 답한 AI 이름들
+    static func askPage(_ image: CGImage, tiles: [IRect], height h: Int, job: Job, routes: [KeyedRoute],
+                        status: @escaping @Sendable (String) -> Void) async throws -> (PageAnswer, Usage, [String]) {
         var answers = [PageAnswer?](repeating: nil, count: tiles.count)
         var usage = Usage()
         var servedBy: [String] = []
@@ -328,7 +369,8 @@ enum Pipeline {
                 next += 1
                 let tile = tiles[i]
                 group.addTask {
-                    let (a, u, by) = try await Pipeline.ask(work.cg, tile: tile, index: i, count: tiles.count, job: job) { text in
+                    let (a, u, by) = try await Pipeline.ask(image, tile: tile, index: i, count: tiles.count, job: job,
+                                                            routes: routes) { text in
                         status(tiles.count > 1 ? "\(i + 1)/\(tiles.count) \(text)" : text)
                     }
                     return (i, a, u, by)
@@ -343,28 +385,20 @@ enum Pipeline {
             }
         }
         let all = answers.compactMap { $0 }
-        let answer: PageAnswer
-        if all.count == 1 {
-            answer = all[0]
-        } else {
-            let blocks = Tiler.merge(zip(tiles, all).map { (tile: $0, blocks: $1.blocks) }, height: h)
-            answer = PageAnswer(source_language: all.first?.source_language ?? "", blocks: blocks,
+        if all.count == 1 { return (all[0], usage, servedBy) }
+        let blocks = Tiler.merge(zip(tiles, all).map { (tile: $0, blocks: $1.blocks) }, height: h)
+        let answer = PageAnswer(source_language: all.first?.source_language ?? "", blocks: blocks,
                                 page_summary: all.map(\.page_summary).filter { !$0.isEmpty }.joined(separator: " "),
                                 new_terms: all.reduce([]) { GlossaryEntry.merge($0, adding: $1.new_terms) })
-        }
-        status("그리는 중")
-        let edits = remap(job.edits, from: job.previous, to: answer)
-        let hits = try paint(work.bitmap, answer: answer, edits: edits, output: job.output, thumb: job.thumb)
-        return Result(answer: answer, width: w, height: h, usage: usage, hits: hits, edits: edits, engine: job.engine,
-                      servedBy: servedBy.joined(separator: " + "))
+        return (answer, usage, servedBy)
     }
 
-    /// 조각 하나를 보내고 답의 상자를 작업 그림 좌표로 바꾼다. 기본 AI가 실패·거절하면 대체 AI로.
+    /// 조각 하나를 보내고 답의 상자를 작업 그림 좌표로 바꾼다. 앞의 AI가 실패·거절하면 다음 AI로.
     /// 돌려주는 것: 답, 쓴 토큰·비용, 답한 AI 이름
-    static func ask(_ image: CGImage, tile: IRect, index: Int, count: Int, job: Job,
+    static func ask(_ image: CGImage, tile: IRect, index: Int, count: Int, job: Job, routes: [KeyedRoute],
                     status: @escaping @Sendable (String) -> Void) async throws -> (PageAnswer, Usage, String) {
         var failed: TranslateError?
-        for (k, r) in job.routes.enumerated() {
+        for (k, r) in routes.enumerated() {
             do {
                 if let f = failed { status("다른 AI로 다시 · \(r.route.provider.label) (\(f.localizedDescription.prefix(40)))") }
                 if r.route.provider == .claude {
@@ -375,7 +409,7 @@ enum Pipeline {
             } catch {
                 // 거절·오류면 다음 AI로(취소는 그대로 멈춘다)
                 let e = ClaudeClient.map(error)
-                guard e != .cancelled, k + 1 < job.routes.count else { throw e }
+                guard e != .cancelled, k + 1 < routes.count else { throw e }
                 failed = e
             }
         }
@@ -489,8 +523,33 @@ enum Pipeline {
     /// 설정: 효과음·추임새도 번역해 그릴지(UserDefaults, 기본 켬)
     static let sfxKey = "tl.sfx"
 
+    /// 그린 결과(저장 전)
+    struct Rendered {
+        var image: CGImage
+        /// 말풍선마다 누를 곳
+        var hits: [[Int]]
+        /// 번역이 그림에 제대로 안 들어간 덩어리(답의 번호)
+        var failed: Set<Int>
+        /// 덩어리마다 그림에서 차지한 자리(찾은 글자 범위 + AI 상자)
+        var areas: [IRect]
+    }
+
     /// 원문을 지우고 번역을 그려 저장한다. 말풍선마다 누를 곳을 돌려준다.
     static func paint(_ bitmap: Bitmap, answer: PageAnswer, edits: [String: BlockEdit], output: URL, thumb: URL) throws -> [[Int]] {
+        let r = try render(bitmap, answer: answer, edits: edits)
+        try save(r, output: output, thumb: thumb)
+        return r.hits
+    }
+
+    static func save(_ r: Rendered, output: URL, thumb: URL) throws {
+        guard let data = Pixels.jpeg(r.image, quality: 0.92) else { throw TranslateError.badResponse("그리기 실패") }
+        try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: output, options: .atomic)
+        Importer.makeThumb(from: output, to: thumb)
+    }
+
+    /// 원문을 지우고 번역을 그린다(저장은 따로)
+    static func render(_ bitmap: Bitmap, answer: PageAnswer, edits: [String: BlockEdit]) throws -> Rendered {
         var active: [(Int, PageAnswer.Block, String)] = []
         for (i, b) in answer.blocks.enumerated() {
             let e = edits[String(i)]
@@ -509,22 +568,26 @@ enum Pipeline {
             let name = FontBook.resolvedName(face: Typesetter.face(for: r, kind: a.1.blockKind), text: a.2)
             var p = Typesetter.place(a.2, for: r, kind: a.1.blockKind, metrics: FontBook.metrics(fontName: name))
             p.fontName = name
+            // 그림 밖으로 나간 글은 안으로
+            p.layout = p.layout.moved(inside: bitmap.bounds)
             return p
         }
-        guard let base = Pixels.cgImage(out), let img = Painter.draw(base: base, texts: placed),
-              let data = Pixels.jpeg(img, quality: 0.92) else { throw TranslateError.badResponse("그리기 실패") }
-        try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: output, options: .atomic)
-        Importer.makeThumb(from: output, to: thumb)
+        guard let base = Pixels.cgImage(out), let img = Painter.draw(base: base, texts: placed) else {
+            throw TranslateError.badResponse("그리기 실패")
+        }
         var hits = answer.blocks.map { b -> [Int] in
             let r = b.box.rect
             return [r.x, r.y, r.w, r.h]
         }
+        var areas = answer.blocks.map(\.box.rect)
+        var failed = Set<Int>()
         for (k, a) in active.enumerated() {
             let r = refined[k].layoutRect.union(a.1.box.rect)
             hits[a.0] = [r.x, r.y, r.w, r.h]
+            areas[a.0] = refined[k].textBox.union(a.1.box.rect)
+            if Quality.failed(a.1.pageBlock, refined[k], placed[k]) { failed.insert(a.0) }
         }
-        return hits
+        return Rendered(image: img, hits: hits, failed: failed, areas: areas)
     }
 
     /// 고친 번역으로 다시 그린다(Claude는 부르지 않는다)
@@ -541,7 +604,8 @@ final class Translator: ObservableObject {
 
     /// 페이지 ID → 지금 하는 일
     @Published private(set) var live: [String: String] = [:]
-    @Published private(set) var waiting: [(book: String, page: String, engine: ClaudeAPI.Engine)] = []
+    /// using: 이 AI부터 쓴다(읽기 화면의 "Gemini로 다시 번역" 등). nil이면 설정 순서대로
+    @Published private(set) var waiting: [(book: String, page: String, engine: ClaudeAPI.Engine, using: Provider?)] = []
     private var running: [String: (book: String, task: Task<Void, Never>)] = [:]
     private var background: UIBackgroundTaskIdentifier = .invalid
     let limit = 3
@@ -554,13 +618,14 @@ final class Translator: ObservableObject {
         waiting.filter { $0.book == book }.count + running.values.filter { $0.book == book }.count
     }
 
-    func enqueue(book: String, pages: [String], front: Bool = false, engine: ClaudeAPI.Engine = .standard) {
+    func enqueue(book: String, pages: [String], front: Bool = false, engine: ClaudeAPI.Engine = .standard,
+                 using: Provider? = nil) {
         let lib = Library.shared
-        var add: [(book: String, page: String, engine: ClaudeAPI.Engine)] = []
+        var add: [(book: String, page: String, engine: ClaudeAPI.Engine, using: Provider?)] = []
         for p in pages where running[p] == nil {
             waiting.removeAll { $0.page == p }
             guard lib.page(book, p) != nil else { continue }
-            add.append((book, p, engine))
+            add.append((book, p, engine, using))
             lib.update(book: book, page: p) { rec in
                 rec.status = .queued
                 rec.error = nil
@@ -594,7 +659,7 @@ final class Translator: ObservableObject {
         while running.count < limit, !waiting.isEmpty {
             let job = waiting.removeFirst()
             let task = Task { [weak self] in
-                await self?.run(book: job.book, page: job.page, engine: job.engine)
+                await self?.run(book: job.book, page: job.page, engine: job.engine, using: job.using)
                 self?.running[job.page] = nil
                 self?.live[job.page] = nil
                 self?.pump()
@@ -618,9 +683,9 @@ final class Translator: ObservableObject {
         background = .invalid
     }
 
-    private func run(book: String, page: String, engine: ClaudeAPI.Engine) async {
+    private func run(book: String, page: String, engine: ClaudeAPI.Engine, using: Provider?) async {
         let lib = Library.shared
-        let routes = AISettings.routes(tier: engine)
+        let routes = AISettings.routes(tier: engine, first: using)
         guard let first = routes.first else {
             lib.update(book: book, page: page) { rec in
                 rec.status = .failed
@@ -641,7 +706,8 @@ final class Translator: ObservableObject {
         lib.update(book: book, page: page) { $0.status = .working }
         let job = Pipeline.Job(original: Paths.original(book, rec.file), output: Paths.output(book, page),
                                thumb: Paths.thumb(book, page), context: lib.context(book: book, page: page),
-                               routes: routes, edits: rec.edits, previous: rec.answer, engine: engine)
+                               routes: routes, edits: rec.edits, previous: rec.answer, engine: engine,
+                               retryMissing: AISettings.retryMissing)
         do {
             let result = try await Pipeline.translate(job) { text in
                 Task { @MainActor in

@@ -15,6 +15,13 @@ public enum Provider: String, Codable, Sendable, CaseIterable, Identifiable {
         }
     }
 
+    /// "Gemini로", "OpenAI 호환으로"(받침 있는 한글로 끝나면 "으로")
+    public var labelRo: String {
+        guard let u = label.unicodeScalars.last, (0xAC00...0xD7A3).contains(u.value) else { return label + "로" }
+        let jong = (u.value - 0xAC00) % 28
+        return label + (jong == 0 || jong == 8 ? "로" : "으로")
+    }
+
     /// 상자를 0~1000 정규화 좌표로 받는가. Claude는 서버가 그림을 줄이는 규칙대로 크기를 맞춰 보내 픽셀 1:1로 받는다
     public var normalizedBoxes: Bool { self != .claude }
 
