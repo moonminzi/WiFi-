@@ -31,8 +31,9 @@ public struct Refined: Sendable {
         case clean
         /// 바탕이 복잡하다(사진·그림 위 글자) — 상자를 둘레 색으로 매끈하게 덮는다(구글 렌즈처럼)
         case label
-        /// 효과음 — 그림을 지우지 않고 테두리 글자로 겹쳐 쓴다
-        case overlay
+        /// 원문 그대로 둔다 — 지우지도 그리지도 않는다(효과음을 같은 모양으로 다시 쓸 자신이 없을 때·효과음 번역을 끈 때).
+        /// 번역은 그 자리를 누르면 볼 수 있다
+        case keep
         /// 말풍선 없이 그림 위에 쓴 글자 — 글자·테두리 픽셀만 지우고 그 밑 그림을 둘레 그림 조각으로 되살린 뒤,
         /// 원문과 같은 색·테두리로 쓴다
         case art
@@ -80,13 +81,15 @@ public enum Refiner {
     struct Context {
         var boxes: [IRect]
         var bubbles: [RegionMask] = []
+        /// 효과음·추임새도 번역해 그릴지(끄면 원문 그대로)
+        var translateSFX = true
     }
 
     /// 페이지의 모든 덩어리를 원본 그림 기준으로 맞춘다(지우기 전에 한꺼번에).
     /// 한 말풍선에 덩어리가 여럿이면(이어진 말풍선 등) 말풍선을 덩어리마다 나눠 준다.
-    public static func refinePage(_ bmp: Bitmap, blocks: [PageBlock]) -> [Refined] {
+    public static func refinePage(_ bmp: Bitmap, blocks: [PageBlock], translateSFX: Bool = true) -> [Refined] {
         let boxes = blocks.map { $0.box.clamped(width: bmp.width, height: bmp.height) }
-        var ctx = Context(boxes: boxes)
+        var ctx = Context(boxes: boxes, translateSFX: translateSFX)
         var out: [Refined] = []
         for b in blocks { out.append(refine(bmp, block: b, context: &ctx)) }
         splitSharedRegions(&out, boxes: boxes)
@@ -107,17 +110,40 @@ public enum Refiner {
         let kind = block.kind
         let box = block.box.clamped(width: bmp.width, height: bmp.height)
         let short = Double(max(1, min(box.w, box.h)))
-        guard box.w >= 4, box.h >= 4 else {
-            return Refined(mode: .overlay, textBox: box, eraseMask: nil, eraseSource: nil, patch: nil,
-                           background: .white, ink: .black, region: nil, layoutRect: box,
-                           glyphSize: max(8, short), closedBubble: false)
+        guard box.w >= 4, box.h >= 4, short >= 4 else { return keep(box) }
+        if kind == .sfx {
+            // 효과음·추임새: 원래 모양(색·테두리·세로)으로 다시 쓸 수 있을 때만. 아니면 원문 그대로(판으로 덮지 않는다)
+            guard ctx.translateSFX, let r = artText(bmp, block: block, box: box, strict: true) else { return keep(box) }
+            return r
         }
-        if kind == .sfx { return overlay(bmp, box: box) }
         let (bg, uniformity) = dominantColor(bmp, box)
         if uniformity >= 0.35, let r = closedBubble(bmp, box: box, bg: bg, context: &ctx) { return r }
-        if uniformity >= 0.55, let r = openText(bmp, box: box, bg: bg) { return r }
+        // 상자 둘레도 같은 바탕일 때만 "빈 바탕 위 글자"(흰 테두리가 많은 그림 위 글자를 흰 바탕 글자로 보지 않게)
+        if uniformity >= 0.55, surroundShare(bmp, box: box, color: bg) >= 0.45, let r = openText(bmp, box: box, bg: bg) {
+            return r
+        }
         if let r = artText(bmp, block: block, box: box) { return r }
-        return label(bmp, box: box)
+        return label(bmp, block: block, box: box)
+    }
+
+    /// 원문 그대로(지우지도 그리지도 않는다)
+    static func keep(_ box: IRect) -> Refined {
+        Refined(mode: .keep, textBox: box, eraseMask: nil, eraseSource: nil, patch: nil, background: .white, ink: .black,
+                region: nil, layoutRect: box, glyphSize: Double(max(8, min(box.w, box.h))), closedBubble: false)
+    }
+
+    /// 상자 바로 바깥 띠에서 그 색(바탕)에 가까운 픽셀 비율
+    static func surroundShare(_ bmp: Bitmap, box: IRect, color: RGBA) -> Double {
+        let pad = max(6, min(box.w, box.h) / 4)
+        let ring = box.expanded(by: pad).clamped(width: bmp.width, height: bmp.height)
+        var n = 0, near = 0
+        for y in ring.y..<ring.maxY {
+            for x in ring.x..<ring.maxX where !box.contains(x, y) {
+                n += 1
+                if bmp.color(x, y).distance2(color) <= backgroundTolerance { near += 1 }
+            }
+        }
+        return n > 0 ? Double(near) / Double(n) : 1
     }
 
     /// 원문 글자를 지운다. 모든 덩어리를 refinePage로 원본에서 구한 다음 한꺼번에 부를 것.
@@ -428,11 +454,52 @@ public enum Refiner {
         RGBA(UInt8((b >> 8) * 16 + 8), UInt8(((b >> 4) & 15) * 16 + 8), UInt8((b & 15) * 16 + 8))
     }
 
-    /// 말풍선 없이 그림 위에 쓴 글자: 글자 상자 안에는 흔한데 둘레(바깥 띠)에는 드문 색 = 글자·테두리 색.
-    /// Claude가 본 글자색·테두리색이 있으면 그 근처 색도 글자로 친다. 못 가려내면 nil(라벨로 덮는다).
-    static func artText(_ bmp: Bitmap, block: PageBlock, box: IRect) -> Refined? {
+    /// 그림 위 글자를 골라낸 결과
+    struct ArtSegment {
+        /// 지울 글자 픽셀(글자색 + 획에 붙은 테두리색). 넓힌 경계까지 이어진 덩어리(지나가는 그림 선)는 상자 안 부분만
+        var mask: RegionMask
+        /// 상자 안 글자 픽셀 수
+        var inBox: Int
+        /// 넓힌 경계 밖으로 굵은 덩어리가 이어진다(글자가 상자 밖까지 이어진 것 — 일부만 지우면 흔적이 남는다)
+        var spills: Bool
+        /// 넓힌 경계에 닿은 덩어리 수(0이면 글자 전체가 경계 안에 있다)
+        var crossing: Int
+        var fill: RGBA
+        var outline: RGBA?
+        var glyph: Double
+        var ringAverage: RGBA
+    }
+
+    /// 말풍선 없이 그림 위에 쓴 글자(대사·효과음·추임새).
+    /// 글자가 상자 밖으로 이어지면 한 번 넓혀서 다시 본다. strict(효과음)면 조금이라도 자신 없을 때 nil(원문 그대로 둔다).
+    static func artText(_ bmp: Bitmap, block: PageBlock, box: IRect, strict: Bool = false) -> Refined? {
+        var seg: ArtSegment?
+        for margin in [0.12, 0.4] {
+            guard let s = segmentArt(bmp, block: block, box: box, margin: margin) else { continue }
+            seg = s
+            // 경계에 닿은 게 없으면 끝. 닿았으면 글자가 상자를 조금 넘쳤을 수 있으니 넓혀서 한 번 더
+            if s.crossing == 0 { break }
+        }
+        // 넓혀 봐도 글자가 상자 밖으로 이어지면 일부만 지워져 흔적이 남는다 — 하지 않는다
+        guard let s = seg, s.inBox > 0, !s.spills, s.mask.count > 0 else { return nil }
+        if strict {
+            // 효과음: 글자가 둘레와 뚜렷이 다르고, 상자에 알맞은 양일 때만
+            let share = Double(s.inBox) / Double(max(1, box.area))
+            guard s.fill.distance2(s.ringAverage) >= 60 * 60, share >= 0.03, share <= 0.9 else { return nil }
+        }
+        let mbox = s.mask.boundingBox
+        let vertical = block.vertical || Double(box.h) > Double(box.w) * 1.6
+        // 글자 가장자리의 번진 픽셀(JPEG 테두리 번짐 포함)까지 2px 넓혀 지운다 — 밑 그림은 되살리므로 조금 넓어도 괜찮다
+        return Refined(mode: .art, textBox: mbox, eraseMask: s.mask.dilated(2), eraseSource: nil, patch: nil,
+                       background: s.ringAverage, ink: s.fill, region: nil, layoutRect: box.union(mbox),
+                       glyphSize: s.glyph, closedBubble: false, outline: s.outline, vertical: vertical)
+    }
+
+    /// 글자 상자 안에는 흔한데 둘레(바깥 띠)에는 드문 색 = 글자색. Claude가 본 글자색·테두리색이 있으면 그 근처 색도
+    /// 글자로 친다. 테두리는 글자 획 가까이에 붙은 테두리색 픽셀만(멀리 있는 같은 색 — 흰 옷깃 같은 — 은 그림).
+    static func segmentArt(_ bmp: Bitmap, block: PageBlock, box: IRect, margin: Double) -> ArtSegment? {
         let short = Double(min(box.w, box.h))
-        let inner = box.expanded(by: max(4, Int(short * 0.12))).clamped(width: bmp.width, height: bmp.height)
+        let inner = box.expanded(by: max(4, Int(short * margin))).clamped(width: bmp.width, height: bmp.height)
         let outer = inner.expanded(by: max(10, Int(short * 0.3))).clamped(width: bmp.width, height: bmp.height)
         var hin = [Int](repeating: 0, count: 4096), hring = [Int](repeating: 0, count: 4096)
         var nin = 0, nring = 0
@@ -488,9 +555,7 @@ public enum Refiner {
             for p in c.pixels { mask.bits[p] = false }
         }
         let total = mask.count
-        guard total >= max(30, inner.area / 60), total * 100 <= inner.area * 85 else { return nil }
-        let mbox = mask.boundingBox
-        guard box.intersection(mbox).area * 4 >= box.area else { return nil }
+        guard total >= max(20, inner.area / 80), total * 100 <= inner.area * 85 else { return nil }
 
         // 글자색은 획 안쪽, 테두리색은 가장자리 띠에서
         let core = mask.eroded(2)
@@ -539,24 +604,86 @@ public enum Refiner {
         let fill = block.fill.map(snap) ?? inside ?? edge ?? .black
         var outline = block.outline.map(snap) ?? (inside != nil ? edge : nil)
         if let o = outline, o.distance2(fill) < 80 * 80 { outline = nil }
+        let ringAvg = Refiner.ringAverage(bmp, inner: inner, outer: outer)
 
-        // 글자 크기: 글자색 획 덩어리의 크기(테두리로 이어진 줄 전체가 아니라)
-        var fillMask = RegionMask(rect: inner)
-        for ly in 0..<inner.h {
-            for lx in 0..<inner.w where mask.bits[ly * inner.w + lx]
-                && bmp.color(lx + inner.x, ly + inner.y).distance2(fill) <= 70 * 70 {
-                fillMask.bits[ly * inner.w + lx] = true
-            }
+        // 글자 획: 글자색에 가까운 글자 픽셀
+        var strokes = RegionMask(rect: inner)
+        for i in mask.bits.indices where mask.bits[i] {
+            if bmp.color(i % inner.w + inner.x, i / inner.w + inner.y).distance2(fill) <= 90 * 90 { strokes.bits[i] = true }
         }
-        var glyph = upperMedian(maskComponents(fillMask).filter { $0.pixels.count >= minComp }
+        guard strokes.count > 0 else { return nil }
+        var glyph = upperMedian(maskComponents(strokes).filter { $0.pixels.count >= minComp }
             .map { Double(max($0.box.w, $0.box.h)) }) ?? short * 0.4
         glyph = min(max(glyph, short * 0.25), max(short, 12))
-        let vertical = block.vertical || Double(box.h) > Double(box.w) * 1.6
-        let ringAvg = Refiner.ringAverage(bmp, inner: inner, outer: outer)
-        // 글자 가장자리의 번진 픽셀(JPEG 테두리 번짐 포함)까지 2px 넓혀 지운다 — 밑 그림은 되살리므로 조금 넓어도 괜찮다
-        return Refined(mode: .art, textBox: mbox, eraseMask: mask.dilated(2), eraseSource: nil, patch: nil,
-                       background: ringAvg, ink: fill, region: nil, layoutRect: box.union(mbox),
-                       glyphSize: glyph, closedBubble: false, outline: outline, vertical: vertical)
+        // 테두리: 원문이 알려 주지 않았고 글자색 둘레가 한 가지 색으로 감싸여 있으면 그것(흰 옷깃처럼 둘레에도 있는 색이라
+        // 위에서 글자색으로 못 잡았어도)
+        if outline == nil {
+            // 획 바로 옆 한 줄(글자색과 섞인 번진 픽셀)은 건너뛰고 그 바깥 두 줄을 본다
+            let band = strokes.dilated(3), blend = strokes.dilated(1)
+            var halo = RegionMask(rect: inner)
+            for i in halo.bits.indices {
+                let x = i % inner.w + inner.x, y = i / inner.w + inner.y
+                if band.get(x, y) && !blend.get(x, y) { halo.bits[i] = true }
+            }
+            if let h = dominant(halo, where: { _, _ in true }), h.distance2(fill) > 80 * 80 {
+                var close = 0
+                for i in halo.bits.indices where halo.bits[i]
+                    && bmp.color(i % inner.w + inner.x, i / inner.w + inner.y).distance2(h) <= 50 * 50 {
+                    close += 1
+                }
+                // 글자 둘레에는 흔한데 바깥 띠(그림)에는 드문 색이어야 테두리(바탕색이 글자를 감싼 것과 구별)
+                var ringClose = 0, ringN = 0
+                for y in outer.y..<outer.maxY {
+                    for x in outer.x..<outer.maxX where !inner.contains(x, y) {
+                        ringN += 1
+                        if bmp.color(x, y).distance2(h) <= 50 * 50 { ringClose += 1 }
+                    }
+                }
+                let haloShare = Double(close) / Double(max(1, halo.count))
+                let ringShare = Double(ringClose) / Double(max(1, ringN))
+                if haloShare >= 0.5, haloShare >= 3 * ringShare { outline = h }
+            }
+        }
+        // 지울 곳 = 글자 획 + 획에서 테두리 두께 안쪽에 있는 테두리색 픽셀
+        var text = strokes
+        if let o = outline {
+            let reach = strokes.dilated(max(2, Int((glyph * 0.3).rounded())))
+            for i in text.bits.indices where !text.bits[i] {
+                let x = i % inner.w + inner.x, y = i / inner.w + inner.y
+                if reach.get(x, y), bmp.color(x, y).distance2(o) <= 70 * 70 { text.bits[i] = true }
+            }
+        }
+        // 넓힌 경계까지 이어진 덩어리: 상자 밖 부분이 가는 선이면 글자를 지나가는 그림 선(팔 윤곽·효과선) —
+        // 상자 안만 지우고(밑 그림은 되살린다) 밖은 남긴다. 굵은 덩어리가 밖으로 이어지면 글자가 상자를 넘친 것
+        // 상자와 닿지 않는 덩어리는 넓힌 띠에 있던 같은 색 그림 — 남긴다. 상자와 겹치는 덩어리는 상자를 조금 넘친 부분까지 지운다
+        var inBox = 0, crossing = 0
+        var spills = false
+        for c in maskComponents(text) {
+            let touches = touchesBorder(c.box, inner)
+            var inside = 0
+            var outside = RegionMask(rect: inner)
+            for p in c.pixels {
+                if box.contains(p % inner.w + inner.x, p / inner.w + inner.y) {
+                    inside += 1
+                } else {
+                    outside.bits[p] = true
+                }
+            }
+            if inside == 0 && !touches {
+                for p in c.pixels { text.bits[p] = false }
+                continue
+            }
+            inBox += inside
+            guard touches else { continue }
+            crossing += 1
+            for p in c.pixels where outside.bits[p] { text.bits[p] = false }
+            if outside.eroded(1).count * 4 > outside.count { spills = true }
+        }
+        guard text.count > 0 else { return nil }
+        let mbox = text.boundingBox
+        guard box.intersection(mbox).area * 4 >= box.area else { return nil }
+        return ArtSegment(mask: text, inBox: inBox, spills: spills, crossing: crossing, fill: fill, outline: outline,
+                          glyph: glyph, ringAverage: ringAvg)
     }
 
     /// 바깥 띠의 평균색
@@ -574,7 +701,7 @@ public enum Refiner {
         return n > 0 ? RGBA(UInt8(sr / n), UInt8(sg / n), UInt8(sb / n)) : .white
     }
 
-    static func label(_ bmp: Bitmap, box: IRect) -> Refined {
+    static func label(_ bmp: Bitmap, block: PageBlock, box: IRect) -> Refined {
         let rect = box.expanded(by: 3).clamped(width: bmp.width, height: bmp.height)
         let patch = BorderPatch(bmp, rect: rect)
         let avg = patch.average
@@ -593,16 +720,42 @@ public enum Refiner {
         }
         var ink = n > 0 ? RGBA(UInt8(sr / n), UInt8(sg / n), UInt8(sb / n)) : (avg.luminance > 128 ? .black : .white)
         if abs(ink.luminance - avg.luminance) < 100 { ink = avg.luminance > 128 ? .black : .white }
+        // 둘레가 그림·사진 결이면 매끈한 면(흰 판·단색 판처럼 보인다) 대신 둘레 그림 조각으로 상자를 메우고 테두리 글자로
+        if rect.area <= 400_000, borderRoughness(bmp, rect: rect, patch: patch) > 14 {
+            var all = RegionMask(rect: rect)
+            for i in all.bits.indices { all.bits[i] = true }
+            return Refined(mode: .art, textBox: box, eraseMask: all, eraseSource: nil, patch: nil, background: avg,
+                           ink: block.fill ?? ink, region: nil, layoutRect: rect,
+                           glyphSize: Double(min(box.w, box.h)), closedBubble: false, outline: block.outline,
+                           vertical: block.vertical)
+        }
         return Refined(mode: .label, textBox: box, eraseMask: nil, eraseSource: nil, patch: patch,
                        background: avg, ink: ink, region: nil, layoutRect: rect,
                        glyphSize: Double(min(box.w, box.h)), closedBubble: false)
     }
 
-    static func overlay(_ bmp: Bitmap, box: IRect) -> Refined {
-        let avg = bmp.average(box)
-        return Refined(mode: .overlay, textBox: box, eraseMask: nil, eraseSource: nil, patch: nil,
-                       background: avg, ink: avg.luminance > 110 ? .black : .white, region: nil, layoutRect: box,
-                       glyphSize: Double(min(box.w, box.h)), closedBubble: false)
+    /// 상자 바로 바깥 3줄이 매끈한 면(둘레 색을 이은 면)과 얼마나 다른가(채널 평균 차) — 간판·종이는 작고 그림·사진 결은 크다
+    static func borderRoughness(_ bmp: Bitmap, rect: IRect, patch: BorderPatch) -> Double {
+        var s = 0.0, n = 0.0
+        func add(_ x: Int, _ y: Int, _ px: Int, _ py: Int) {
+            guard x >= 0, y >= 0, x < bmp.width, y < bmp.height else { return }
+            let c = bmp.color(x, y), p = patch.color(px, py)
+            s += Double(abs(Int(c.r) - Int(p.r)) + abs(Int(c.g) - Int(p.g)) + abs(Int(c.b) - Int(p.b))) / 3
+            n += 1
+        }
+        for x in rect.x..<rect.maxX {
+            for o in 1...3 {
+                add(x, rect.y - o, x, rect.y)
+                add(x, rect.maxY - 1 + o, x, rect.maxY - 1)
+            }
+        }
+        for y in rect.y..<rect.maxY {
+            for o in 1...3 {
+                add(rect.x - o, y, rect.x, y)
+                add(rect.maxX - 1 + o, y, rect.maxX - 1, y)
+            }
+        }
+        return n > 0 ? s / n : 0
     }
 
     // MARK: - 도구

@@ -278,6 +278,9 @@ enum Pipeline {
         return (answer, used)
     }
 
+    /// 설정: 효과음·추임새도 번역해 그릴지(UserDefaults, 기본 켬)
+    static let sfxKey = "tl.sfx"
+
     /// 원문을 지우고 번역을 그려 저장한다. 말풍선마다 누를 곳을 돌려준다.
     static func paint(_ bitmap: Bitmap, answer: PageAnswer, edits: [String: BlockEdit], output: URL, thumb: URL) throws -> [[Int]] {
         var active: [(Int, PageAnswer.Block, String)] = []
@@ -288,7 +291,9 @@ enum Pipeline {
             if text.isEmpty { continue }
             active.append((i, b, text))
         }
-        let refined = Refiner.refinePage(bitmap, blocks: active.map { $0.1.pageBlock })
+        // 효과음·추임새: 원래 모양으로 다시 쓰거나(못 하면 원문 그대로), 설정에서 끄면 늘 원문 그대로
+        let translateSFX = UserDefaults.standard.object(forKey: Pipeline.sfxKey) as? Bool ?? true
+        let refined = Refiner.refinePage(bitmap, blocks: active.map { $0.1.pageBlock }, translateSFX: translateSFX)
         var out = bitmap
         Refiner.erase(&out, refined)
         let placed = zip(active, refined).map { a, r in
@@ -442,6 +447,19 @@ final class Translator: ObservableObject {
                 }
             }
         }
+    }
+
+    /// 번역은 그대로 두고 책의 번역된 쪽을 모두 새로 그린다(Claude는 부르지 않아 무료).
+    /// 앱이 나아졌을 때·효과음 설정을 바꿨을 때
+    func repaintAll(book: String) async {
+        let lib = Library.shared
+        let pages = lib.pageList(book).filter { $0.answer != nil && !isActive($0.id) }
+        guard !pages.isEmpty else { return lib.show("다시 그릴 번역된 쪽이 없어요") }
+        for (i, p) in pages.enumerated() {
+            lib.show("다시 그리는 중 \(i + 1)/\(pages.count)쪽")
+            await repaint(book: book, page: p.id)
+        }
+        lib.show("\(pages.count)쪽을 다시 그렸어요")
     }
 
     /// 고친 번역으로 다시 그리기

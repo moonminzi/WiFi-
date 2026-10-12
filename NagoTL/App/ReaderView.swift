@@ -111,6 +111,11 @@ struct ReaderView: View {
                         Label("고급 번역 · Opus 5.5 (약 " + Usage.money(ClaudeAPI.Engine.premium.estimatedPageCost) + ")",
                               systemImage: "sparkles")
                     }
+                    if page.answer != nil {
+                        Button { Task { await translator.repaint(book: bookID, page: page.id) } } label: {
+                            Label("다시 그리기 · 무료(번역 그대로)", systemImage: "paintbrush")
+                        }
+                    }
                     Button { Task { await save(page) } } label: { Label("사진 앱에 저장", systemImage: "square.and.arrow.down") }
                     Button { shareURL = imageURL(page) } label: { Label("공유", systemImage: "square.and.arrow.up") }
                 } label: {

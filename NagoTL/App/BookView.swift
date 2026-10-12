@@ -70,8 +70,13 @@ struct BookView: View {
                     Menu {
                         Button { Task { await saveAllToPhotos(pages) } } label: { Label("사진 앱에 모두 저장", systemImage: "square.and.arrow.down") }
                         Button { Task { await exportCBZ(book, pages) } } label: { Label("CBZ로 내보내기", systemImage: "doc.zipper") }
+                        Divider()
+                        Button { Task { await translator.repaintAll(book: bookID) } } label: {
+                            Label("모두 다시 그리기 · 무료(번역 그대로)", systemImage: "paintbrush")
+                        }
+                        .disabled(done == 0 || left > 0)
                     } label: {
-                        Label("내보내기", systemImage: "square.and.arrow.up")
+                        Label("더보기", systemImage: "ellipsis.circle")
                     }
                     .buttonStyle(.term)
                     PhotosPicker(selection: $picked, maxSelectionCount: 500, matching: .images, photoLibrary: .shared()) {

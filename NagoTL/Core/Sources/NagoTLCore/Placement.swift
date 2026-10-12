@@ -28,6 +28,10 @@ public struct PlacedText: Sendable, Codable, Equatable {
 extension Typesetter {
     /// 덩어리 하나의 번역을 어떤 크기·색·굵기로 어디에 쓸지 정한다
     public static func place(_ text: String, for r: Refined, kind: BlockKind, metrics: GlyphMetrics) -> PlacedText {
+        // 원문 그대로 두는 덩어리는 아무것도 그리지 않는다
+        if r.mode == .keep {
+            return PlacedText(layout: TextLayout(fontSize: 0, lineHeight: 0, lines: [], overflow: false), color: r.ink, weight: 400)
+        }
         let (hi, lo) = sizeRange(r)
         let layout = Typesetter.layout(text, shape: r.shape, maxSize: hi, minSize: lo, metrics: metrics)
         switch r.mode {
@@ -38,10 +42,8 @@ extension Typesetter {
                               outline: layout.overflow ? r.background : nil, outlineWidth: layout.overflow ? 0.16 : 0)
         case .label:
             return PlacedText(layout: layout, color: r.ink, weight: 700)
-        case .overlay:
-            // 효과음: 그림은 두고, 번역은 반투명 흰 판 위에 작게(원문이 비쳐 보인다)
-            return PlacedText(layout: layout, color: RGBA(20, 20, 20), weight: 800,
-                              outline: nil, outlineWidth: 0, plate: .white, plateAlpha: 0.84)
+        case .keep:
+            return PlacedText(layout: TextLayout(fontSize: 0, lineHeight: 0, lines: [], overflow: false), color: r.ink, weight: 400)
         case .art:
             // 그림 위 글자: 원문이 세로이고 세로가 더 크게 들어가면 한글도 세로로
             var chosen = layout
@@ -66,8 +68,8 @@ extension Typesetter {
             return (r.glyphSize * 1.15, max(9, r.glyphSize * 0.45))
         case .label:
             return (r.glyphSize * 0.85, 9)
-        case .overlay:
-            return (max(12, r.glyphSize * 0.5), 10)
+        case .keep:
+            return (10, 9)
         case .art:
             return (max(10, r.glyphSize * 1.1), max(9, r.glyphSize * 0.45))
         }

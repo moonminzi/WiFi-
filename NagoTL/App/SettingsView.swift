@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var check: (ok: Bool, text: String)?
     @AppStorage(Budget.limitKey) private var budget = 5.0
     @AppStorage(Budget.spentKey) private var spent = 0.0
+    @AppStorage(Pipeline.sfxKey) private var translateSFX = true
     @State private var budgetText = ""
     @State private var confirmReset = false
 
@@ -73,6 +74,17 @@ struct SettingsView: View {
                     .buttonStyle(.term)
             }
 
+            TermBlock(label: "sfx") {
+                TermChoice(options: [(label: "같은 모양으로 번역", value: true), (label: "원문 그대로", value: false)],
+                           selection: $translateSFX)
+                Text("효과음·추임새(ニヤニヤ♥, ガタッ 같은 것)를 원래 색·테두리·세로쓰기 그대로 한글로 바꿔요. 깔끔하게 바꿀 자신이 없으면 그건 원문 그대로 둬요. '원문 그대로'면 늘 손대지 않아요. 어느 쪽이든 그 자리를 누르면 번역을 볼 수 있어요.")
+                    .font(Term.mono(11.5))
+                    .foregroundStyle(Term.muted)
+                Text("이미 번역한 쪽은 책 화면 더보기 → 모두 다시 그리기(무료, 다시 번역하지 않음)로 바뀐 설정·새 그리기 방식을 적용해요.")
+                    .font(Term.mono(11.5))
+                    .foregroundStyle(Term.muted)
+            }
+
             TermBlock(label: "engine") {
                 line("기본", "Claude Haiku 5.5 — 한 쪽에 약 0.3센트")
                 line("고급", "Claude Opus 5.5 — 한 쪽에 약 12센트, 뷰어 ⋯ 메뉴에서 그 쪽만")
@@ -80,7 +92,7 @@ struct SettingsView: View {
                 line("translate", "앞 쪽 줄거리·용어집을 기억하며 자연스러운 한국어로")
                 line("letter", "말풍선 모양을 찾아 원문만 지우고 한글을 모양대로 앉힘")
                 line("art", "말풍선 없이 그림 위에 쓴 글자는 글자·테두리 색만 골라 지우고 그림을 이어 그린 뒤, 같은 색·세로쓰기로")
-                line("photo", "사진 위 글자는 둘레 색으로 덮고 그 자리에")
+                line("photo", "사진 위 글자는 둘레 색으로 덮고 그 자리에(그림·사진 결이면 둘레 조각으로 메움)")
                 TermDivider()
                 line("books", library.totalUsage.costText + " (지금 서재에 있는 책들)")
             }
