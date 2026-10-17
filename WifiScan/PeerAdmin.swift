@@ -120,6 +120,7 @@ struct PeerConfigSheet: View {
                 .font(Term.mono(12.5))
             }
             .padding(16)
+            .termColumn()
         }
         .background(Term.bg.ignoresSafeArea())
         .foregroundStyle(Term.text)
