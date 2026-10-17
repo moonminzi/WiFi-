@@ -256,6 +256,7 @@ struct LogsView: View {
                 }
             }
             .padding(16)
+            .termColumn()
         }
         .background(Term.bg.ignoresSafeArea())
         .foregroundStyle(Term.text)

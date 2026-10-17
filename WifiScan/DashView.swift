@@ -99,6 +99,7 @@ struct DashView: View {
                 terminal
             }
             .padding(16)
+            .termColumn()
         }
         .refreshable { await load() }
         .task {

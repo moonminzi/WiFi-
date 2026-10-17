@@ -49,6 +49,13 @@ extension Color {
 
 // MARK: - 화면 틀
 
+extension View {
+    /// 아이패드처럼 넓은 화면에서는 가운데 한 줄(최대 680pt)로 모은다. 아이폰에선 그대로.
+    func termColumn() -> some View {
+        frame(maxWidth: 680).frame(maxWidth: .infinity)
+    }
+}
+
 /// `~/vpn $▌` 머리줄이 붙은 스크롤 화면
 struct TermPage<Content: View>: View {
     let path: String
@@ -69,6 +76,7 @@ struct TermPage<Content: View>: View {
                 content
             }
             .padding(16)
+            .termColumn()
         }
         .scrollDismissesKeyboard(.interactively)
         .background(Term.bg.ignoresSafeArea())

@@ -23,9 +23,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan   # ← 본인 것으로 변경
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "1.7.2"
-        CURRENT_PROJECT_VERSION: "11"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "1.8"
+        CURRENT_PROJECT_VERSION: "12"
     dependencies:
       - target: WifiScanTunnel
     entitlements:
@@ -46,6 +46,12 @@ targets:
           - JetBrainsMono-Bold.ttf
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        # 아이패드: 네 방향 모두(멀티태스킹/Split View 조건)
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
 
   # WireGuard 터널 확장. 앱의 PlugIns에 들어간다.
   WifiScanTunnel:
@@ -58,13 +64,13 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan.tunnel   # 앱 번들 ID + .tunnel
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
         # NepTUN 엔진(NagoTun, Rust 정적 라이브러리)
         SWIFT_OBJC_BRIDGING_HEADER: WifiScanTunnel/WifiScanTunnel-Bridging-Header.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/NagoTun/include
         OTHER_LDFLAGS: -lnago_tun -framework Security -framework Foundation -lobjc -liconv -lresolv
-        MARKETING_VERSION: "1.7.2"
-        CURRENT_PROJECT_VERSION: "11"
+        MARKETING_VERSION: "1.8"
+        CURRENT_PROJECT_VERSION: "12"
     dependencies:
       - target: WireGuardGoBridgeiOS
       - target: NagoTunRust
