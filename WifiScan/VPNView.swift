@@ -187,6 +187,8 @@ struct VPNView: View {
             fail("password required → settings")
             return
         }
+        // 지난번에 못 붙은 킬 스위치 설정이 남아 있으면 아래 서버 확인 요청부터 막힌다.
+        await vpn.releaseKillSwitch()
         do {
             step("\(region.rawValue): checking server…")
             let target = try await resolveTarget(key: key)

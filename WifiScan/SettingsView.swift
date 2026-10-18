@@ -65,6 +65,10 @@ struct SettingsView: View {
         .onChange(of: forcedWG) { _, forced in
             if forced { proto = .wireguard }
         }
+        .onChange(of: killSwitch) { _, on in
+            // 끄면 저장된 설정에도 바로 반영한다(다음 연결까지 기다리면 그동안 통신이 계속 막힐 수 있다).
+            if !on { Task { await vpn.releaseKillSwitch() } }
+        }
         .onChange(of: needsOurTunnel) { _, needed in
             if needed, !proto.usesTunnel { proto = .wireguard }
         }
