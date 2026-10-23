@@ -70,7 +70,7 @@ iOS 내장 Personal VPN(NEVPNManager)이 그대로 쓸 수 있도록 **strongSwa
 
 컴퓨터 없이 아이패드 Safari만으로 IPA를 서명해서 설치한다. 대시보드처럼 토큰이 붙은 주소로 연다.
 
-- 페이지(`GET /?t=<TOKEN>`): 인증서·프로파일 요약(팀, ad-hoc/기기 수, 만료일, 앱 ID), 이 레포의 최근 릴리스 IPA(`build-N`, `nagodl-N`),
+- 페이지(`GET /?t=<TOKEN>`): 인증서·프로파일 요약(팀, ad-hoc/기기 수, 만료일, 앱 ID — 여러 개면 골라서 서명), 이 레포의 최근 릴리스 IPA(`build-N`, `nagodl-N`),
   IPA 주소 붙여 넣기, 파일 올리기(브라우저 → S3 직접, 6MB 제한 없음). `sign`을 누르면 몇 초 뒤 **설치** 버튼(itms-services)이 생긴다
 - 서명: `rcodesign`(apple-codesign, musl 정적 빌드 — `tools/build-rcodesign-lambda.sh`)을 Lambda 패키지 `bin/`에 같이 넣어 부른다.
   앱이 원래 요청한 엔타이틀먼트 중 프로파일이 허락하는 것만 남기고, 앱 ID·팀·키체인 그룹은 프로파일에 맞춘다. 확장(PlugIns 등)도 같이 서명
@@ -80,10 +80,10 @@ iOS 내장 Personal VPN(NEVPNManager)이 그대로 쓸 수 있도록 **strongSwa
 
 | 리소스 (ap-northeast-2) | 내용 |
 |---|---|
-| Lambda `nago-sign` | python3.12 x86_64, 메모리 2048MB, 제한 10분, /tmp 4GB. 환경변수 `TOKEN`, `BUCKET`, `SECRET_ID`, `GH_REPO`, `LINK_TTL` |
+| Lambda `nago-sign` | python3.12 x86_64, 메모리 2048MB, 제한 10분, /tmp 4GB. 환경변수 `TOKEN`, `BUCKET`, `SECRET_ID`(쉼표로 여러 개), `GH_REPO`, `LINK_TTL` |
 | 함수 URL | 인증 없음(토큰은 코드가 확인), `InvokeFunctionUrl`·`InvokeFunction`(함수 URL 경유) 공개 허용 |
-| Secrets Manager `nago/sign/cert` | `{"p12": base64, "password": "…", "profile": base64}` — 레포에 넣지 않는다 |
-| IAM 역할 `nago-sign` | 로그, 버킷 `uploads/*`·`signed/*` 읽기/쓰기, 위 시크릿 읽기 |
+| Secrets Manager `nago/sign/cert`, `nago/sign/cert-2` | 인증서마다 하나씩 `{"p12": base64, "password": "…", "profile": base64}` — 레포에 넣지 않는다 |
+| IAM 역할 `nago-sign` | 로그, 버킷 `uploads/*`·`signed/*` 읽기/쓰기, 위 시크릿들 읽기 |
 | S3 `nago-ota-<계정>-apne2` | 퍼블릭 액세스 전부 차단, 하루 뒤 삭제 규칙, 함수 URL에서 PUT 허용(CORS) |
 
 코드 갱신:
@@ -96,6 +96,7 @@ aws lambda update-function-code --region ap-northeast-2 --function-name nago-sig
 ```
 
 인증서를 바꾸면 시크릿 값만 바꾸면 된다(`aws secretsmanager put-secret-value --secret-id nago/sign/cert --secret-string file://cert.json`).
+인증서를 더 넣으려면 시크릿을 새로 만들고(`nago/sign/cert-3` …) IAM 역할에 그 ARN 읽기를 더한 뒤 `SECRET_ID`에 쉼표로 붙인다(앞쪽이 기본 선택).
 토큰을 바꾸려면 Lambda 환경변수 `TOKEN`.
 
 ## 처음부터 다시 세우기

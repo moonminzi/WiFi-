@@ -5,9 +5,11 @@ POST /api/upload  {name}               → S3에 바로 올릴 PUT 주소(파일
 POST /api/sign    {source, bundle}     → 서명하고 {install, ipa, title, version, bundle_id, expires}
      source: "release:<tag>" | "url:<https://….ipa>" | "upload:<S3 키>"
      bundle: "profile"(기본, 프로파일의 앱 ID로 바꿈) | "keep"(원래 번들 ID 유지)
+     cert:   SECRET_ID 목록의 번호(기본 0)
 POST 요청은 헤더 x-nago-token: <TOKEN>.
 
 인증서는 Secrets Manager(SECRET_ID)에 JSON으로 둔다: {"p12": base64, "password": "…", "profile": base64}
+SECRET_ID에 쉼표로 여러 개를 적으면 페이지에서 고른다(POST /api/sign의 cert: 0부터 세는 번호, 기본 0).
 서명은 rcodesign(apple-codesign, musl 정적 빌드)을 bin/에 같이 넣어 부른다(tools/build-rcodesign-lambda.sh).
 서명본과 올린 파일은 BUCKET의 signed/, uploads/에 두고, 버킷 수명 주기 규칙이 하루 뒤 지운다.
 
@@ -36,7 +38,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RCODESIGN = os.environ.get("RCODESIGN", os.path.join(HERE, "bin", "rcodesign"))
 TOKEN = os.environ.get("TOKEN", "")
 BUCKET = os.environ.get("BUCKET", "")
-SECRET_ID = os.environ.get("SECRET_ID", "nago/sign/cert")
+SECRET_IDS = [s.strip() for s in os.environ.get("SECRET_ID", "nago/sign/cert").split(",") if s.strip()]
 GH_REPO = os.environ.get("GH_REPO", "moonminzi/WiFi-")
 LINK_TTL = int(os.environ.get("LINK_TTL", "3600"))
 REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
@@ -91,13 +93,16 @@ class Identity:
                 "expires": self.expires.strftime("%Y-%m-%d") if self.expires else "", "days_left": days}
 
 
-def identity():
-    if "identity" not in _cache:
+def identity(index=0):
+    if not 0 <= index < len(SECRET_IDS):
+        raise Failure("unknown cert: %d" % index)
+    key = "identity:" + SECRET_IDS[index]
+    if key not in _cache:
         import boto3
-        raw = boto3.client("secretsmanager", region_name=REGION).get_secret_value(SecretId=SECRET_ID)["SecretString"]
+        raw = boto3.client("secretsmanager", region_name=REGION).get_secret_value(SecretId=SECRET_IDS[index])["SecretString"]
         s = json.loads(raw)
-        _cache["identity"] = Identity(base64.b64decode(s["p12"]), s["password"], base64.b64decode(s["profile"]))
-    return _cache["identity"]
+        _cache[key] = Identity(base64.b64decode(s["p12"]), s["password"], base64.b64decode(s["profile"]))
+    return _cache[key]
 
 
 # MARK: - 엔타이틀먼트
@@ -433,15 +438,20 @@ def api_upload(body):
 def api_sign(body):
     source = body.get("source") or ""
     mode = "keep" if body.get("bundle") == "keep" else "profile"
+    try:
+        cert = int(body.get("cert") or 0)
+    except (TypeError, ValueError):
+        raise Failure("bad cert")
+    ident = identity(cert)
     job = os.path.join(TMP, "job-" + uuid.uuid4().hex[:8])
     os.makedirs(job)
     try:
         src, out = os.path.join(job, "in.ipa"), os.path.join(job, "out.ipa")
         t0 = time.time()
         size = fetch(source, src)
-        meta = sign_ipa(src, out, identity(), mode, log=lambda m: print(m))
+        meta = sign_ipa(src, out, ident, mode, log=lambda m: print(m))
         result = publish(out, meta)
-        result.update(source=source, size=size, seconds=round(time.time() - t0, 1))
+        result.update(source=source, cert=cert, size=size, seconds=round(time.time() - t0, 1))
         return result
     finally:
         shutil.rmtree(job, ignore_errors=True)
@@ -472,29 +482,41 @@ def handler(event, context):
 
 # MARK: - 페이지
 
-def render():
+def _usable(index):
     try:
-        who = identity().summary()
-        who_err = ""
-    except Exception as e:
-        who, who_err = None, str(e)
+        identity(index)
+        return True
+    except Exception:
+        return False
+
+
+def render():
     try:
         rels, rel_err = releases(), ""
     except Exception as e:
         rels, rel_err = [], str(e)
     esc = html.escape
-    if who:
+    certs = []
+    for i in range(len(SECRET_IDS)):
+        # 첫 번째로 쓸 수 있는 인증서를 기본 선택
+        pick = ' checked' if i == next((j for j in range(len(SECRET_IDS)) if _usable(j)), 0) else ''
+        try:
+            who = identity(i).summary()
+        except Exception as e:
+            certs.append('<label class="cert"><input type="radio" name="cert" value="%d" disabled> '
+                         '<span class="err">✗ %s</span> <span class="dim">%s</span></label>' % (i, esc(SECRET_IDS[i]), esc(str(e)[:200])))
+            continue
         dev = who["devices"]
         days = who["days_left"]
-        cert = ('<div class="row"><span class="ok">[ OK ]</span> %s <span class="dim">(%s)</span></div>'
-                '<div class="row dim">%s · %s · expires %s%s</div>'
-                '<div class="row dim">app id <span class="key">%s</span></div>') % (
-            esc(who["team"]), esc(who["team_id"]), esc(who["kind"]),
+        certs.append(('<label class="cert"><input type="radio" name="cert" value="%d"%s> <span>'
+                      '<span class="ok">[ OK ]</span> %s <span class="dim">(%s)</span><br>'
+                      '<span class="dim">%s · %s · expires %s%s</span><br>'
+                      '<span class="dim">app id <span class="key">%s</span></span></span></label>') % (
+            i, pick, esc(who["team"]), esc(who["team_id"]), esc(who["kind"]),
             ("%d device" % len(dev) + ("s" if len(dev) != 1 else "") + (" (" + esc(dev[0][-8:]) + ")" if len(dev) == 1 else ""))
             if dev else "all devices",
-            esc(who["expires"]), (" (%dd left)" % days) if days is not None else "", esc(who["app_id"]))
-    else:
-        cert = '<div class="row err">✗ %s</div>' % esc(who_err)
+            esc(who["expires"]), (" (%dd left)" % days) if days is not None else "", esc(who["app_id"])))
+    cert = "".join(certs)
     rows = []
     for r in rels[:8]:
         size = (" · %.1fMB" % (r["size"] / 1048576)) if r["size"] else ""
@@ -535,6 +557,8 @@ button:disabled{opacity:.35;cursor:default}
 input[type=url]{width:100%;font:13px "JetBrains Mono",ui-monospace,monospace;color:var(--fg);background:var(--bg);border:1px solid var(--edge);border-radius:6px;padding:8px}
 .line{display:flex;gap:8px}.line input{flex:1;min-width:0}
 .opts label{margin-right:14px;white-space:nowrap}
+.cert{display:flex;gap:10px;align-items:flex-start;cursor:pointer;overflow-wrap:anywhere}.cert input{margin-top:5px}
+.cert+.cert{border-top:1px solid var(--edge);padding-top:10px}
 #log{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
 @media (prefers-reduced-motion:reduce){.cur{animation:none}}
 </style></head><body><main>
@@ -577,7 +601,8 @@ async function sign(source) {
   const tick = setInterval(() => log("> " + source + "\\n> downloading · signing… " + Math.round((Date.now() - t0) / 1000) + "s", "dim"), 500);
   try {
     const bundle = document.querySelector("input[name=bundle]:checked").value;
-    const j = await api("/api/sign", { source, bundle });
+    const pick = document.querySelector("input[name=cert]:checked");
+    const j = await api("/api/sign", { source, bundle, cert: pick ? Number(pick.value) : 0 });
     clearInterval(tick);
     log("[ OK ] " + j.title + " " + j.version + " (" + j.build + ")\\n" + j.bundle_id + " · " + j.seconds + "s\\n// 설치 링크는 {{TTL}}분 동안 유효", "ok");
     const a = document.createElement("a"); a.className = "btn primary"; a.href = j.install; a.textContent = "설치";
