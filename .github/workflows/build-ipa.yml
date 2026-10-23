@@ -59,6 +59,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="build-${GITHUB_RUN_NUMBER}"
+          # 제목에 앱 이름·버전을 붙인다(예: NAGO VPN 1.9 (15) · build-47). 정리 기준은 tidy-releases.yml과 같다
+          plist=Payload/WifiScan.app/Info.plist
+          name=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$plist" 2>/dev/null || /usr/libexec/PlistBuddy -c "Print :CFBundleName" "$plist")
+          ver=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$plist")
+          build=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$plist")
           gh release create "$tag" WifiScan.ipa \
-            --title "WifiScan ${tag}" \
+            --title "${name} ${ver} (${build}) · ${tag}" \
             --notes "서명 안 된 IPA입니다(entitlements 포함 ad-hoc 서명). 본인 인증서로 재서명 후 설치하세요."
