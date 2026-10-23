@@ -64,6 +64,39 @@ iOS 내장 Personal VPN(NEVPNManager)이 그대로 쓸 수 있도록 **strongSwa
 | `setup-strongswan.sh` | Ubuntu 서버에서 strongSwan을 처음부터 구성하는 스크립트 |
 | `setup-region.sh` | 국가 선택용 해외 서버(FQDN ID, 가속 포함)를 구성하는 스크립트 |
 | `cloudformation.yaml` | EIP·보안그룹·IAM·EC2까지 한 번에 세우는 IaC 템플릿 |
+| `signer/index.py` | NAGO signer Lambda — IPA를 내 인증서로 서명해서 Safari에서 바로 설치(아래) |
+
+## NAGO signer (IPA 서명 → 바로 설치)
+
+컴퓨터 없이 아이패드 Safari만으로 IPA를 서명해서 설치한다. 대시보드처럼 토큰이 붙은 주소로 연다.
+
+- 페이지(`GET /?t=<TOKEN>`): 인증서·프로파일 요약(팀, ad-hoc/기기 수, 만료일, 앱 ID), 이 레포의 최근 릴리스 IPA(`build-N`, `nagodl-N`),
+  IPA 주소 붙여 넣기, 파일 올리기(브라우저 → S3 직접, 6MB 제한 없음). `sign`을 누르면 몇 초 뒤 **설치** 버튼(itms-services)이 생긴다
+- 서명: `rcodesign`(apple-codesign, musl 정적 빌드 — `tools/build-rcodesign-lambda.sh`)을 Lambda 패키지 `bin/`에 같이 넣어 부른다.
+  앱이 원래 요청한 엔타이틀먼트 중 프로파일이 허락하는 것만 남기고, 앱 ID·팀·키체인 그룹은 프로파일에 맞춘다. 확장(PlugIns 등)도 같이 서명
+- 번들 ID: `profile`(기본) — 프로파일의 앱 ID로 바꾼다. 확장은 `<앱 ID>.<원래 끝 이름>`. 프로파일이 앱 ID 하나라 다른 앱을 이 모드로 깔면 덮어쓴다.
+  `keep` — 원래 ID 그대로(여러 앱을 같이 둘 때). NAGO VPN은 터널 확장 ID를 실행 중에 읽어서 어느 쪽이든 동작한다
+- 링크는 1시간(`LINK_TTL`) 유효. 서명본(`signed/`)·올린 파일(`uploads/`)은 버킷 수명 주기 규칙으로 하루 뒤 지워진다
+
+| 리소스 (ap-northeast-2) | 내용 |
+|---|---|
+| Lambda `nago-sign` | python3.12 x86_64, 메모리 2048MB, 제한 10분, /tmp 4GB. 환경변수 `TOKEN`, `BUCKET`, `SECRET_ID`, `GH_REPO`, `LINK_TTL` |
+| 함수 URL | 인증 없음(토큰은 코드가 확인), `InvokeFunctionUrl`·`InvokeFunction`(함수 URL 경유) 공개 허용 |
+| Secrets Manager `nago/sign/cert` | `{"p12": base64, "password": "…", "profile": base64}` — 레포에 넣지 않는다 |
+| IAM 역할 `nago-sign` | 로그, 버킷 `uploads/*`·`signed/*` 읽기/쓰기, 위 시크릿 읽기 |
+| S3 `nago-ota-<계정>-apne2` | 퍼블릭 액세스 전부 차단, 하루 뒤 삭제 규칙, 함수 URL에서 PUT 허용(CORS) |
+
+코드 갱신:
+
+```bash
+tools/build-rcodesign-lambda.sh build/rcodesign
+mkdir -p build/signer/bin && cp server/signer/index.py build/signer/ && cp build/rcodesign/bin/rcodesign build/signer/bin/
+(cd build/signer && zip -qr ../nago-sign.zip index.py bin)
+aws lambda update-function-code --region ap-northeast-2 --function-name nago-sign --zip-file fileb://build/nago-sign.zip
+```
+
+인증서를 바꾸면 시크릿 값만 바꾸면 된다(`aws secretsmanager put-secret-value --secret-id nago/sign/cert --secret-string file://cert.json`).
+토큰을 바꾸려면 Lambda 환경변수 `TOKEN`.
 
 ## 처음부터 다시 세우기
 
