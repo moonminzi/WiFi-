@@ -1,0 +1,86 @@
+name: NagoDL
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  # 분할 다운로드·HLS·MP4 엔진(UI 없음, 리눅스/맥에서 swift test)
+  NagoDLCore:
+    path: Core
+settings:
+  base:
+    DEVELOPMENT_TEAM: ""          # ← 본인 Team ID
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+targets:
+  NagoDL:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      # NAGO VPN과 같은 터미널 테마·글꼴(JetBrains Mono, SIL OFL 1.1)
+      - path: ../WifiScan/Theme.swift
+      - path: ../WifiScan/Fonts
+    scheme: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.nagodl   # ← 본인 것으로 변경
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+    dependencies:
+      - package: NagoDLCore
+      - target: NagoDLShare
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: NAGO DL
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UIAppFonts:
+          - JetBrainsMono-Regular.ttf
+          - JetBrainsMono-SemiBold.ttf
+          - JetBrainsMono-Bold.ttf
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # 받은 파일이 파일 앱(나의 iPhone → NAGO DL)에 보인다
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        # 공유 확장·단축어가 nagodl://add?url=… 로 연다
+        CFBundleURLTypes:
+          - CFBundleURLName: nagodl
+            CFBundleURLSchemes: [nagodl]
+        NSPhotoLibraryAddUsageDescription: 받은 동영상과 사진을 사진 앱에 저장할 때 써요
+        # http 파일 서버·사이트도 받을 수 있어야 한다
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        ITSAppUsesNonExemptEncryption: false
+
+  # 공유 메뉴 → NAGO DL
+  NagoDLShare:
+    type: app-extension
+    platform: iOS
+    sources: [Share]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.nagodl.share   # 앱 번들 ID + .share
+        TARGETED_DEVICE_FAMILY: "1"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+    info:
+      path: Share/Info.plist
+      properties:
+        CFBundleDisplayName: NAGO DL
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+              NSExtensionActivationSupportsText: true
