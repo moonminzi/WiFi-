@@ -27,6 +27,7 @@ struct VPNView: View {
 
     var body: some View {
         TermPage(path: "vpn") {
+            routeBlock
             statusBlock
             exitBlock
             connectButton
@@ -64,6 +65,24 @@ struct VPNView: View {
         if killSwitch { parts.append("kill-switch") }
         if autoConnect != .off { parts.append("auto:\(autoConnect.label)") }
         return parts.joined(separator: " · ")
+    }
+
+    // MARK: - 경로 지도
+
+    /// you → 나갈 국가. 진행 단계(phase)가 바뀔 때마다 경로에 웨이포인트가 하나씩 찍힌다.
+    private var routeBlock: some View {
+        TermBlock(label: "route", inset: 0) {
+            RouteMap(destination: vpn.status.isActive && !busy ? savedRegion : region,
+                     stage: routeStage,
+                     hop: phase ?? (vpn.status.isBusy ? statusText : nil))
+        }
+    }
+
+    private var routeStage: RouteMap.Stage {
+        if effectiveProto == .unicorn || (vpn.status.isActive && vpn.activeProto == .unicorn) { return .onDevice }
+        if busy || vpn.status == .connecting || vpn.status == .reasserting { return .connecting }
+        if vpn.status == .connected { return .connected }
+        return errorText != nil ? .failed : .idle
     }
 
     // MARK: - 상태
@@ -187,6 +206,8 @@ struct VPNView: View {
             fail("password required → settings")
             return
         }
+        // 지난번에 못 붙은 킬 스위치 설정이 남아 있으면 아래 서버 확인 요청부터 막힌다.
+        await vpn.releaseKillSwitch()
         do {
             step("\(region.rawValue): checking server…")
             let target = try await resolveTarget(key: key)

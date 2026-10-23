@@ -189,6 +189,30 @@ final class VPNManager {
         tunnel?.connection.stopVPNTunnel()
     }
 
+    /// 킬 스위치(includeAllNetworks)가 걸린 wg 설정이 붙지 못한 채 남아 있으면 앱 자신의 통신까지 막힌다.
+    /// 앱은 연결 전에 서버 확인·키 등록을 직접 해야 해서, 그 상태로는 "checking server"에서 넘어가지 못한다.
+    /// 그래서 새로 연결하기 전과 킬 스위치를 끌 때 저장된 설정에서 킬 스위치와 자동 연결을 내린다.
+    /// 킬 스위치가 켜져 있으면 연결할 때 saveWireGuard가 다시 건다.
+    func releaseKillSwitch() async {
+        guard let saved = try? await NETunnelProviderManager.loadAllFromPreferences().first,
+              let proto = saved.protocolConfiguration as? NETunnelProviderProtocol,
+              proto.includeAllNetworks, saved.connection.status != .connected else { return }
+        saved.connection.stopVPNTunnel()
+        proto.includeAllNetworks = false
+        proto.excludeLocalNetworks = false
+        saved.protocolConfiguration = proto
+        saved.isOnDemandEnabled = false
+        do {
+            try await saved.saveToPreferences()
+            try await saved.loadFromPreferences()
+            NagoLog.add("kill-switch released (tunnel was down)")
+        } catch {
+            NagoLog.add("✗ kill-switch release: \(error.localizedDescription)")
+        }
+        tunnel = saved
+        refreshStatus()
+    }
+
     // MARK: WireGuard
 
     /// 앱에 들어 있는 터널 확장의 번들 ID(재서명하면서 바뀌어도 실제 값을 읽는다)

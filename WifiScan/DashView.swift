@@ -101,6 +101,7 @@ struct DashView: View {
                 terminal
             }
             .padding(16)
+            .termColumn()
         }
         .refreshable { await load() }
         .task {
@@ -113,33 +114,6 @@ struct DashView: View {
         .background(Term.bg.ignoresSafeArea())
         .foregroundStyle(Term.text)
         .tint(Term.green)
-        .confirmationDialog(
-            managedNode.map { "\($0.code) · \($0.city) · \($0.state)" } ?? "",
-            isPresented: present($managedNode), titleVisibility: .visible, presenting: managedNode
-        ) { node in
-            if node.state == "stopped" {
-                Button("start") { nodeOp("start", node) }
-            } else if node.state == "running" {
-                Button("reset idle (\(node.idle ?? 0)m)") { nodeOp("wake", node) }
-                Button("reboot") { nodeOp("reboot", node) }
-                Button("stop", role: .destructive) { nodeOp("stop", node) }
-            }
-        }
-        .confirmationDialog(
-            managedPeer.map(peerTitle) ?? "",
-            isPresented: present($managedPeer), titleVisibility: .visible, presenting: managedPeer
-        ) { peer in
-            Button(peer.adblock == true ? "adblock off" : "adblock on") {
-                run("flags", peer, extra: ["adblock": peer.adblock == true ? "0" : "1"])
-            }
-            Button("kick 60s") { run("kick", peer, extra: ["seconds": "60"]) }
-            Button("reset usage") { run("reset", peer) }
-            Button("rename") {
-                nameInput = peer.name ?? ""
-                renamePeer = peer
-            }
-            Button("remove…", role: .destructive) { removePeer = peer }
-        }
         .alert("new peer", isPresented: $showAdd) {
             TextField("name", text: $nameInput)
             Button("add") { addPeer() }
@@ -167,6 +141,42 @@ struct DashView: View {
 
     private func present<T>(_ value: Binding<T?>) -> Binding<Bool> {
         Binding(get: { value.wrappedValue != nil }, set: { if !$0 { value.wrappedValue = nil } })
+    }
+
+    // 관리 메뉴는 누른 줄에 붙인다. 아이패드에서는 메뉴가 붙은 뷰를 가리키는 말풍선으로 뜨는데,
+    // 화면 전체(ScrollView)에 붙이면 가리킬 곳이 없어 화면 밖으로 잘렸다. 아이폰은 그대로 아래에서 올라온다.
+
+    private func managing(_ node: DashData.Node) -> Binding<Bool> {
+        Binding(get: { managedNode?.code == node.code }, set: { if !$0 { managedNode = nil } })
+    }
+
+    private func managing(_ peer: DashData.Peer) -> Binding<Bool> {
+        Binding(get: { managedPeer?.n == peer.n }, set: { if !$0 { managedPeer = nil } })
+    }
+
+    @ViewBuilder
+    private func nodeActions(_ node: DashData.Node) -> some View {
+        if node.state == "stopped" {
+            Button("start") { nodeOp("start", node) }
+        } else if node.state == "running" {
+            Button("reset idle (\(node.idle ?? 0)m)") { nodeOp("wake", node) }
+            Button("reboot") { nodeOp("reboot", node) }
+            Button("stop", role: .destructive) { nodeOp("stop", node) }
+        }
+    }
+
+    @ViewBuilder
+    private func peerActions(_ peer: DashData.Peer) -> some View {
+        Button(peer.adblock == true ? "adblock off" : "adblock on") {
+            run("flags", peer, extra: ["adblock": peer.adblock == true ? "0" : "1"])
+        }
+        Button("kick 60s") { run("kick", peer, extra: ["seconds": "60"]) }
+        Button("reset usage") { run("reset", peer) }
+        Button("rename") {
+            nameInput = peer.name ?? ""
+            renamePeer = peer
+        }
+        Button("remove…", role: .destructive) { removePeer = peer }
     }
 
     // MARK: 피어 관리 동작
@@ -286,6 +296,10 @@ struct DashView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(busy)
+                        .confirmationDialog("\(node.code) · \(node.city) · \(node.state)",
+                                            isPresented: managing(node), titleVisibility: .visible) {
+                            nodeActions(node)
+                        }
                     }
                 }
                 gap
@@ -299,6 +313,9 @@ struct DashView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(busy)
+                        .confirmationDialog(peerTitle(peer), isPresented: managing(peer), titleVisibility: .visible) {
+                            peerActions(peer)
+                        }
                     }
                     gap
                     Button {

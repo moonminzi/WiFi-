@@ -2,7 +2,7 @@
 
 > 같은 저장소에 다운로드 매니저 **NAGO DL**(따로 설치하는 IPA)도 있다 → [`NagoDL/README.md`](NagoDL/README.md)
 >
-> 망가·사진 번역기 **NAGO TL**(따로 설치하는 IPA)도 있다 → [`NagoTL/README.md`](NagoTL/README.md)
+> 망가·사진 번역기 **NAGO TL**(따로 설치하는 IPA)은 [moonminzi/TL](https://github.com/moonminzi/TL) 레포로 옮겼다
 
 앱 이름은 **NAGO VPN**. 탭 두 개짜리 앱입니다. 화면은 대시보드 사이트와 같은 터미널 스타일(초록빛 다크 팔레트, JetBrains Mono, `~/vpn $▌` 머리줄)이고 아이콘은 `>_`.
 
@@ -14,6 +14,11 @@
 - iOS 내장 Personal VPN(`NEVPNManager`)으로 **IKEv2 + EAP-MSCHAPv2** 연결 — 별도 확장/라이브러리 없음
 - 서버는 AWS EC2의 **strongSwan**. 구축·재현 방법과 접속 안내는 [`server/README.md`](server/README.md) 참고
 - **국가 선택**: 🇰🇷 서울 · 🇯🇵 도쿄 · 🇺🇸 오리건 · 🇬🇧 런던. 연결을 누르면 API(`VPNRegion.swift`)가 그 나라 서버를 켜고(꺼져 있으면 1~2분) 지금 IP를 받아 접속한다. 서버는 거의 안 쓰면 알아서 꺼진다(서울 3시간, 해외 30분)
+- **route 지도**(1.9): 점으로 찍은 세계 지도 위에 `you → 나갈 국가` 경로. 국가를 고르면 카메라가 그쪽으로 날아가고,
+  연결 중에는 진행 단계(`checking server` → `booting` → `wg register` …)가 바뀔 때마다 웨이포인트가 찍히며 블록 커서가 경로를 따라간다.
+  연결되면 그 나라로 확대되고 나라 점이 초록으로 켜진다. 실패하면 커서가 빨갛게 멈췄다가 사라진다
+  - `you`는 위치 권한 없이 기기 시간대의 도시로 어림한다(모르는 시간대면 서울). 서울에서 kr처럼 같은 도시면 경로 대신 고리
+  - 지도는 Natural Earth 1:50m(퍼블릭 도메인)를 메르카토르 0.5° 격자로 찍은 `WifiScan/WorldDotsData.swift`. 다시 만들려면 `tools/worldgrid.py`
 - 자체 서명 CA라서 최초 1회 `server/WifiScanVPN.mobileconfig` 설치 + 인증서 신뢰가 필요
   (설정 → 일반 → 정보 → 인증서 신뢰 설정)
 - 비밀번호는 기기 **키체인**에만 저장(소스/저장소에 없음)
@@ -80,6 +85,7 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
 - **account / protocol / --fast / --adblock**: 예전 vpn 탭에 있던 것
 - **auto-connect** (iOS: `off / always / wi-fi`): On Demand 규칙. wi-fi는 와이파이에서만 붙고 셀룰러에선 끊음. 앱에서 disconnect를 누르면 자동 연결도 같이 꺼진다
 - **--kill-switch** (iOS): `includeAllNetworks`. 터널이 끊긴 동안 다른 트래픽을 막는다. `--allow-lan`을 켜면 같은 망 기기(프린터·AirPlay)는 터널 밖(`excludeLocalNetworks`). 켠 채 앱을 다시 설치하면 iOS가 모든 통신을 막아 버리는 문제가 있어서 업데이트 전에 끈다
+  - 못 붙은 채 남은 킬 스위치 설정은 앱 자신의 서버 확인 요청까지 막는다("checking server"에서 멈춤). 그래서 연결을 새로 시작하기 전과 킬 스위치를 끌 때, 터널이 붙어 있지 않으면 저장된 설정에서 킬 스위치와 자동 연결을 내린다. 켜져 있으면 연결할 때 다시 건다(1.8.2). 이미 막혔으면 iOS 설정 → 일반 → VPN 및 기기 관리 → VPN에서 "NAGO VPN (WireGuard)"를 지운다
 - **unicorn https**: 프로토콜이 `unicorn`일 때만 보인다(위 unicorn 절 참고)
 - kill-switch를 켜면 프로토콜이 wg로 고정된다. auto-connect는 우리 터널 확장이어야 하므로 ikev2/auto에서 켜면 wg로 바뀐다(unicorn은 그대로 쓸 수 있다). 서버를 깨우고 바뀐 IP를 따라가는 건 우리 터널 확장만 할 수 있어서다
   - 터널 확장은 핸드셰이크가 170초 넘게 없으면(서버 유휴 종료, 재부팅으로 IP 변경) 국가 API로 서버를 켜고 주소가 바뀌었으면 피어를 바꾼다. 확장 자신의 통신은 킬 스위치에도 막히지 않는다
