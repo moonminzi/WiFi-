@@ -104,6 +104,8 @@ struct BlinkingCursor: View {
 /// `// label` 주석 머리가 달린 테두리 상자
 struct TermBlock<Content: View>: View {
     let label: String
+    /// 상자 안쪽 여백. 지도처럼 상자를 꽉 채우는 내용은 0
+    var inset: CGFloat = 12
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -114,7 +116,7 @@ struct TermBlock<Content: View>: View {
             VStack(alignment: .leading, spacing: 12) {
                 content
             }
-            .padding(12)
+            .padding(inset)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Term.surface, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Term.border, lineWidth: 1))
