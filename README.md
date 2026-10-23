@@ -14,6 +14,11 @@
 - iOS 내장 Personal VPN(`NEVPNManager`)으로 **IKEv2 + EAP-MSCHAPv2** 연결 — 별도 확장/라이브러리 없음
 - 서버는 AWS EC2의 **strongSwan**. 구축·재현 방법과 접속 안내는 [`server/README.md`](server/README.md) 참고
 - **국가 선택**: 🇰🇷 서울 · 🇯🇵 도쿄 · 🇺🇸 오리건 · 🇬🇧 런던. 연결을 누르면 API(`VPNRegion.swift`)가 그 나라 서버를 켜고(꺼져 있으면 1~2분) 지금 IP를 받아 접속한다. 서버는 거의 안 쓰면 알아서 꺼진다(서울 3시간, 해외 30분)
+- **route 지도**(1.9): 점으로 찍은 세계 지도 위에 `you → 나갈 국가` 경로. 국가를 고르면 카메라가 그쪽으로 날아가고,
+  연결 중에는 진행 단계(`checking server` → `booting` → `wg register` …)가 바뀔 때마다 웨이포인트가 찍히며 블록 커서가 경로를 따라간다.
+  연결되면 그 나라로 확대되고 나라 점이 초록으로 켜진다. 실패하면 커서가 빨갛게 멈췄다가 사라진다
+  - `you`는 위치 권한 없이 기기 시간대의 도시로 어림한다(모르는 시간대면 서울). 서울에서 kr처럼 같은 도시면 경로 대신 고리
+  - 지도는 Natural Earth 1:50m(퍼블릭 도메인)를 메르카토르 0.5° 격자로 찍은 `WifiScan/WorldDotsData.swift`. 다시 만들려면 `tools/worldgrid.py`
 - 자체 서명 CA라서 최초 1회 `server/WifiScanVPN.mobileconfig` 설치 + 인증서 신뢰가 필요
   (설정 → 일반 → 정보 → 인증서 신뢰 설정)
 - 비밀번호는 기기 **키체인**에만 저장(소스/저장소에 없음)
