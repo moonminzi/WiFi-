@@ -1,0 +1,58 @@
+name: Tidy release titles
+
+# 이미 올라간 릴리스 제목을 IPA 안 Info.plist의 앱 이름·버전으로 맞춘다(예: NAGO VPN 1.9 (15) · build-47).
+# 릴리스·태그·파일은 건드리지 않고 제목만 바꾼다. 여러 번 돌려도 결과가 같다.
+on:
+  push:
+    paths:
+      - '.github/workflows/tidy-releases.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tidy-releases
+  cancel-in-progress: false
+
+jobs:
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rename releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: python3 {0}
+        run: |
+          import json, os, plistlib, re, subprocess, tempfile, zipfile
+
+          repo = os.environ["REPO"]
+
+          def gh(*args):
+              return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+
+          pages = json.loads(gh("api", "--paginate", "--slurp", f"repos/{repo}/releases?per_page=100"))
+          releases = [r for page in pages for r in page]
+
+          changed = 0
+          for r in sorted(releases, key=lambda r: r["published_at"] or ""):
+              tag = r["tag_name"]
+              ipa = next((a for a in r["assets"] if a["name"].endswith(".ipa")), None)
+              if not ipa:
+                  print(f"skip {tag}: no ipa")
+                  continue
+              with tempfile.TemporaryDirectory() as d:
+                  gh("release", "download", tag, "-R", repo, "-p", ipa["name"], "-D", d)
+                  with zipfile.ZipFile(os.path.join(d, ipa["name"])) as z:
+                      name = next(n for n in z.namelist() if re.fullmatch(r"Payload/[^/]+\.app/Info\.plist", n))
+                      info = plistlib.loads(z.read(name))
+              app = info.get("CFBundleDisplayName") or info.get("CFBundleName") or tag
+              title = f'{app} {info.get("CFBundleShortVersionString", "?")} ({info.get("CFBundleVersion", "?")}) · {tag}'
+              if r["name"] == title:
+                  print(f"ok   {title}")
+                  continue
+              gh("api", "-X", "PATCH", f"repos/{repo}/releases/{r['id']}", "-f", f"name={title}")
+              print(f"set  {r['name']!r} -> {title!r}")
+              changed += 1
+          print(f"{changed} renamed, {len(releases)} releases")
