@@ -3,11 +3,15 @@ import NetworkExtension
 import Security
 
 /// VPN 프로토콜 선택. auto는 IKEv2를 먼저 해 보고 안 붙으면 WireGuard(443)로 넘어간다.
+/// unicorn은 서버로 나가지 않는다 — 기기 안에서 SNI 차단만 우회한다(유니콘 HTTPS).
 enum VPNProto: String, CaseIterable, Identifiable {
-    case auto, ikev2, wireguard
+    case auto, ikev2, wireguard, unicorn
 
     var id: String { rawValue }
     var label: String { self == .wireguard ? "wg" : rawValue }
+
+    /// 우리 터널 확장(WifiScanTunnel)으로 뜨는 프로토콜인지
+    var usesTunnel: Bool { self == .wireguard || self == .unicorn }
 }
 
 /// 자동 연결(On Demand). 꺼진 서버를 깨우고 바뀐 IP를 따라가는 건 우리 터널만 할 수 있어서 wg로 연결한다.
@@ -47,6 +51,8 @@ final class VPNManager {
 
     private(set) var ikeStatus: NEVPNStatus = .invalid
     private(set) var wgStatus: NEVPNStatus = .invalid
+    /// 터널 확장이 어느 모드로 저장돼 있는지(wireguard / unicorn). 상태 줄에 쓴다.
+    private(set) var tunnelProto: VPNProto = .wireguard
     /// 설정을 한 번이라도 저장(프로비저닝)했는지.
     private(set) var isConfigured = false
     private(set) var lastError: String?
@@ -60,7 +66,7 @@ final class VPNManager {
 
     /// 지금 켜져 있는 프로토콜(꺼져 있으면 nil)
     var activeProto: VPNProto? {
-        if wgStatus.isActive { return .wireguard }
+        if wgStatus.isActive { return tunnelProto }
         if ikeStatus.isActive { return .ikev2 }
         return nil
     }
@@ -79,6 +85,7 @@ final class VPNManager {
         do {
             try await manager.loadFromPreferences()
             tunnel = try await NETunnelProviderManager.loadAllFromPreferences().first
+            tunnelProto = Self.proto(of: tunnel)
             isConfigured = manager.protocolConfiguration != nil || tunnel != nil
             refreshStatus()
         } catch {
@@ -89,6 +96,13 @@ final class VPNManager {
     private func refreshStatus() {
         ikeStatus = manager.connection.status
         wgStatus = tunnel?.connection.status ?? .invalid
+    }
+
+    /// 저장된 터널 설정이 유니콘 HTTPS인지 WireGuard인지
+    private static func proto(of tunnel: NETunnelProviderManager?) -> VPNProto {
+        let proto = tunnel?.protocolConfiguration as? NETunnelProviderProtocol
+        let mode = proto?.providerConfiguration?["mode"] as? String
+        return mode == UnicornSettings.mode ? .unicorn : .wireguard
     }
 
     /// IKEv2가 연결될 때까지 기다린다. 시간 안에 안 되거나 도중에 끊기면 false.
@@ -175,6 +189,30 @@ final class VPNManager {
         tunnel?.connection.stopVPNTunnel()
     }
 
+    /// 킬 스위치(includeAllNetworks)가 걸린 wg 설정이 붙지 못한 채 남아 있으면 앱 자신의 통신까지 막힌다.
+    /// 앱은 연결 전에 서버 확인·키 등록을 직접 해야 해서, 그 상태로는 "checking server"에서 넘어가지 못한다.
+    /// 그래서 새로 연결하기 전과 킬 스위치를 끌 때 저장된 설정에서 킬 스위치와 자동 연결을 내린다.
+    /// 킬 스위치가 켜져 있으면 연결할 때 saveWireGuard가 다시 건다.
+    func releaseKillSwitch() async {
+        guard let saved = try? await NETunnelProviderManager.loadAllFromPreferences().first,
+              let proto = saved.protocolConfiguration as? NETunnelProviderProtocol,
+              proto.includeAllNetworks, saved.connection.status != .connected else { return }
+        saved.connection.stopVPNTunnel()
+        proto.includeAllNetworks = false
+        proto.excludeLocalNetworks = false
+        saved.protocolConfiguration = proto
+        saved.isOnDemandEnabled = false
+        do {
+            try await saved.saveToPreferences()
+            try await saved.loadFromPreferences()
+            NagoLog.add("kill-switch released (tunnel was down)")
+        } catch {
+            NagoLog.add("✗ kill-switch release: \(error.localizedDescription)")
+        }
+        tunnel = saved
+        refreshStatus()
+    }
+
     // MARK: WireGuard
 
     /// 앱에 들어 있는 터널 확장의 번들 ID(재서명하면서 바뀌어도 실제 값을 읽는다)
@@ -201,6 +239,7 @@ final class VPNManager {
         proto.providerBundleIdentifier = Self.tunnelBundleID
         proto.serverAddress = endpoint
         proto.providerConfiguration = [
+            "mode": "wireguard",
             "privateKey": privateKey,
             "address": address,
             "serverPub": serverPub,
@@ -222,13 +261,46 @@ final class VPNManager {
         try await tunnel.saveToPreferences()
         try await tunnel.loadFromPreferences()
         self.tunnel = tunnel
+        tunnelProto = .wireguard
         isConfigured = true
         refreshStatus()
     }
 
+    // MARK: 유니콘 HTTPS
+
+    /// 유니콘 HTTPS 설정을 저장한다. 같은 터널 확장을 쓰지만 mode가 달라서
+    /// 확장이 WireGuard 대신 SNI 분할 스택을 띄운다. 서버·키·비밀번호가 필요 없다.
+    ///
+    /// 킬 스위치(includeAllNetworks)는 쓰지 않는다. 확장이 DoH로 직접 나가야 하는데
+    /// 모든 통신을 터널로 밀어 넣으면 서로를 기다리며 멈출 수 있다.
+    func saveUnicorn(_ settings: UnicornSettings, autoConnect: VPNAutoConnect) async throws {
+        let tunnel = try await NETunnelProviderManager.loadAllFromPreferences().first ?? NETunnelProviderManager()
+        let proto = NETunnelProviderProtocol()
+        proto.providerBundleIdentifier = Self.tunnelBundleID
+        proto.serverAddress = "on-device"
+        proto.providerConfiguration = [
+            "mode": UnicornSettings.mode,
+            UnicornSettings.configurationKey: settings.configurationValue,
+        ]
+        proto.includeAllNetworks = false
+        proto.excludeLocalNetworks = false
+        tunnel.protocolConfiguration = proto
+        tunnel.localizedDescription = "NAGO VPN (유니콘 HTTPS)"
+        tunnel.isEnabled = true
+        tunnel.onDemandRules = autoConnect.rules
+        tunnel.isOnDemandEnabled = autoConnect != .off
+        try await tunnel.saveToPreferences()
+        try await tunnel.loadFromPreferences()
+        self.tunnel = tunnel
+        tunnelProto = .unicorn
+        isConfigured = true
+        refreshStatus()
+    }
+
+    /// 터널 확장을 시작한다(WireGuard / 유니콘 HTTPS 공통).
     /// 자동 연결을 켜서 저장하면 iOS가 먼저 붙이기 시작할 수 있어서, 이미 시작됐으면 그대로 둔다.
     /// source=app이면 확장은 앱이 방금 받은 주소를 믿고, 없으면(자동 연결) 서버 상태부터 빨리 확인한다.
-    func connectWireGuard() throws {
+    func connectTunnel() throws {
         guard let tunnel else { throw NEVPNError(.configurationInvalid) }
         guard !tunnel.connection.status.isActive else { return }
         try tunnel.connection.startVPNTunnel(options: ["source": "app" as NSString])

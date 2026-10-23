@@ -27,6 +27,8 @@ struct DashData: Decodable {
         let n: String
         let ip: String
         let name: String?
+        /// 이 피어의 DNS를 서버가 광고 차단 DNS로 돌리는지(대시보드에서 피어별로 켬)
+        let adblock: Bool?
         let hsAgo: Int?
         let rx: Int64
         let tx: Int64
@@ -112,30 +114,6 @@ struct DashView: View {
         .background(Term.bg.ignoresSafeArea())
         .foregroundStyle(Term.text)
         .tint(Term.green)
-        .confirmationDialog(
-            managedNode.map { "\($0.code) · \($0.city) · \($0.state)" } ?? "",
-            isPresented: present($managedNode), titleVisibility: .visible, presenting: managedNode
-        ) { node in
-            if node.state == "stopped" {
-                Button("start") { nodeOp("start", node) }
-            } else if node.state == "running" {
-                Button("reset idle (\(node.idle ?? 0)m)") { nodeOp("wake", node) }
-                Button("reboot") { nodeOp("reboot", node) }
-                Button("stop", role: .destructive) { nodeOp("stop", node) }
-            }
-        }
-        .confirmationDialog(
-            managedPeer.map(peerTitle) ?? "",
-            isPresented: present($managedPeer), titleVisibility: .visible, presenting: managedPeer
-        ) { peer in
-            Button("kick 60s") { run("kick", peer, extra: ["seconds": "60"]) }
-            Button("reset usage") { run("reset", peer) }
-            Button("rename") {
-                nameInput = peer.name ?? ""
-                renamePeer = peer
-            }
-            Button("remove…", role: .destructive) { removePeer = peer }
-        }
         .alert("new peer", isPresented: $showAdd) {
             TextField("name", text: $nameInput)
             Button("add") { addPeer() }
@@ -165,6 +143,42 @@ struct DashView: View {
         Binding(get: { value.wrappedValue != nil }, set: { if !$0 { value.wrappedValue = nil } })
     }
 
+    // 관리 메뉴는 누른 줄에 붙인다. 아이패드에서는 메뉴가 붙은 뷰를 가리키는 말풍선으로 뜨는데,
+    // 화면 전체(ScrollView)에 붙이면 가리킬 곳이 없어 화면 밖으로 잘렸다. 아이폰은 그대로 아래에서 올라온다.
+
+    private func managing(_ node: DashData.Node) -> Binding<Bool> {
+        Binding(get: { managedNode?.code == node.code }, set: { if !$0 { managedNode = nil } })
+    }
+
+    private func managing(_ peer: DashData.Peer) -> Binding<Bool> {
+        Binding(get: { managedPeer?.n == peer.n }, set: { if !$0 { managedPeer = nil } })
+    }
+
+    @ViewBuilder
+    private func nodeActions(_ node: DashData.Node) -> some View {
+        if node.state == "stopped" {
+            Button("start") { nodeOp("start", node) }
+        } else if node.state == "running" {
+            Button("reset idle (\(node.idle ?? 0)m)") { nodeOp("wake", node) }
+            Button("reboot") { nodeOp("reboot", node) }
+            Button("stop", role: .destructive) { nodeOp("stop", node) }
+        }
+    }
+
+    @ViewBuilder
+    private func peerActions(_ peer: DashData.Peer) -> some View {
+        Button(peer.adblock == true ? "adblock off" : "adblock on") {
+            run("flags", peer, extra: ["adblock": peer.adblock == true ? "0" : "1"])
+        }
+        Button("kick 60s") { run("kick", peer, extra: ["seconds": "60"]) }
+        Button("reset usage") { run("reset", peer) }
+        Button("rename") {
+            nameInput = peer.name ?? ""
+            renamePeer = peer
+        }
+        Button("remove…", role: .destructive) { removePeer = peer }
+    }
+
     // MARK: 피어 관리 동작
 
     private func report(_ text: String, ok: Bool) {
@@ -175,8 +189,9 @@ struct DashView: View {
     private func run(_ op: String, _ peer: DashData.Peer, extra: [String: String] = [:]) {
         var body = ["op": op, "ip": peer.ip]
         body.merge(extra) { $1 }
-        perform(body, label: "wg peer \(op) \(peer.ip)",
-                done: "\(op) \(peer.ip)" + (op == "kick" ? " · back in 60s" : ""))
+        let what = op == "flags" ? "adblock \(extra["adblock"] == "1" ? "on" : "off")" : op
+        perform(body, label: "wg peer \(what) \(peer.ip)",
+                done: "\(what) \(peer.ip)" + (op == "kick" ? " · back in 60s" : ""))
     }
 
     private func nodeOp(_ op: String, _ node: DashData.Node) {
@@ -281,6 +296,10 @@ struct DashView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(busy)
+                        .confirmationDialog("\(node.code) · \(node.city) · \(node.state)",
+                                            isPresented: managing(node), titleVisibility: .visible) {
+                            nodeActions(node)
+                        }
                     }
                 }
                 gap
@@ -294,6 +313,9 @@ struct DashView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(busy)
+                        .confirmationDialog(peerTitle(peer), isPresented: managing(peer), titleVisibility: .visible) {
+                            peerActions(peer)
+                        }
                     }
                     gap
                     Button {
@@ -414,6 +436,7 @@ struct DashView: View {
     private func peerLines(_ peer: DashData.Peer) -> some View {
         let head = Text("[peer \(peer.n)]").foregroundStyle(Term.key) + Text(" \(peer.ip) ")
             + Text(peer.name.map { $0 + " " } ?? "").foregroundStyle(Term.path)
+            + Text(peer.adblock == true ? "adblock " : "").foregroundStyle(Term.green)
         if let ago = peer.hsAgo {
             let online = ago < 180
             line(head + Text(online ? "● online" : "○ idle").foregroundStyle(online ? Term.green : Term.amber))

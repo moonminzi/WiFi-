@@ -27,6 +27,7 @@ struct VPNView: View {
 
     var body: some View {
         TermPage(path: "vpn") {
+            routeBlock
             statusBlock
             exitBlock
             connectButton
@@ -34,13 +35,26 @@ struct VPNView: View {
         .task { await vpn.reload() }
     }
 
-    /// 자동 연결·킬 스위치는 우리 터널(wg)로만 한다(서버 깨우기, IP 추적).
+    /// 킬 스위치는 우리 터널(wg)로만 한다. 자동 연결은 ikev2로 못 하니 wg로 민다.
+    /// 유니콘 HTTPS도 우리 터널이라 자동 연결은 그대로 된다.
     private var effectiveProto: VPNProto {
-        autoConnect != .off || killSwitch ? .wireguard : proto
+        if killSwitch { return .wireguard }
+        if proto == .unicorn { return .unicorn }
+        return autoConnect != .off ? .wireguard : proto
+    }
+
+    /// 유니콘 HTTPS는 서버를 거치지 않아서 광고 차단 DNS(서버 안쪽 주소)는 쓸 수 없다.
+    private var unicornSettings: UnicornSettings {
+        UnicornSettings.fromDefaults(plainDNS: DNSList.parse(customDNS) ?? ["1.1.1.1"])
     }
 
     /// `wg/neptun · adblock · kill-switch` 처럼 지금 설정 한 줄
     private var flags: String {
+        if effectiveProto == .unicorn {
+            var parts = ["unicorn", unicornSettings.summary]
+            if autoConnect != .off { parts.append("auto:\(autoConnect.label)") }
+            return parts.joined(separator: " · ")
+        }
         var parts = [effectiveProto == .wireguard ? "wg/\(wgEngine)" : effectiveProto.label]
         if effectiveProto == .wireguard, wgEngine == "neptun", wgQueue != 8 { parts[0] += " q\(wgQueue)" }
         if adblock {
@@ -51,6 +65,24 @@ struct VPNView: View {
         if killSwitch { parts.append("kill-switch") }
         if autoConnect != .off { parts.append("auto:\(autoConnect.label)") }
         return parts.joined(separator: " · ")
+    }
+
+    // MARK: - 경로 지도
+
+    /// you → 나갈 국가. 진행 단계(phase)가 바뀔 때마다 경로에 웨이포인트가 하나씩 찍힌다.
+    private var routeBlock: some View {
+        TermBlock(label: "route", inset: 0) {
+            RouteMap(destination: vpn.status.isActive && !busy ? savedRegion : region,
+                     stage: routeStage,
+                     hop: phase ?? (vpn.status.isBusy ? statusText : nil))
+        }
+    }
+
+    private var routeStage: RouteMap.Stage {
+        if effectiveProto == .unicorn || (vpn.status.isActive && vpn.activeProto == .unicorn) { return .onDevice }
+        if busy || vpn.status == .connecting || vpn.status == .reasserting { return .connecting }
+        if vpn.status == .connected { return .connected }
+        return errorText != nil ? .failed : .idle
     }
 
     // MARK: - 상태
@@ -91,7 +123,9 @@ struct VPNView: View {
 
     private var statusText: String {
         switch vpn.status {
-        case .connected: return "up → \(savedRegion.rawValue)" + (vpn.activeProto.map { " · \($0.label)" } ?? "")
+        case .connected:
+            if vpn.activeProto == .unicorn { return "up → on-device · unicorn" }
+            return "up → \(savedRegion.rawValue)" + (vpn.activeProto.map { " · \($0.label)" } ?? "")
         case .connecting: return "connecting"
         case .reasserting: return "reconnecting"
         case .disconnecting: return "disconnecting"
@@ -111,14 +145,23 @@ struct VPNView: View {
     // MARK: - 나갈 국가
 
     private var exitBlock: some View {
-        TermBlock(label: "exit node") {
-            TermChoice(options: VPNRegion.allCases.map { (label: $0.rawValue, value: $0) },
-                       selection: $region)
-                .disabled(busy || vpn.status.isActive)
-                .opacity(busy || vpn.status.isActive ? 0.5 : 1)
-            Text(region.detail)
-                .font(Term.mono(12))
-                .foregroundStyle(Term.muted)
+        TermBlock(label: effectiveProto == .unicorn ? "mode" : "exit node") {
+            if effectiveProto == .unicorn {
+                Text("on-device · no server")
+                    .font(Term.mono(14, .semibold))
+                    .foregroundStyle(Term.green)
+                Text("tls hello를 쪼개 보내서 sni 차단을 지나간다. 트래픽은 평소 회선으로 그대로 나간다.")
+                    .font(Term.mono(12))
+                    .foregroundStyle(Term.muted)
+            } else {
+                TermChoice(options: VPNRegion.allCases.map { (label: $0.rawValue, value: $0) },
+                           selection: $region)
+                    .disabled(busy || vpn.status.isActive)
+                    .opacity(busy || vpn.status.isActive ? 0.5 : 1)
+                Text(region.detail)
+                    .font(Term.mono(12))
+                    .foregroundStyle(Term.muted)
+            }
         }
     }
 
@@ -137,7 +180,7 @@ struct VPNView: View {
             }
         }
         .buttonStyle(TermButtonStyle(kind: vpn.status.isActive ? .danger : .primary, fill: true))
-        .disabled(busy || vpn.status.isBusy || username.isEmpty)
+        .disabled(busy || vpn.status.isBusy || (effectiveProto != .unicorn && username.isEmpty))
     }
 
     // MARK: - 로직
@@ -154,11 +197,17 @@ struct VPNView: View {
             busy = false
             phase = nil
         }
+        if effectiveProto == .unicorn {
+            await connectUnicorn()
+            return
+        }
         let user = trimmed(username)
         guard let key = VPNPreset.key(username: user) else {
             fail("password required → settings")
             return
         }
+        // 지난번에 못 붙은 킬 스위치 설정이 남아 있으면 아래 서버 확인 요청부터 막힌다.
+        await vpn.releaseKillSwitch()
         do {
             step("\(region.rawValue): checking server…")
             let target = try await resolveTarget(key: key)
@@ -180,8 +229,26 @@ struct VPNView: View {
                     try await Task.sleep(for: .seconds(1))
                     try await connectWG(target, user: user, key: key)
                 }
+            case .unicorn:
+                break       // 서버가 없어서 위에서 먼저 처리한다(여기까지 오지 않는다)
             }
             savedRegion = region
+        } catch {
+            fail(error.localizedDescription)
+        }
+    }
+
+    /// 유니콘 HTTPS: 서버도 비밀번호도 없다. 설정만 저장하고 바로 띄운다.
+    private func connectUnicorn() async {
+        let settings = unicornSettings
+        guard settings.strategy != .off else {
+            fail("split off → settings")
+            return
+        }
+        do {
+            step("unicorn: \(settings.summary)")
+            try await vpn.saveUnicorn(settings, autoConnect: autoConnect)
+            try vpn.connectTunnel()
         } catch {
             fail(error.localizedDescription)
         }
@@ -217,7 +284,7 @@ struct VPNView: View {
                                     serverPub: serverPub, endpoint: endpoint, dns: wgDNS, engine: wgEngine,
                                     queue: wgQueue, region: region.rawValue, apiKey: key,
                                     autoConnect: autoConnect, killSwitch: killSwitch, allowLAN: allowLAN)
-        try vpn.connectWireGuard()
+        try vpn.connectTunnel()
     }
 
     /// 광고 차단 DNS → 직접 넣은 DNS → 1.1.1.1
