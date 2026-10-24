@@ -17,7 +17,7 @@ struct FleetMap: View {
     private static let latTop = 66.0
     private static let latBottom = -12.0
     /// 이 띠의 가로세로 비(뷰 높이를 정할 때 쓴다)
-    static let aspect = lonSpan / (RouteMath.mercY(latTop) - RouteMath.mercY(latBottom)) * 0.86
+    static let aspect = lonSpan / (RouteMath.mercY(latTop) - RouteMath.mercY(latBottom)) * 0.95
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1 / 30, paused: reduceMotion)) { timeline in
@@ -112,7 +112,7 @@ struct FleetMap: View {
                 guard other.code != node.code, let r = VPNRegion(rawValue: other.code) else { return false }
                 let q = point(r.geo)
                 return q.x > p.x && q.x - p.x < 44 && abs(q.y - p.y) < 16
-            }
+            } || p.x > w - 30     // 오른쪽 끝(오리건)도 이름이 잘리지 않게 왼쪽에
             label(&ctx, node.code, at: CGPoint(x: crowded ? p.x - 8 : p.x + 8, y: p.y - 6),
                   anchor: crowded ? .trailing : .leading, weight: .semibold,
                   color: node.code == liveCode ? Term.green : Term.text)

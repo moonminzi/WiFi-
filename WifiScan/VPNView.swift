@@ -78,7 +78,7 @@ struct VPNView: View {
                 }
             }
         }
-        .overlay { StatusBarScrim() }
+        .statusBarScrim()
         .background(Term.bg.ignoresSafeArea())
         .foregroundStyle(Term.text)
         .tint(Term.green)

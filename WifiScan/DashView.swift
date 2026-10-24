@@ -111,7 +111,7 @@ struct DashView: View {
             .termColumn()
         }
         .refreshable { await load() }
-        .overlay { StatusBarScrim() }
+        .statusBarScrim()
         .task {
             // 이 탭이 보이는 동안만 돈다(다른 탭으로 가면 취소됨).
             while !Task.isCancelled {
