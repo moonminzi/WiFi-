@@ -67,6 +67,32 @@ struct VPNView: View {
         }
         .task { await vpn.reload() }
         .task(id: vpn.status == .connected) { await pollLink() }
+        .onAppear(perform: applyDemo)
+    }
+
+    /// 스크린샷용 데모 상태(Debug 빌드 + `-nagoDemo`)
+    private func applyDemo() {
+        guard let state = Demo.state else { return }
+        let now = Date()
+        let demoSteps = Demo.steps.map { Step(at: now.addingTimeInterval(-$0.ago), text: $0.text) }
+        switch state {
+        case "connecting":
+            region = .jp
+            busy = true
+            steps = demoSteps
+            phase = demoSteps.last?.text
+        case "connected":
+            region = .jp
+            savedRegion = .jp
+            steps = demoSteps
+            linkStats = Demo.linkStats
+        case "failed":
+            region = .us
+            steps = Array(demoSteps.prefix(2)).map { Step(at: $0.at, text: $0.text.replacingOccurrences(of: "jp", with: "us")) }
+            errorText = "timeout: server not up after 4m, retry"
+        default:
+            region = .jp
+        }
     }
 
     /// 화면의 절반쯤을 지도로. 너무 작거나(가로 아이폰) 너무 크지(아이패드) 않게.

@@ -259,6 +259,10 @@ struct DashView: View {
     }
 
     private func load() async {
+        if Demo.on {
+            data = Demo.dash
+            return
+        }
         guard let key = VPNPreset.key(username: username) else {
             errorText = "password required → save it in the vpn tab"
             return
