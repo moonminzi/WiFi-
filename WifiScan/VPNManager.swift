@@ -119,7 +119,7 @@ final class VPNManager {
     func waitForIKE(seconds: Double) async -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         var started = false
-        while Date() < deadline {
+        while Date() < deadline, !Task.isCancelled {
             refreshStatus()
             switch ikeStatus {
             case .connected: return true

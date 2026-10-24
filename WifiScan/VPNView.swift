@@ -28,6 +28,10 @@ struct VPNView: View {
     @State private var steps: [Step] = []
     /// wg/유니콘 터널이 알려 주는 핸드셰이크·주고받은 양(연결돼 있는 동안 5초마다)
     @State private var linkStats: String?
+    /// 진행 중인 연결. 해외 서버는 켜지는 데 몇 분 걸려서 그동안 버튼으로 취소할 수 있다.
+    @State private var connectTask: Task<Void, Never>?
+    /// 마지막 연결을 직접 취소했는지(boot log 끝줄 표시)
+    @State private var cancelled = false
 
     struct Step: Identifiable {
         let id = UUID()
@@ -151,6 +155,13 @@ struct VPNView: View {
                      chrome: .hero(top: top + 56, bottom: Self.overlap),
                      height: height,
                      onSelect: locked || effectiveProto == .unicorn ? nil : { region = $0 })
+                // 위로 밀면 지도는 천천히 따라가고(패럴랙스), 아래로 당기면 늘어나서 빈 곳이 안 보인다
+                .visualEffect { content, proxy in
+                    let y = proxy.frame(in: .scrollView).minY
+                    return content
+                        .scaleEffect(y > 0 ? 1 + y / max(proxy.size.height, 1) : 1, anchor: .bottom)
+                        .offset(y: y < 0 ? -y * 0.45 : 0)
+                }
 
             HStack(alignment: .center, spacing: 0) {
                 Text("~/").foregroundStyle(Term.muted)
@@ -166,6 +177,8 @@ struct VPNView: View {
             .termColumn()
         }
         .frame(height: height)
+        // 패럴랙스로 내려간 지도가 아래 콘솔 옆으로 비어져 나오지 않게 아래만 자른다(위는 당겨서 늘어날 몫)
+        .mask(alignment: .bottom) { Rectangle().frame(height: height + 2000) }
     }
 
     private var routeStage: RouteMap.Stage {
@@ -395,11 +408,15 @@ struct VPNView: View {
     private func symbol(last: Bool) -> (String, Color) {
         guard last else { return ("✓", Term.green) }
         if errorText != nil { return ("✗", Term.red) }
+        if cancelled { return ("–", Term.muted) }
         if busy { return (">", Term.amber) }
         return ("✓", Term.green)
     }
 
-    private var lastColor: Color { errorText != nil ? Term.red : Term.text }
+    private var lastColor: Color {
+        if errorText != nil { return Term.red }
+        return cancelled ? Term.muted : Term.text
+    }
 
     private func logLine(offset: TimeInterval?, symbol: (String, Color), text: String, color: Color) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -415,14 +432,23 @@ struct VPNView: View {
 
     // MARK: 연결 버튼
 
+    /// 연결 중에는 같은 버튼이 취소 버튼이 된다(지금 단계 + cancel).
     private var connectButton: some View {
         Button {
-            Task { await saveAndConnect() }
+            if busy {
+                connectTask?.cancel()
+            } else {
+                connectTask = Task { await saveAndConnect() }
+            }
         } label: {
             HStack(spacing: 10) {
                 if busy {
-                    ProgressView().tint(Term.bg)
+                    ProgressView().tint(Term.amber)
                     Text(phase.map { $0.replacingOccurrences(of: "…", with: "") } ?? "working")
+                        .foregroundStyle(Term.text)
+                    Spacer(minLength: 6)
+                    Text("cancel").foregroundStyle(Term.amber)
+                    Image(systemName: "xmark").foregroundStyle(Term.amber)
                 } else if vpn.status.isActive {
                     Image(systemName: "stop.circle")
                     Text("disconnect")
@@ -433,11 +459,20 @@ struct VPNView: View {
             }
             .frame(height: 32)
         }
-        .buttonStyle(TermButtonStyle(kind: vpn.status.isActive && !busy ? .danger : .primary, fill: true))
+        .buttonStyle(TermButtonStyle(kind: buttonKind, fill: true))
         .overlay {
-            if busy { ScanSweep().clipShape(RoundedRectangle(cornerRadius: 6)).allowsHitTesting(false) }
+            if busy {
+                ScanSweep(tint: Term.amber).clipShape(RoundedRectangle(cornerRadius: 6)).allowsHitTesting(false)
+            }
         }
-        .disabled(busy || vpn.status.isBusy || (effectiveProto != .unicorn && username.isEmpty))
+        // 연결 중(connecting)에도 끊을 수 있게 둔다. 끊는 중에만 막는다.
+        .disabled(vpn.status == .disconnecting
+                  || (!busy && !vpn.status.isActive && effectiveProto != .unicorn && username.isEmpty))
+    }
+
+    private var buttonKind: TermButtonStyle.Kind {
+        if busy { return .secondary }
+        return vpn.status.isActive ? .danger : .primary
     }
 
     /// 연결돼 있는 동안 터널 확장에 상태를 묻는다(ikev2는 시스템 터널이라 답이 없다).
@@ -463,6 +498,7 @@ struct VPNView: View {
             return
         }
         steps = []
+        cancelled = false
         busy = true
         defer {
             busy = false
@@ -495,6 +531,7 @@ struct VPNView: View {
                 try await connectIKE(target, user: user, key: key)
                 step("\(region.rawValue): ikev2 handshake…")
                 if !(await vpn.waitForIKE(seconds: 12)) {
+                    try Task.checkCancellation()
                     await vpn.disconnect()
                     step("\(region.rawValue): ikev2 timeout → wg")
                     try await Task.sleep(for: .seconds(1))
@@ -505,8 +542,21 @@ struct VPNView: View {
             }
             savedRegion = region
         } catch {
-            fail(error.localizedDescription)
+            if Task.isCancelled {
+                await cancelConnect()
+            } else {
+                fail(error.localizedDescription)
+            }
         }
+    }
+
+    /// 버튼으로 취소: 이미 저장·시작한 연결이 있으면 내린다.
+    private func cancelConnect() async {
+        cancelled = true
+        phase = nil
+        steps.append(Step(at: Date(), text: "cancelled"))
+        NagoLog.add("cancelled")
+        await vpn.disconnect()
     }
 
     /// 유니콘 HTTPS: 서버도 비밀번호도 없다. 설정만 저장하고 바로 띄운다.
@@ -572,6 +622,8 @@ struct VPNView: View {
         } catch RegionAPI.APIError.forbidden {
             throw RegionAPI.APIError.forbidden
         } catch {
+            // 취소했으면 고정 IP로 넘어가지 않는다
+            try Task.checkCancellation()
             guard let fallback = region.fallback else { throw error }
             return fallback
         }

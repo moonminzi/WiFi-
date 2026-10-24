@@ -163,6 +163,7 @@ struct FlagRow: View {
 
 /// 연결 중 버튼 위를 훑고 지나가는 빛
 struct ScanSweep: View {
+    var tint: Color = .white
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -173,7 +174,7 @@ struct ScanSweep: View {
                 GeometryReader { geo in
                     let t = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.6) / 1.6
                     let band = geo.size.width * 0.35
-                    LinearGradient(colors: [.white.opacity(0), .white.opacity(0.28), .white.opacity(0)],
+                    LinearGradient(colors: [tint.opacity(0), tint.opacity(0.22), tint.opacity(0)],
                                    startPoint: .leading, endPoint: .trailing)
                         .frame(width: band)
                         .offset(x: -band + (geo.size.width + band) * t)

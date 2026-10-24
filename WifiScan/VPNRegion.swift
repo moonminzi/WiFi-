@@ -109,6 +109,7 @@ enum RegionAPI {
             } catch APIError.badResponse(let code) where (400..<500).contains(code) && code != 429 {
                 throw APIError.badResponse(code)
             } catch {
+                try Task.checkCancellation()
                 if region.fallback != nil { throw error }
                 lastError = error
                 progress("\(region.rawValue): api retry… (\(error.localizedDescription))")
