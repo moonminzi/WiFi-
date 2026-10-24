@@ -71,6 +71,13 @@ final class VPNManager {
         return nil
     }
 
+    /// 지금 연결이 붙은 시각(세션 타이머). 상태가 바뀔 때 화면이 다시 읽는다.
+    var connectedSince: Date? {
+        if wgStatus == .connected { return tunnel?.connection.connectedDate }
+        if ikeStatus == .connected { return manager.connection.connectedDate }
+        return nil
+    }
+
     init() {
         NotificationCenter.default.addObserver(
             forName: .NEVPNStatusDidChange, object: nil, queue: .main

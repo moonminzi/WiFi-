@@ -18,6 +18,15 @@ enum VPNRegion: String, CaseIterable, Identifiable {
         }
     }
 
+    var flag: String {
+        switch self {
+        case .kr: return "🇰🇷"
+        case .jp: return "🇯🇵"
+        case .us: return "🇺🇸"
+        case .uk: return "🇬🇧"
+        }
+    }
+
     /// API가 안 될 때 바로 붙어 볼 주소/ID. 고정 IP인 한국 서버만 있다.
     var fallback: RegionAPI.Target? {
         self == .kr ? RegionAPI.Target(address: "3.38.243.135", identifier: "3.38.243.135", justBooted: false,

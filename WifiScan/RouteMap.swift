@@ -5,6 +5,7 @@ import SwiftUI
 /// - 연결 중: 단계(`hop`)가 바뀔 때마다 웨이포인트가 하나씩 찍히고, 깜빡이는 블록 커서가 경로를 따라간다
 /// - 연결됨: 경로를 끝까지 긋고 그 나라로 확대, 나라 점이 초록으로 켜지고 신호가 퍼진다
 /// - 실패: 커서가 멈추고 빨갛게 됐다가 사라진다
+/// - 대기 중엔 다른 나라로 가는 길도 옅게 그어 두고, 나라 점을 누르면(`onSelect`) 그 나라를 고른다
 struct RouteMap: View {
     enum Stage: Equatable {
         case idle, connecting, connected, failed
@@ -12,10 +13,23 @@ struct RouteMap: View {
         case onDevice
     }
 
+    /// 지도를 어디에 까는지
+    enum Chrome: Equatable {
+        /// `// route` 상자 안
+        case boxed
+        /// 화면 위쪽을 꽉 채우는 배경. 위(머리줄)·아래(겹쳐 올라오는 패널)에 가려지는 높이만큼 비켜서 그린다
+        case hero(top: CGFloat, bottom: CGFloat)
+    }
+
     let destination: VPNRegion
     let stage: Stage
     /// 지금 진행 단계 한 줄. 값이 바뀔 때마다 웨이포인트를 찍는다.
     let hop: String?
+    var chrome: Chrome = .boxed
+    /// nil이면 상자용 높이(아이폰 220 · 아이패드 300)
+    var height: CGFloat?
+    /// 나라 점(또는 그 나라에 있는 you)을 누르면 부른다. nil이면 누를 수 없다.
+    var onSelect: ((VPNRegion) -> Void)?
 
     @State private var model = RouteMapModel()
     /// 움직일 게 없으면 TimelineView를 멈춰 둔다(배터리)
@@ -29,13 +43,19 @@ struct RouteMap: View {
             Canvas { ctx, size in
                 // 멈춰 있던 타임라인의 날짜는 예전 값일 수 있어서 지금 시각과 비교해 늦은 쪽을 쓴다
                 let now = max(timeline.date, Date())
-                model.sync(stage: stage, destination: destination, hop: hop, reduceMotion: reduceMotion, now: now)
+                model.sync(stage: stage, destination: destination, hop: hop, chrome: chrome,
+                           reduceMotion: reduceMotion, now: now)
                 model.draw(&ctx, size: size, now: now)
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: sizeClass == .regular ? 300 : 220)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .frame(height: height ?? (sizeClass == .regular ? 300 : 220))
+        .clipShape(RoundedRectangle(cornerRadius: chrome == .boxed ? 8 : 0))
+        .contentShape(Rectangle())
+        .onTapGesture(coordinateSpace: .local) { point in
+            guard let onSelect, let region = model.region(near: point) else { return }
+            onSelect(region)
+        }
         .accessibilityElement()
         .accessibilityLabel(accessibilityText)
         .onChange(of: stage) { _, newStage in wake(for: newStage == .connected ? 10 : 3.5) }
@@ -68,6 +88,9 @@ final class RouteMapModel {
     private enum Framing { case route, focus, origin }
 
     private let origin = GeoPoint.here
+    /// 나라마다 you에서 가는 길(대기 중에 고르지 않은 나라도 옅게 긋는다)
+    private let arcs: [VPNRegion: RouteArc] = Dictionary(
+        uniqueKeysWithValues: VPNRegion.allCases.map { ($0, RouteArc(from: GeoPoint.here, to: $0.geo)) })
     private var started = false
     private var stage: RouteMap.Stage = .idle
     private var stageAt = Date.distantPast
@@ -81,6 +104,17 @@ final class RouteMapModel {
     private var focusAt: Date?
     private var size = CGSize.zero
     private var reduceMotion = false
+    private var chrome: RouteMap.Chrome = .boxed
+    /// 마지막으로 그린 나라 점의 화면 자리(누른 곳에서 가장 가까운 나라를 찾는다)
+    private var hits: [(region: VPNRegion, point: CGPoint)] = []
+
+    /// 배경색: 상자 안은 상자 색, 화면 배경으로 깔면 화면 색
+    private var paper: Color { chrome == .boxed ? Term.surface : Term.bg }
+    /// 위·아래에 가려지는 높이
+    private var insets: (top: Double, bottom: Double) {
+        if case .hero(let top, let bottom) = chrome { return (Double(top), Double(bottom)) }
+        return (0, 0)
+    }
 
     /// 상단 HUD·하단 줄과 가장자리 흐림 높이
     private static let edgeFade: CGFloat = 34
@@ -90,19 +124,23 @@ final class RouteMapModel {
     // MARK: - 상태 맞추기
 
     func sync(stage newStage: RouteMap.Stage, destination newDestination: VPNRegion, hop: String?,
-              reduceMotion: Bool, now: Date) {
+              chrome newChrome: RouteMap.Chrome, reduceMotion: Bool, now: Date) {
         self.reduceMotion = reduceMotion
+        if newChrome != chrome {
+            chrome = newChrome
+            flight = nil
+        }
         if !started {
             started = true
             destination = newDestination
-            arc = RouteArc(from: origin, to: newDestination.geo)
+            arc = arcs[newDestination] ?? RouteArc(from: origin, to: newDestination.geo)
             framing = newStage == .onDevice ? .origin : .route
             stage = newStage == .onDevice ? .onDevice : .idle
         }
         if newDestination != destination {
             let from = camera(at: now)
             destination = newDestination
-            arc = RouteArc(from: origin, to: newDestination.geo)
+            arc = arcs[newDestination] ?? RouteArc(from: origin, to: newDestination.geo)
             fly(from: from, now: now)
         }
         if newStage != stage {
@@ -171,24 +209,37 @@ final class RouteMapModel {
 
     private func target() -> Camera {
         let w = max(Double(size.width), 1), h = max(Double(size.height), 1)
+        let pad = insets
+        // 가려지지 않은 가운데에 오도록 화면에서 이만큼(pt) 내려 그린다
+        let shift = (pad.top - pad.bottom) / 2
         let focusZ = log2(min(16, max(9, w / 30)))
+        func at(_ p: WorldPoint, z: Double) -> Camera {
+            Camera(x: p.x, y: p.y + shift / pow(2, z), z: z)
+        }
         switch framing {
         case .origin:
-            let o = origin.world
-            return Camera(x: o.x, y: o.y, z: focusZ - 0.6)
+            return at(origin.world, z: focusZ - 0.6)
         case .focus:
-            return Camera(x: arc.b.x, y: arc.b.y, z: focusZ)
+            return at(arc.b, z: focusZ)
         case .route:
-            if arc.local { return Camera(x: arc.b.x, y: arc.b.y, z: focusZ - 0.35) }
+            if arc.local { return at(arc.b, z: focusZ - 0.35) }
             let apex = arc.point(at: 0.5)
             let xs = [arc.a.x, arc.b.x, apex.x], ys = [arc.a.y, arc.b.y, apex.y]
             let minX = xs.min() ?? 0, maxX = xs.max() ?? 0, minY = ys.min() ?? 0, maxY = ys.max() ?? 0
             let fit = min(max(w - 96, 60) / max(maxX - minX, 1),
-                          max(h - 72, 60) / max(maxY - minY, 1),
+                          max(h - pad.top - pad.bottom - 72, 60) / max(maxY - minY, 1),
                           pow(2, focusZ))
             let k = max(fit, w / 400)
-            return Camera(x: (minX + maxX) / 2, y: (minY + maxY) / 2 - 4 / k, z: log2(k))
+            return Camera(x: (minX + maxX) / 2, y: (minY + maxY) / 2 - 4 / k + shift / k, z: log2(k))
         }
+    }
+
+    /// 누른 자리에서 가장 가까운 나라(32pt 안)
+    func region(near point: CGPoint) -> VPNRegion? {
+        func distance(_ p: CGPoint) -> CGFloat { hypot(p.x - point.x, p.y - point.y) }
+        let nearest = hits.min { distance($0.point) < distance($1.point) }
+        guard let nearest, distance(nearest.point) < 32 else { return nil }
+        return nearest.region
     }
 
     // MARK: - 그리기
@@ -221,8 +272,9 @@ final class RouteMapModel {
         }
         let cam = camera(at: now)
         let view = Viewport(cam: cam, k: cam.scale, w: Double(size.width), h: Double(size.height))
+        hits.removeAll(keepingCapacity: true)
 
-        ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Term.surface))
+        ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(paper))
         drawDots(&ctx, view: view, now: now)
         drawEdgeFade(&ctx, size: size)
         if stage == .onDevice {
@@ -273,15 +325,18 @@ final class RouteMapModel {
         }
     }
 
-    /// 가장자리를 상자 색으로 흐려서 점이 테두리에서 잘려 보이지 않게
+    /// 가장자리를 배경색으로 흐려서 점이 테두리에서 잘려 보이지 않게.
+    /// 화면 배경으로 깔면 머리줄·패널 밑으로 더 길게 흐린다.
     private func drawEdgeFade(_ ctx: inout GraphicsContext, size: CGSize) {
-        let w = size.width, h = size.height, side: CGFloat = 28, edge = Self.edgeFade
-        let fade = Gradient(colors: [Term.surface, Term.surface.opacity(0)])
+        let w = size.width, h = size.height, side: CGFloat = 28
+        let top = Self.edgeFade + CGFloat(insets.top) * 0.8
+        let bottom = Self.edgeFade + CGFloat(insets.bottom) * 1.2
+        let fade = Gradient(colors: [paper, paper.opacity(0)])
         let bands: [(CGRect, CGPoint, CGPoint)] = [
             (CGRect(x: 0, y: 0, width: side, height: h), CGPoint(x: 0, y: 0), CGPoint(x: side, y: 0)),
             (CGRect(x: w - side, y: 0, width: side, height: h), CGPoint(x: w, y: 0), CGPoint(x: w - side, y: 0)),
-            (CGRect(x: 0, y: 0, width: w, height: edge), CGPoint(x: 0, y: 0), CGPoint(x: 0, y: edge)),
-            (CGRect(x: 0, y: h - edge, width: w, height: edge), CGPoint(x: 0, y: h), CGPoint(x: 0, y: h - edge)),
+            (CGRect(x: 0, y: 0, width: w, height: top), CGPoint(x: 0, y: 0), CGPoint(x: 0, y: top)),
+            (CGRect(x: 0, y: h - bottom, width: w, height: bottom), CGPoint(x: 0, y: h), CGPoint(x: 0, y: h - bottom)),
         ]
         for (rect, start, end) in bands {
             ctx.fill(Path(rect), with: .linearGradient(fade, startPoint: start, endPoint: end))
@@ -318,6 +373,19 @@ final class RouteMapModel {
         let failed = run?.failure != nil
         let color = failed ? Term.red : Term.green
 
+        // 고를 수 있는 다른 나라로 가는 길(아주 옅게)
+        if stage == .idle || stage == .failed {
+            for region in VPNRegion.allCases where region != destination {
+                guard let other = arcs[region], !other.local else { continue }
+                var path = Path()
+                for i in 0...48 {
+                    let p = view.point(other.point(at: Double(i) / 48))
+                    if i == 0 { path.move(to: p) } else { path.addLine(to: p) }
+                }
+                ctx.stroke(path, with: .color(Term.muted.opacity(0.18)), style: StrokeStyle(lineWidth: 1, dash: [1, 5]))
+            }
+        }
+
         // 갈 길(점선)
         if run?.finish == nil || fade < 1 {
             let alpha = run == nil ? 0.55 : 0.5 * fade
@@ -342,7 +410,7 @@ final class RouteMapModel {
                 let rect = CGRect(x: p.x - s / 2, y: p.y - s / 2, width: s, height: s)
                 var c = ctx
                 c.opacity = fade * max(pop, 0.01)
-                c.fill(Path(rect), with: .color(Term.surface))
+                c.fill(Path(rect), with: .color(paper))
                 c.stroke(Path(rect), with: .color(failed && i == run.stops.count - 1 ? Term.red : Term.green), lineWidth: 1.2)
                 // 번호는 경로 바깥쪽(위)에
                 let normal: CGVector
@@ -403,8 +471,9 @@ final class RouteMapModel {
         for offset in [-360.0, 0, 360] {
             let x = view.sx(base + offset), y = view.sy(RouteMath.mercY(geo.lat))
             guard x > -40, x < view.w + 40, y > -20, y < view.h + 20 else { continue }
+            hits.append((region, CGPoint(x: x, y: y)))
             let rect = CGRect(x: x - 3.5, y: y - 3.5, width: 7, height: 7)
-            ctx.fill(Path(rect), with: .color(on ? Term.green : Term.surface))
+            ctx.fill(Path(rect), with: .color(on ? Term.green : paper))
             ctx.stroke(Path(rect), with: .color(on ? Term.green : Term.muted), lineWidth: 1.2)
             let text = on && stage == .connected ? "\(region.rawValue) · \(geo.city)" : region.rawValue
             let dx = on && arc.local && stage != .onDevice ? Self.orbit + 7 : 8
@@ -415,6 +484,10 @@ final class RouteMapModel {
 
     private func drawYou(_ ctx: inout GraphicsContext, view: Viewport) {
         let p = view.point(origin.world)
+        // you 바로 밑에 가려진 나라(서울에서 kr)는 you를 눌러 고른다
+        for region in VPNRegion.allCases where origin.km(to: region.geo) <= 150 {
+            hits.append((region, p))
+        }
         ctx.fill(Path(ellipseIn: CGRect(x: p.x - 3.2, y: p.y - 3.2, width: 6.4, height: 6.4)), with: .color(Term.text))
         strokeRing(&ctx, center: p, radius: 6.5, color: Term.text.opacity(0.35))
         if stage == .onDevice {
@@ -428,11 +501,20 @@ final class RouteMapModel {
     }
 
     /// 왼쪽 위: 카메라 중심 좌표 · 오른쪽 위: 거리 · 왼쪽 아래: 도시 → 도시
+    /// 화면 배경으로 깔면 위 줄은 머리줄 밑 오른쪽, 아래 줄은 패널 바로 위로 옮긴다.
     private func drawHUD(_ ctx: inout GraphicsContext, view: Viewport) {
-        let lat = RouteMath.lat(mercY: view.cam.y)
+        let hero = chrome != .boxed
+        let side = hero ? 16.0 : 10.0
+        let topY = hero ? insets.top + 6 : 13
+        let bottomY = view.h - insets.bottom - (hero ? 18 : 13)
+        let lat = RouteMath.lat(mercY: view.cam.y - (insets.top - insets.bottom) / 2 / view.k)
         let lon = RouteMath.normalized(view.cam.x)
         let coords = String(format: "%.2f°%@ %.2f°%@", abs(lat), lat >= 0 ? "N" : "S", abs(lon), lon >= 0 ? "E" : "W")
-        label(&ctx, coords, at: CGPoint(x: 10, y: 13), anchor: .leading, color: Term.muted)
+        if hero {
+            label(&ctx, coords, at: CGPoint(x: view.w - side, y: topY), anchor: .trailing, color: Term.muted)
+        } else {
+            label(&ctx, coords, at: CGPoint(x: side, y: topY), anchor: .leading, color: Term.muted)
+        }
 
         let to = destination.geo
         let distance: String
@@ -448,8 +530,12 @@ final class RouteMapModel {
             distance = arc.local ? "local" : "\(RouteMath.grouped(Int(origin.km(to: to)))) km"
             bottom = "\(origin.city) → \(to.city)"
         }
-        label(&ctx, distance, at: CGPoint(x: view.w - 10, y: 13), anchor: .trailing, color: Term.muted)
-        label(&ctx, bottom, at: CGPoint(x: 10, y: view.h - 13), anchor: .leading,
+        if hero {
+            label(&ctx, distance, at: CGPoint(x: view.w - side, y: bottomY), anchor: .trailing, color: Term.muted)
+        } else {
+            label(&ctx, distance, at: CGPoint(x: view.w - side, y: topY), anchor: .trailing, color: Term.muted)
+        }
+        label(&ctx, bottom, at: CGPoint(x: side, y: bottomY), anchor: .leading,
               color: stage == .connected ? Term.green : Term.muted)
     }
 
