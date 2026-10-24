@@ -21,17 +21,23 @@ struct WifiScanApp: App {
         NagoLog.shared.observeVPN()
     }
 
+    /// 처음 보여 줄 탭. 보통은 vpn이고, 스크린샷 때 `-nagoTab 1`처럼 실행 인자로 고른다.
+    @State private var tab = UserDefaults.standard.integer(forKey: "nagoTab")
+
     var body: some Scene {
         WindowGroup {
-            TabView {
+            TabView(selection: $tab) {
                 VPNView()
                     .tabItem { Label("vpn", systemImage: "lock.shield") }
+                    .tag(0)
 
                 DashView()
                     .tabItem { Label("dash", systemImage: "chart.bar.xaxis") }
+                    .tag(1)
 
                 SettingsView()
                     .tabItem { Label("settings", systemImage: "gearshape") }
+                    .tag(2)
             }
             .tint(Term.green)
             .preferredColorScheme(.dark)

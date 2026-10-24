@@ -79,9 +79,39 @@ struct TermPage<Content: View>: View {
             .termColumn()
         }
         .scrollDismissesKeyboard(.interactively)
+        .statusBarScrim()
         .background(Term.bg.ignoresSafeArea())
         .foregroundStyle(Term.text)
         .tint(Term.green)
+    }
+}
+
+extension View {
+    /// 스크롤한 내용이 상태 막대(시간·배터리) 밑으로 비쳐 보이지 않게 덮는다. 탭 화면 맨 바깥에 단다.
+    /// overlay + ignoresSafeArea로는 띠가 상태 막대까지 늘어나지 않아서, 안전 영역 높이를 재서 그만큼 위로 올려 그린다.
+    func statusBarScrim() -> some View {
+        GeometryReader { geo in
+            ZStack(alignment: .top) {
+                self
+                StatusBarScrim(height: geo.safeAreaInsets.top)
+            }
+        }
+    }
+}
+
+struct StatusBarScrim: View {
+    /// 상태 막대(아이패드는 위 탭 막대까지) 높이
+    let height: CGFloat
+
+    var body: some View {
+        LinearGradient(stops: [.init(color: Term.bg, location: 0),
+                               .init(color: Term.bg, location: height / (height + 10)),
+                               .init(color: Term.bg.opacity(0), location: 1)],
+                       startPoint: .top, endPoint: .bottom)
+            .frame(height: height + 10)
+            .offset(y: -height)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 

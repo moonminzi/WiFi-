@@ -1,0 +1,419 @@
+import SwiftUI
+
+// vpn 탭 콘솔(지도 위로 올라오는 패널)에 쓰는 조각들.
+
+/// 머리줄 오른쪽 `● secured` 알약. 연결돼 있으면 불이 숨을 쉰다.
+struct StatusPill: View {
+    enum Kind { case on, busy, error, off }
+    let kind: Kind
+    let text: String
+
+    @State private var breathe = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+                .shadow(color: kind == .off ? .clear : color.opacity(0.9), radius: breathe ? 5 : 1.5)
+                .opacity(kind == .busy && breathe ? 0.35 : 1)
+            Text(text)
+                .font(Term.mono(12, .semibold))
+                .foregroundStyle(kind == .off ? Term.muted : color)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Term.surface.opacity(0.85), in: Capsule())
+        .overlay(Capsule().stroke(kind == .off ? Term.border : color.opacity(0.45), lineWidth: 1))
+        .animation(.easeInOut(duration: 0.25), value: kind)
+        .onAppear { startBreathing() }
+        .onChange(of: kind) { _, _ in startBreathing() }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var color: Color {
+        switch kind {
+        case .on: Term.green
+        case .busy: Term.amber
+        case .error: Term.red
+        case .off: Term.muted
+        }
+    }
+
+    private func startBreathing() {
+        breathe = false
+        guard !reduceMotion, kind == .on || kind == .busy else { return }
+        withAnimation(.easeInOut(duration: kind == .busy ? 0.6 : 1.6).repeatForever()) { breathe = true }
+    }
+}
+
+/// 연결 진행 `api › boot › tunnel › up`. 지난 칸은 초록, 지금 칸은 노랗게 깜빡인다.
+struct PhasePipeline: View {
+    let index: Int
+    /// 유니콘 HTTPS는 서버를 켜지 않는다
+    var onDevice = false
+
+    @State private var blink = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var labels: [String] { onDevice ? ["config", "local", "tunnel", "up"] : ["api", "boot", "tunnel", "up"] }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(labels.indices, id: \.self) { i in
+                VStack(alignment: .leading, spacing: 5) {
+                    Capsule()
+                        .fill(fill(i))
+                        .frame(height: 3)
+                        .opacity(i == index && blink ? 0.35 : 1)
+                    Text(labels[i])
+                        .font(Term.mono(10, i == index ? .semibold : .regular))
+                        .foregroundStyle(i <= index ? (i == index ? Term.amber : Term.green) : Term.muted)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .animation(.easeOut(duration: 0.3), value: index)
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 0.55).repeatForever()) { blink = true }
+        }
+        .accessibilityElement()
+        .accessibilityLabel("step \(min(index, labels.count - 1) + 1) of \(labels.count): \(labels[min(index, labels.count - 1)])")
+    }
+
+    private func fill(_ i: Int) -> Color {
+        if i < index { return Term.green }
+        if i == index { return Term.amber }
+        return Term.track
+    }
+}
+
+/// 나갈 국가 카드 한 장: 깃발, 코드, 도시, 대략 왕복 시간
+struct RegionCard: View {
+    let region: VPNRegion
+    let selected: Bool
+    /// 지금 이 나라로 붙어 있다
+    let live: Bool
+    /// 실제로 잰 왕복 시간(ms). 없으면 거리로 어림한다.
+    var measured: Int?
+    /// 잰 것 중 가장 빠른 나라
+    var fastest = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 0) {
+                    Text(region.flag).font(.system(size: 18))
+                    Spacer(minLength: 2)
+                    if live {
+                        Circle().fill(Term.green).frame(width: 6, height: 6)
+                            .shadow(color: Term.green, radius: 3)
+                    } else if fastest {
+                        Text("fast")
+                            .font(Term.mono(8.5, .semibold))
+                            .foregroundStyle(Term.green)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .overlay(RoundedRectangle(cornerRadius: 3).stroke(Term.green.opacity(0.6), lineWidth: 1))
+                    }
+                }
+                Text(region.rawValue)
+                    .font(Term.mono(16, .bold))
+                    .foregroundStyle(selected ? Term.green : Term.num)
+                Text(region.geo.city)
+                    .font(Term.mono(10))
+                    .foregroundStyle(Term.muted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Text(measured.map { "\($0)ms" } ?? "~\(Self.rtt(region))ms")
+                    .font(Term.mono(10, measured == nil ? .regular : .semibold))
+                    .foregroundStyle(rttColor)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? Term.green.opacity(0.08) : Term.surface, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? Term.green : Term.border, lineWidth: selected ? 1.5 : 1))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .animation(.easeOut(duration: 0.2), value: selected)
+        .accessibilityLabel("\(region.geo.city), \(measured.map { "\($0)" } ?? "about \(Self.rtt(region))") milliseconds")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// 잰 값은 빠를수록 초록 → 노랑 → 빨강
+    private var rttColor: Color {
+        guard let measured else { return selected ? Term.key : Term.muted }
+        if measured < 80 { return Term.green }
+        if measured < 180 { return Term.amber }
+        return Term.red
+    }
+
+    /// 빛이 광섬유로 1ms에 200km쯤 가니 왕복은 km/100ms. 장비·우회 몫으로 조금 더한다(어림값).
+    static func rtt(_ region: VPNRegion) -> Int {
+        let km = GeoPoint.here.km(to: region.geo)
+        return Int((km / 100 * 1.3 + 6).rounded())
+    }
+}
+
+/// `wg/neptun` `adblock` 처럼 지금 설정을 칩으로
+struct FlagRow: View {
+    let flags: [String]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(flags, id: \.self) { flag in
+                    Text(flag)
+                        .font(Term.mono(11))
+                        .foregroundStyle(Term.muted)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Term.border, lineWidth: 1))
+                }
+            }
+        }
+        .scrollClipDisabled()
+    }
+}
+
+/// 연결 중 버튼 위를 훑고 지나가는 빛
+struct ScanSweep: View {
+    var tint: Color = .white
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        if reduceMotion {
+            Color.clear
+        } else {
+            TimelineView(.animation) { timeline in
+                GeometryReader { geo in
+                    let t = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.6) / 1.6
+                    let band = geo.size.width * 0.35
+                    LinearGradient(colors: [tint.opacity(0), tint.opacity(0.22), tint.opacity(0)],
+                                   startPoint: .leading, endPoint: .trailing)
+                        .frame(width: band)
+                        .offset(x: -band + (geo.size.width + band) * t)
+                }
+            }
+        }
+    }
+}
+
+/// 연결돼 있는 동안 `↓ 2.4 MB/s  ↑ 120 KB/s` + 최근 1분 막대
+struct TrafficPanel: View {
+    let meter: TrafficMeter
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 14) {
+                speed("↓", meter.current?.down ?? 0, Term.green)
+                speed("↑", meter.current?.up ?? 0, Term.key)
+                Spacer(minLength: 0)
+                Text("\(TrafficMeter.bytes(meter.totalDown)) ↓ · \(TrafficMeter.bytes(meter.totalUp)) ↑")
+                    .font(Term.mono(10.5))
+                    .foregroundStyle(Term.muted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            Sparkline(history: meter.history)
+                .frame(height: 34)
+                .accessibilityHidden(true)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func speed(_ arrow: String, _ value: Double, _ color: Color) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text(arrow).foregroundStyle(color)
+            Text(TrafficMeter.speed(value)).foregroundStyle(Term.num)
+                .monospacedDigit()
+        }
+        .font(Term.mono(15, .semibold))
+    }
+}
+
+/// 받은 양(초록 면)과 보낸 양(하늘색 선). 오른쪽 끝이 지금이다.
+struct Sparkline: View {
+    let history: [TrafficMeter.Rate]
+
+    var body: some View {
+        Canvas { ctx, size in
+            let n = TrafficMeter.window
+            let peak = max(history.map { max($0.down, $0.up) }.max() ?? 0, 50_000)
+            let step = size.width / CGFloat(n - 1)
+            let offset = n - history.count
+            func point(_ i: Int, _ v: Double) -> CGPoint {
+                CGPoint(x: CGFloat(i + offset) * step, y: size.height - CGFloat(v / peak) * (size.height - 2) - 1)
+            }
+            // 바닥선
+            var base = Path()
+            base.move(to: CGPoint(x: 0, y: size.height - 0.5))
+            base.addLine(to: CGPoint(x: size.width, y: size.height - 0.5))
+            ctx.stroke(base, with: .color(Term.border), lineWidth: 1)
+            guard history.count > 1 else { return }
+
+            var down = Path()
+            var area = Path()
+            for (i, rate) in history.enumerated() {
+                let p = point(i, rate.down)
+                if i == 0 {
+                    down.move(to: p)
+                    area.move(to: CGPoint(x: p.x, y: size.height))
+                }
+                down.addLine(to: p)
+                area.addLine(to: p)
+            }
+            area.addLine(to: CGPoint(x: point(history.count - 1, 0).x, y: size.height))
+            area.closeSubpath()
+            ctx.fill(area, with: .linearGradient(Gradient(colors: [Term.green.opacity(0.35), Term.green.opacity(0.02)]),
+                                                 startPoint: CGPoint(x: 0, y: 0), endPoint: CGPoint(x: 0, y: size.height)))
+            ctx.stroke(down, with: .color(Term.green), style: StrokeStyle(lineWidth: 1.3, lineJoin: .round))
+
+            var up = Path()
+            for (i, rate) in history.enumerated() {
+                let p = point(i, rate.up)
+                if i == 0 { up.move(to: p) } else { up.addLine(to: p) }
+            }
+            ctx.stroke(up, with: .color(Term.key.opacity(0.8)), style: StrokeStyle(lineWidth: 1, lineJoin: .round))
+
+            if let last = history.last {
+                let p = point(history.count - 1, last.down)
+                ctx.fill(Path(ellipseIn: CGRect(x: p.x - 2.5, y: p.y - 2.5, width: 5, height: 5)), with: .color(Term.green))
+            }
+        }
+    }
+}
+
+/// 네트워크 검사 결과: 등급 + 한 줄 판정 + 검사마다 한 줄
+struct ScanPanel: View {
+    let scan: NetScan
+    let vpnOn: Bool
+    let rescan: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("// net scan").foregroundStyle(Term.muted)
+                Spacer()
+                if scan.running {
+                    Text("scanning \(scan.current ?? "")…").foregroundStyle(Term.amber)
+                } else if let at = scan.finishedAt {
+                    (Text(at, style: .relative) + Text(" ago")).foregroundStyle(Term.muted)
+                }
+                Button(action: rescan) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(scan.running ? Term.muted : Term.text)
+                        .frame(width: 26, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(scan.running)
+                .accessibilityLabel("scan again")
+            }
+            .font(Term.mono(11))
+
+            HStack(alignment: .center, spacing: 14) {
+                VStack(spacing: 0) {
+                    Text(scan.running ? "…" : scan.grade)
+                        .font(Term.mono(28, .bold))
+                        .foregroundStyle(gradeColor)
+                    Text(scan.running ? "--" : "\(scan.score)")
+                        .font(Term.mono(9.5))
+                        .foregroundStyle(Term.muted)
+                }
+                .frame(width: 54, height: 54)
+                .background(gradeColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(gradeColor.opacity(0.6), lineWidth: 1.2))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verdict)
+                        .font(Term.mono(14, .semibold))
+                        .foregroundStyle(scan.running ? Term.text : gradeColor)
+                    Text(advice)
+                        .font(Term.mono(11))
+                        .foregroundStyle(Term.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(scan.checks) { check in
+                    row(symbol(check.level), color(check.level), check.id, check.detail,
+                        detailColor: check.level == .warn || check.level == .fail ? color(check.level) : Term.text)
+                }
+                if scan.running {
+                    ForEach(NetScan.order.filter { id in !scan.checks.contains { $0.id == id } }, id: \.self) { id in
+                        row(id == scan.current ? ">" : "·", id == scan.current ? Term.amber : Term.muted, id,
+                            id == scan.current ? "…" : "", detailColor: Term.muted)
+                    }
+                }
+            }
+            .animation(.easeOut(duration: 0.2), value: scan.checks.count)
+        }
+        .padding(12)
+        .background(Term.surface, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Term.border, lineWidth: 1))
+    }
+
+    private func row(_ symbol: String, _ symbolColor: Color, _ id: String, _ detail: String, detailColor: Color) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(symbol).foregroundStyle(symbolColor).frame(width: 10, alignment: .leading)
+            Text(id).foregroundStyle(Term.key).frame(width: 66, alignment: .leading)
+            Text(detail).foregroundStyle(detailColor)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(Term.mono(11.5))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .transition(.opacity.combined(with: .move(edge: .leading)))
+    }
+
+    private var verdict: String {
+        if scan.running { return "probing this network" }
+        switch scan.grade {
+        case "A": return "clean network"
+        case "B": return "mostly fine"
+        case "C": return "risky network"
+        default: return "hostile network"
+        }
+    }
+
+    private var advice: String {
+        if scan.running { return "dns · tls · portal · ipv6 · exit · quality" }
+        if vpnOn { return "checked through the tunnel" }
+        if scan.hasProblems { return "connect to route around it" }
+        return "nothing odd · the router still sees where you go"
+    }
+
+    private var gradeColor: Color {
+        if scan.running { return Term.amber }
+        switch scan.grade {
+        case "A", "B": return Term.green
+        case "C": return Term.amber
+        default: return Term.red
+        }
+    }
+
+    private func symbol(_ level: NetScan.Level) -> String {
+        switch level {
+        case .pass: return "✓"
+        case .info: return "·"
+        case .warn: return "!"
+        case .fail: return "✗"
+        }
+    }
+
+    private func color(_ level: NetScan.Level) -> Color {
+        switch level {
+        case .pass: return Term.green
+        case .info: return Term.muted
+        case .warn: return Term.amber
+        case .fail: return Term.red
+        }
+    }
+}

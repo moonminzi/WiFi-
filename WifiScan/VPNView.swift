@@ -24,15 +24,112 @@ struct VPNView: View {
     /// `jp: booting…` 같은 진행 상황 한 줄
     @State private var phase: String?
     @State private var errorText: String?
+    /// 이번 연결 한 번의 진행 단계. 콘솔의 `// boot log`에 시각과 함께 쌓인다.
+    @State private var steps: [Step] = []
+    /// wg/유니콘 터널이 알려 주는 핸드셰이크·주고받은 양(연결돼 있는 동안 5초마다)
+    @State private var linkStats: String?
+    /// 진행 중인 연결. 해외 서버는 켜지는 데 몇 분 걸려서 그동안 버튼으로 취소할 수 있다.
+    @State private var connectTask: Task<Void, Never>?
+    /// 마지막 연결을 직접 취소했는지(boot log 끝줄 표시)
+    @State private var cancelled = false
+    /// 나라별 실제 왕복 시간(카드에 표시)
+    @State private var probe = LatencyProbe()
+    /// 밖에서 보이는 내 IP·나라. 연결되면 나가는 서버 것이어야 한다.
+    @State private var exitInfo: ExitInfo?
+    /// 연결된 채로 다른 나라를 누르면 갈아탈지 묻는다
+    @State private var hopTarget: VPNRegion?
+    /// 터널로 오가는 속도(1초마다)
+    @State private var traffic = TrafficMeter()
+    /// 지금 네트워크 검사(앱을 열면 한 번 돈다)
+    @State private var scan = NetScan()
+
+    struct Step: Identifiable {
+        let id = UUID()
+        let at: Date
+        let text: String
+    }
+
+    /// 지도 위로 겹쳐 올라오는 패널 높이
+    private static let overlap: CGFloat = 28
 
     var body: some View {
-        TermPage(path: "vpn") {
-            routeBlock
-            statusBlock
-            exitBlock
-            connectButton
+        GeometryReader { geo in
+            let top = geo.safeAreaInsets.top
+            ScrollViewReader { reader in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        hero(top: top, height: heroHeight(geo.size.height + top))
+                        console
+                            .padding(.horizontal, 16)
+                            .padding(.top, 14)
+                            .padding(.bottom, 24)
+                            .background(alignment: .top) { sheet }
+                            .termColumn()
+                            .padding(.top, -Self.overlap)
+                        Color.clear.frame(height: 1).id("end")
+                    }
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .ignoresSafeArea(edges: .top)
+                .task {
+                    guard Demo.scrollToEnd else { return }
+                    try? await Task.sleep(for: .seconds(1.6))
+                    reader.scrollTo("end", anchor: .bottom)
+                }
+            }
         }
-        .task { await vpn.reload() }
+        .statusBarScrim()
+        .background(Term.bg.ignoresSafeArea())
+        .foregroundStyle(Term.text)
+        .tint(Term.green)
+        .sensoryFeedback(.selection, trigger: region)
+        .sensoryFeedback(trigger: vpn.status) { old, new in
+            if new == .connected { return .success }
+            if old.isActive, new == .disconnected { return .impact(weight: .light) }
+            return nil
+        }
+        .task {
+            await vpn.reload()
+            await runScan()
+        }
+        .task(id: vpn.status == .connected) { await pollLink() }
+        .task(id: vpn.status) { await statusSettled() }
+        .onAppear(perform: applyDemo)
+    }
+
+    /// 스크린샷용 데모 상태(Debug 빌드 + `-nagoDemo`)
+    private func applyDemo() {
+        guard let state = Demo.state else { return }
+        let now = Date()
+        let demoSteps = Demo.steps.map { Step(at: now.addingTimeInterval(-$0.ago), text: $0.text) }
+        switch state {
+        case "connecting":
+            region = .jp
+            busy = true
+            steps = demoSteps
+            phase = demoSteps.last?.text
+        case "connected":
+            region = .jp
+            savedRegion = .jp
+            // 연결된 시각(Demo.since) 바로 전에 찍힌 단계들
+            steps = Demo.steps.map { Step(at: Demo.since.addingTimeInterval(-$0.ago + Demo.steps[0].ago - 26), text: $0.text) }
+            linkStats = Demo.linkStats
+            traffic.fillDemo()
+        case "scan":
+            region = .jp
+            scan.showDemo(running: true)
+        case "failed":
+            region = .us
+            steps = Array(demoSteps.prefix(2)).map { Step(at: $0.at, text: $0.text.replacingOccurrences(of: "jp", with: "us")) }
+            errorText = "timeout: server not up after 4m, retry"
+        default:
+            region = .jp
+        }
+    }
+
+    /// 화면의 절반쯤을 지도로. 너무 작거나(가로 아이폰) 너무 크지(아이패드) 않게.
+    private func heroHeight(_ screen: CGFloat) -> CGFloat {
+        min(max(screen * 0.52, 320), 560)
     }
 
     /// 킬 스위치는 우리 터널(wg)로만 한다. 자동 연결은 ikev2로 못 하니 wg로 민다.
@@ -49,14 +146,15 @@ struct VPNView: View {
     }
 
     /// `wg/neptun · adblock · kill-switch` 처럼 지금 설정 한 줄
-    private var flags: String {
+    private var flags: [String] {
         if effectiveProto == .unicorn {
             var parts = ["unicorn", unicornSettings.summary]
             if autoConnect != .off { parts.append("auto:\(autoConnect.label)") }
-            return parts.joined(separator: " · ")
+            return parts
         }
         var parts = [effectiveProto == .wireguard ? "wg/\(wgEngine)" : effectiveProto.label]
         if effectiveProto == .wireguard, wgEngine == "neptun", wgQueue != 8 { parts[0] += " q\(wgQueue)" }
+        if fastMode, effectiveProto != .wireguard { parts.append("gcm") }
         if adblock {
             parts.append("adblock")
         } else if effectiveProto != .ikev2, let dns = DNSList.parse(customDNS) {
@@ -64,18 +162,56 @@ struct VPNView: View {
         }
         if killSwitch { parts.append("kill-switch") }
         if autoConnect != .off { parts.append("auto:\(autoConnect.label)") }
-        return parts.joined(separator: " · ")
+        return parts
     }
 
-    // MARK: - 경로 지도
+    /// 나라를 못 고르는 때(연결하는 중). 연결돼 있을 때 고르면 갈아타기(hop)를 묻는다.
+    private var locked: Bool { busy || vpn.status.isBusy }
+    /// 지도·카드에 보여 줄 나라: 연결돼 있으면 실제로 붙은 나라
+    private var shownRegion: VPNRegion { vpn.status.isActive && !busy ? savedRegion : region }
+    private var onDevice: Bool { routeStage == .onDevice }
+
+    // MARK: - 지도(화면 위쪽 배경)
 
     /// you → 나갈 국가. 진행 단계(phase)가 바뀔 때마다 경로에 웨이포인트가 하나씩 찍힌다.
-    private var routeBlock: some View {
-        TermBlock(label: "route", inset: 0) {
-            RouteMap(destination: vpn.status.isActive && !busy ? savedRegion : region,
+    /// 머리줄은 지도 위에 띄우고, 나라 점을 누르면 그 나라를 고른다.
+    private func hero(top: CGFloat, height: CGFloat) -> some View {
+        ZStack(alignment: .top) {
+            RouteMap(destination: shownRegion,
                      stage: routeStage,
-                     hop: phase ?? (vpn.status.isBusy ? statusText : nil))
+                     hop: phase ?? (vpn.status.isBusy ? statusText : nil),
+                     chrome: .hero(top: top + 56, bottom: Self.overlap),
+                     height: height,
+                     onSelect: locked || effectiveProto == .unicorn ? nil : { select($0) },
+                     flowDown: traffic.current?.down ?? 0,
+                     flowUp: traffic.current?.up ?? 0,
+                     scanning: scan.running)
+                // 위로 밀면 지도는 천천히 따라가고(패럴랙스), 아래로 당기면 늘어나서 빈 곳이 안 보인다
+                .visualEffect { content, proxy in
+                    let y = proxy.frame(in: .scrollView).minY
+                    return content
+                        .scaleEffect(y > 0 ? 1 + y / max(proxy.size.height, 1) : 1, anchor: .bottom)
+                        .offset(y: y < 0 ? -y * 0.45 : 0)
+                }
+
+            HStack(alignment: .center, spacing: 0) {
+                Text("~/").foregroundStyle(Term.muted)
+                Text("vpn").foregroundStyle(Term.green)
+                Text(" $ ").foregroundStyle(Term.muted)
+                BlinkingCursor()
+                Spacer(minLength: 12)
+                scanButton
+                    .padding(.trailing, 8)
+                StatusPill(kind: pillKind, text: pillText)
+            }
+            .font(Term.mono(22, .bold))
+            .padding(.horizontal, 16)
+            .padding(.top, top + 10)
+            .termColumn()
         }
+        .frame(height: height)
+        // 패럴랙스로 내려간 지도가 아래 콘솔 옆으로 비어져 나오지 않게 아래만 자른다(위는 당겨서 늘어날 몫)
+        .mask(alignment: .bottom) { Rectangle().frame(height: height + 2000) }
     }
 
     private var routeStage: RouteMap.Stage {
@@ -85,31 +221,216 @@ struct VPNView: View {
         return errorText != nil ? .failed : .idle
     }
 
-    // MARK: - 상태
+    private var pillKind: StatusPill.Kind {
+        switch vpn.status {
+        case .connected: return .on
+        case .connecting, .reasserting, .disconnecting: return .busy
+        default: return busy ? .busy : (errorText != nil ? .error : .off)
+        }
+    }
 
-    private var statusBlock: some View {
-        TermBlock(label: "status") {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(statusTag)
-                    .foregroundStyle(statusColor)
-                Text(statusText)
-                    .foregroundStyle(vpn.status == .connected ? Term.text : Term.muted)
-                if vpn.status.isBusy {
-                    ProgressView().controlSize(.mini).tint(Term.muted)
-                }
+    private var pillText: String {
+        switch pillKind {
+        case .on: return onDevice ? "shielded" : "secured"
+        case .busy: return vpn.status == .disconnecting ? "closing" : "linking"
+        case .error: return "failed"
+        case .off: return "exposed"
+        }
+    }
+
+    // MARK: - 콘솔(지도 위로 올라오는 패널)
+
+    /// 지도 위에 겹쳐 올라오는 판. 위쪽만 둥글고 손잡이가 달린 시트 모양.
+    private var sheet: some View {
+        let shape = UnevenRoundedRectangle(topLeadingRadius: 18, topTrailingRadius: 18)
+        return shape.fill(Term.bg)
+            .overlay(shape.stroke(Term.border, lineWidth: 1))
+            .overlay(alignment: .top) {
+                Capsule().fill(Term.border).frame(width: 36, height: 4).padding(.top, 7)
             }
-            .font(Term.mono(14, .semibold))
+            .shadow(color: .black.opacity(0.5), radius: 18, y: -6)
+            // 아래쪽 테두리·그림자는 화면 밖으로 밀어 낸다(아이패드처럼 내용이 짧아도 화면 끝까지)
+            .padding(.bottom, -1200)
+    }
 
-            Text(flags)
-                .font(Term.mono(12))
-                .foregroundStyle(Term.muted)
-
-            if let phase {
-                StatusLine(kind: .running, text: phase)
-            } else if let errorText {
-                StatusLine(kind: .error, text: errorText)
+    private var console: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            sessionPanel
+            connectButton
+            if onDevice {
+                unicornPanel
+            } else {
+                exitPanel
+            }
+            if !steps.isEmpty || errorText != nil {
+                bootLog
+            }
+            if scan.running || !scan.checks.isEmpty {
+                ScanPanel(scan: scan, vpnOn: vpn.status == .connected) { Task { await runScan() } }
             }
         }
+        .padding(.top, 8)
+    }
+
+    /// 머리줄의 레이더 단추: 지금 네트워크를 검사한다
+    private var scanButton: some View {
+        Button {
+            Task { await runScan() }
+        } label: {
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(scan.running ? Term.amber : Term.text)
+                .frame(width: 30, height: 30)
+                .background(Term.surface.opacity(0.85), in: Circle())
+                .overlay(Circle().stroke(scan.running ? Term.amber.opacity(0.5) : Term.border, lineWidth: 1))
+                .symbolEffect(.variableColor.iterative, isActive: scan.running)
+        }
+        .buttonStyle(.plain)
+        .disabled(scan.running)
+        .accessibilityLabel("scan this network")
+    }
+
+    private func runScan() async {
+        let on = vpn.status == .connected
+        await scan.run(vpnOn: on, expected: on && vpn.activeProto != .unicorn ? savedRegion : nil)
+    }
+
+    // MARK: 세션
+
+    private var sessionPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(statusTag).foregroundStyle(statusColor)
+                Text(statusText).foregroundStyle(vpn.status == .connected ? Term.text : Term.muted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .font(Term.mono(13, .semibold))
+
+            HStack(alignment: .lastTextBaseline, spacing: 10) {
+                Group {
+                    if onDevice {
+                        Text("on-device")
+                    } else {
+                        Text(shownRegion.flag + " ") + Text(shownRegion.geo.city)
+                    }
+                }
+                .font(Term.mono(28, .bold))
+                .foregroundStyle(vpn.status == .connected ? Term.green : Term.num)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                Spacer(minLength: 8)
+                if let since = vpn.connectedSince, vpn.status == .connected {
+                    TimelineView(.periodic(from: since, by: 1)) { timeline in
+                        Text(Self.clock(timeline.date.timeIntervalSince(since)))
+                            .font(Term.mono(22, .semibold))
+                            .foregroundStyle(Term.num)
+                            .monospacedDigit()
+                    }
+                } else if !onDevice {
+                    Text(distanceText(shownRegion))
+                        .font(Term.mono(13))
+                        .foregroundStyle(Term.muted)
+                }
+            }
+
+            if busy || vpn.status.isBusy {
+                PhasePipeline(index: pipelineIndex, onDevice: onDevice)
+            } else {
+                exitLine
+            }
+            if !busy, vpn.status == .connected, traffic.hasData {
+                TrafficPanel(meter: traffic)
+            } else if !busy, vpn.status == .connected {
+                Text(linkStats.map { "link · " + $0 } ?? (vpn.activeProto == .ikev2 ? "link · ikev2 system tunnel" : "link · waiting for stats…"))
+                    .font(Term.mono(12))
+                    .foregroundStyle(linkStats == nil ? Term.muted : Term.green)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+
+            FlagRow(flags: flags)
+        }
+    }
+
+    /// `exit 54.199.12.4 · JP ✓` — 밖에서 보이는 IP가 고른 나라인지. 연결 전엔 지금 회선(isp) IP.
+    private var exitLine: some View {
+        let connected = vpn.status == .connected
+        let label = connected ? "exit" : "isp"
+        let line: Text
+        if let exitInfo {
+            let head = Text("\(label) ").foregroundStyle(Term.muted)
+                + Text(exitInfo.ip).foregroundStyle(Term.num)
+                + Text(" · \(exitInfo.country)").foregroundStyle(Term.muted)
+                + Text(exitInfo.colo.isEmpty ? "" : " \(exitInfo.colo)").foregroundStyle(Term.muted)
+            if !connected {
+                line = head + Text(" · sites see this").foregroundStyle(Term.muted.opacity(0.7))
+            } else if onDevice {
+                line = head + Text(" · same line, sni split").foregroundStyle(Term.muted.opacity(0.7))
+            } else if exitInfo.country == savedRegion.countryCode {
+                line = head + Text(" ✓ matches").foregroundStyle(Term.green)
+            } else {
+                line = head + Text(" ! not \(savedRegion.countryCode) — leak?").foregroundStyle(Term.amber)
+            }
+        } else {
+            line = Text("\(label) checking…").foregroundStyle(Term.muted)
+        }
+        return line
+            .font(Term.mono(12))
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .onTapGesture { Task { exitInfo = await ExitInfo.fetch() } }
+            .accessibilityHint("tap to check again")
+    }
+
+    /// 상태가 자리를 잡으면 출구 IP를 다시 보고, 끊겼으면 나라별 지연도 다시 잰다.
+    /// (연결된 직후엔 경로가 바뀌는 중이라 잠깐 기다린다)
+    private func statusSettled() async {
+        switch vpn.status {
+        case .connected:
+            exitInfo = nil
+            if Demo.on { await probe.measure() }
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            exitInfo = await ExitInfo.fetch()
+        case .disconnected, .invalid:
+            exitInfo = nil
+            async let info = ExitInfo.fetch()
+            await probe.measure()
+            let fetched = await info
+            if !Task.isCancelled { exitInfo = fetched }
+        default:
+            break
+        }
+    }
+
+    /// 지도·카드에서 나라를 골랐을 때. 연결돼 있으면 갈아탈지 묻는다.
+    private func select(_ choice: VPNRegion) {
+        guard !locked else { return }
+        if vpn.status == .connected {
+            if choice != savedRegion, !onDevice { hopTarget = choice }
+        } else {
+            region = choice
+        }
+    }
+
+    /// 지금 연결을 끊고 다른 나라로 다시 붙는다.
+    private func hop(to target: VPNRegion) async {
+        let from = savedRegion
+        NagoLog.add("hop \(from.rawValue) → \(target.rawValue)")
+        busy = true
+        phase = "hop: \(from.rawValue) → \(target.rawValue)"
+        await vpn.disconnect()
+        var waited = 0
+        while (vpn.status.isActive || vpn.status == .disconnecting) && waited < 40 && !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(200))
+            waited += 1
+        }
+        busy = false
+        phase = nil
+        guard !Task.isCancelled else { return }
+        region = target
+        await saveAndConnect()
     }
 
     /// `[ OK ]`, `[ .. ]`, `[DOWN]` 같은 부팅 로그식 상태 꼬리표
@@ -129,8 +450,8 @@ struct VPNView: View {
         case .connecting: return "connecting"
         case .reasserting: return "reconnecting"
         case .disconnecting: return "disconnecting"
-        case .invalid: return "not configured"
-        default: return "disconnected"
+        case .invalid: return "not set up · first connect asks once"
+        default: return "disconnected · traffic goes out direct"
         }
     }
 
@@ -142,45 +463,204 @@ struct VPNView: View {
         }
     }
 
-    // MARK: - 나갈 국가
+    /// 진행 단계 문구로 어디까지 왔는지(api → boot → tunnel → up)
+    private var pipelineIndex: Int {
+        if vpn.status == .connected && !busy { return 3 }
+        let text = phase ?? ""
+        if text.hasPrefix("unicorn") { return 2 }
+        if text.contains("ikev2") || text.contains("wg") { return 2 }
+        if text.contains("boot") || text.contains("stopping") || text.contains("retry") || text.contains("waiting") { return 1 }
+        return vpn.status.isBusy && phase == nil ? 2 : 0
+    }
 
-    private var exitBlock: some View {
-        TermBlock(label: effectiveProto == .unicorn ? "mode" : "exit node") {
-            if effectiveProto == .unicorn {
-                Text("on-device · no server")
-                    .font(Term.mono(14, .semibold))
-                    .foregroundStyle(Term.green)
-                Text("tls hello를 쪼개 보내서 sni 차단을 지나간다. 트래픽은 평소 회선으로 그대로 나간다.")
-                    .font(Term.mono(12))
-                    .foregroundStyle(Term.muted)
-            } else {
-                TermChoice(options: VPNRegion.allCases.map { (label: $0.rawValue, value: $0) },
-                           selection: $region)
-                    .disabled(busy || vpn.status.isActive)
-                    .opacity(busy || vpn.status.isActive ? 0.5 : 1)
-                Text(region.detail)
-                    .font(Term.mono(12))
-                    .foregroundStyle(Term.muted)
+    private func distanceText(_ region: VPNRegion) -> String {
+        let km = GeoPoint.here.km(to: region.geo)
+        return km < 150 ? "local" : "\(RouteMath.grouped(Int(km))) km"
+    }
+
+    /// 1:02:03 / 12:34
+    static func clock(_ seconds: TimeInterval) -> String {
+        let s = max(0, Int(seconds))
+        return s >= 3600
+            ? String(format: "%d:%02d:%02d", s / 3600, s % 3600 / 60, s % 60)
+            : String(format: "%02d:%02d", s / 60, s % 60)
+    }
+
+    // MARK: 나갈 국가
+
+    private var exitPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("// exit node").foregroundStyle(Term.muted)
+                Spacer()
+                Text(exitHint)
+                    .foregroundStyle(Term.muted.opacity(0.7))
+            }
+            .font(Term.mono(11))
+
+            HStack(spacing: 8) {
+                ForEach(VPNRegion.allCases) { option in
+                    RegionCard(region: option,
+                               selected: option == shownRegion,
+                               live: option == savedRegion && vpn.status == .connected,
+                               measured: probe.rtt[option],
+                               fastest: option == fastestRegion) {
+                        select(option)
+                    }
+                }
+            }
+            .disabled(locked)
+            .opacity(locked ? 0.55 : 1)
+            .accessibilityHint(shownRegion.detail)
+            .confirmationDialog("hop to \(hopTarget?.geo.city ?? "")?", isPresented: hopping,
+                                titleVisibility: .visible, presenting: hopTarget) { target in
+                Button("hop → \(target.rawValue) · \(target.geo.city)") {
+                    connectTask = Task { await hop(to: target) }
+                }
+                Button("stay on \(savedRegion.rawValue)", role: .cancel) {}
+            } message: { target in
+                Text("disconnects \(savedRegion.rawValue), then connects \(target.rawValue)")
             }
         }
     }
 
-    // MARK: - 연결 버튼
+    /// 잰 것 중 가장 빠른 나라(둘 이상 쟀을 때만)
+    private var fastestRegion: VPNRegion? {
+        guard probe.rtt.count > 1 else { return nil }
+        return probe.rtt.min { $0.value < $1.value }?.key
+    }
 
-    private var connectButton: some View {
-        Button {
-            Task { await saveAndConnect() }
-        } label: {
-            if busy {
-                ProgressView().tint(Term.bg)
-            } else if vpn.status.isActive {
-                Label("disconnect", systemImage: "stop.circle")
-            } else {
-                Label("connect", systemImage: "bolt.horizontal")
+    private var exitHint: String {
+        if locked { return "locked while linking" }
+        if vpn.status == .connected { return "tap another to hop" }
+        if probe.measuring { return "pinging…" }
+        return probe.rtt.isEmpty ? "tap map or card · rtt est." : "tap map or card · rtt live"
+    }
+
+    private var hopping: Binding<Bool> {
+        Binding(get: { hopTarget != nil }, set: { if !$0 { hopTarget = nil } })
+    }
+
+    private var unicornPanel: some View {
+        TermBlock(label: "mode") {
+            Text("on-device · no server")
+                .font(Term.mono(14, .semibold))
+                .foregroundStyle(Term.green)
+            Text("tls hello를 쪼개 보내서 sni 차단을 지나간다. 트래픽은 평소 회선으로 그대로 나간다.")
+                .font(Term.mono(12))
+                .foregroundStyle(Term.muted)
+        }
+    }
+
+    // MARK: 진행 기록
+
+    private var bootLog: some View {
+        TermBlock(label: "boot log") {
+            VStack(alignment: .leading, spacing: 4) {
+                let start = steps.first?.at ?? Date()
+                ForEach(steps.suffix(7)) { item in
+                    let last = item.id == steps.last?.id
+                    logLine(offset: item.at.timeIntervalSince(start), symbol: symbol(last: last),
+                            text: item.text, color: last ? lastColor : Term.text)
+                }
+                if vpn.status == .connected, !busy, let since = vpn.connectedSince, !steps.isEmpty {
+                    logLine(offset: since.timeIntervalSince(start), symbol: ("✓", Term.green),
+                            text: "tunnel up", color: Term.green)
+                }
+                if let errorText {
+                    logLine(offset: nil, symbol: ("✗", Term.red), text: errorText, color: Term.red)
+                }
             }
         }
-        .buttonStyle(TermButtonStyle(kind: vpn.status.isActive ? .danger : .primary, fill: true))
-        .disabled(busy || vpn.status.isBusy || (effectiveProto != .unicorn && username.isEmpty))
+    }
+
+    private func symbol(last: Bool) -> (String, Color) {
+        guard last else { return ("✓", Term.green) }
+        if errorText != nil { return ("✗", Term.red) }
+        if cancelled { return ("–", Term.muted) }
+        if busy { return (">", Term.amber) }
+        return ("✓", Term.green)
+    }
+
+    private var lastColor: Color {
+        if errorText != nil { return Term.red }
+        return cancelled ? Term.muted : Term.text
+    }
+
+    private func logLine(offset: TimeInterval?, symbol: (String, Color), text: String, color: Color) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(offset.map { String(format: "+%5.1fs", max(0, $0)) } ?? "       ")
+                .foregroundStyle(Term.muted)
+            Text(symbol.0).foregroundStyle(symbol.1)
+            Text(text).foregroundStyle(color)
+                .lineLimit(2)
+        }
+        .font(Term.mono(12))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: 연결 버튼
+
+    /// 연결 중에는 같은 버튼이 취소 버튼이 된다(지금 단계 + cancel).
+    private var connectButton: some View {
+        Button {
+            if busy {
+                connectTask?.cancel()
+            } else {
+                connectTask = Task { await saveAndConnect() }
+            }
+        } label: {
+            HStack(spacing: 10) {
+                if busy {
+                    ProgressView().tint(Term.amber)
+                    Text(phase.map { $0.replacingOccurrences(of: "…", with: "") } ?? "working")
+                        .foregroundStyle(Term.text)
+                    Spacer(minLength: 6)
+                    Text("cancel").foregroundStyle(Term.amber)
+                    Image(systemName: "xmark").foregroundStyle(Term.amber)
+                } else if vpn.status.isActive {
+                    Image(systemName: "stop.circle")
+                    Text("disconnect")
+                } else {
+                    Image(systemName: "bolt.horizontal")
+                    Text(onDevice ? "nago up --on-device" : "nago up \(region.rawValue)")
+                }
+            }
+            .frame(height: 32)
+        }
+        .buttonStyle(TermButtonStyle(kind: buttonKind, fill: true))
+        .overlay {
+            if busy {
+                ScanSweep(tint: Term.amber).clipShape(RoundedRectangle(cornerRadius: 6)).allowsHitTesting(false)
+            }
+        }
+        // 연결 중(connecting)에도 끊을 수 있게 둔다. 끊는 중에만 막는다.
+        .disabled(vpn.status == .disconnecting
+                  || (!busy && !vpn.status.isActive && effectiveProto != .unicorn && username.isEmpty))
+    }
+
+    private var buttonKind: TermButtonStyle.Kind {
+        if busy { return .secondary }
+        return vpn.status.isActive ? .danger : .primary
+    }
+
+    /// 연결돼 있는 동안 터널 확장에 상태를 묻는다(ikev2는 시스템 터널이라 답이 없다).
+    /// 속도를 내려고 1초마다 묻는다(이 탭이 보이는 동안만).
+    private func pollLink() async {
+        guard vpn.status == .connected else {
+            linkStats = nil
+            if !Demo.on { traffic.reset() }
+            return
+        }
+        guard !Demo.on else { return }
+        traffic.reset()
+        while !Task.isCancelled {
+            if let report = await vpn.tunnelReport() {
+                if let stats = report.stats, !stats.isEmpty { linkStats = stats }
+                if let rx = report.rx, let tx = report.tx { traffic.add(rx: rx, tx: tx) }
+            }
+            try? await Task.sleep(for: .seconds(1))
+        }
     }
 
     // MARK: - 로직
@@ -189,9 +669,12 @@ struct VPNView: View {
         errorText = nil
         if vpn.status.isActive {
             NagoLog.add("disconnect")
+            steps = []
             await vpn.disconnect()
             return
         }
+        steps = []
+        cancelled = false
         busy = true
         defer {
             busy = false
@@ -224,6 +707,7 @@ struct VPNView: View {
                 try await connectIKE(target, user: user, key: key)
                 step("\(region.rawValue): ikev2 handshake…")
                 if !(await vpn.waitForIKE(seconds: 12)) {
+                    try Task.checkCancellation()
                     await vpn.disconnect()
                     step("\(region.rawValue): ikev2 timeout → wg")
                     try await Task.sleep(for: .seconds(1))
@@ -234,8 +718,21 @@ struct VPNView: View {
             }
             savedRegion = region
         } catch {
-            fail(error.localizedDescription)
+            if Task.isCancelled {
+                await cancelConnect()
+            } else {
+                fail(error.localizedDescription)
+            }
         }
+    }
+
+    /// 버튼으로 취소: 이미 저장·시작한 연결이 있으면 내린다.
+    private func cancelConnect() async {
+        cancelled = true
+        phase = nil
+        steps.append(Step(at: Date(), text: "cancelled"))
+        NagoLog.add("cancelled")
+        await vpn.disconnect()
     }
 
     /// 유니콘 HTTPS: 서버도 비밀번호도 없다. 설정만 저장하고 바로 띄운다.
@@ -256,6 +753,7 @@ struct VPNView: View {
 
     private func step(_ text: String) {
         phase = text
+        steps.append(Step(at: Date(), text: text))
         NagoLog.add(text)
     }
 
@@ -300,6 +798,8 @@ struct VPNView: View {
         } catch RegionAPI.APIError.forbidden {
             throw RegionAPI.APIError.forbidden
         } catch {
+            // 취소했으면 고정 IP로 넘어가지 않는다
+            try Task.checkCancellation()
             guard let fallback = region.fallback else { throw error }
             return fallback
         }

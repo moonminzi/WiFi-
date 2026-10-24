@@ -59,6 +59,7 @@ final class VPNManager {
 
     /// 현재 연결 상태. 뷰는 이 값으로 버튼/문구를 바꾼다.
     var status: NEVPNStatus {
+        if Demo.connected { return .connected }
         if wgStatus.isActive || wgStatus == .disconnecting { return wgStatus }
         if ikeStatus == .invalid, wgStatus != .invalid { return wgStatus }
         return ikeStatus
@@ -66,8 +67,17 @@ final class VPNManager {
 
     /// 지금 켜져 있는 프로토콜(꺼져 있으면 nil)
     var activeProto: VPNProto? {
+        if Demo.connected { return .wireguard }
         if wgStatus.isActive { return tunnelProto }
         if ikeStatus.isActive { return .ikev2 }
+        return nil
+    }
+
+    /// 지금 연결이 붙은 시각(세션 타이머). 상태가 바뀔 때 화면이 다시 읽는다.
+    var connectedSince: Date? {
+        if Demo.connected { return Demo.since }
+        if wgStatus == .connected { return tunnel?.connection.connectedDate }
+        if ikeStatus == .connected { return manager.connection.connectedDate }
         return nil
     }
 
@@ -109,7 +119,7 @@ final class VPNManager {
     func waitForIKE(seconds: Double) async -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         var started = false
-        while Date() < deadline {
+        while Date() < deadline, !Task.isCancelled {
             refreshStatus()
             switch ikeStatus {
             case .connected: return true
@@ -309,6 +319,9 @@ final class VPNManager {
     struct TunnelReport: Decodable {
         let lines: [String]
         let stats: String?
+        /// 터널로 받은·보낸 바이트(wg만, 예전 확장이면 없음)
+        let rx: UInt64?
+        let tx: UInt64?
     }
 
     /// 켜져 있는 터널 확장의 로그와 상태(핸드셰이크, 주고받은 양). wg가 켜져 있을 때만 온다.

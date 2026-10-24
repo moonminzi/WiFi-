@@ -9,3 +9,5 @@ WifiScanTunnel/WifiScanTunnel.entitlements
 Vendor/WireGuardKit/Sources/WireGuardKitGo/.tmp/
 Vendor/WireGuardKit/Sources/WireGuardKitGo/out/
 NagoTun/target/
+tools/uishots/*.xcodeproj
+tools/uishots/Info.plist
