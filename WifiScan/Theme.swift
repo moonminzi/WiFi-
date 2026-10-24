@@ -127,7 +127,7 @@ struct Pulse<Content: View>: View {
 
     var body: some View {
         let running = active && !reduceMotion
-        TimelineView(.animation(minimumInterval: 1 / 60, paused: !running)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !running)) { timeline in
             let t = timeline.date.timeIntervalSinceReferenceDate
             content(running ? 0.5 - 0.5 * cos(2 * .pi * t / period) : 0)
         }

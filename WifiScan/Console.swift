@@ -12,16 +12,7 @@ struct StatusPill: View {
         HStack(spacing: 7) {
             // 켜져 있으면 천천히 숨 쉬고(빛 번짐), 연결 중이면 빠르게 깜빡인다
             Pulse(period: kind == .busy ? 1.1 : 2.6, active: kind == .on || kind == .busy) { phase in
-                ZStack {
-                    Circle()
-                        .fill(color.opacity(kind == .off ? 0 : 0.35 * (1 - phase)))
-                        .frame(width: 7 + 8 * phase, height: 7 + 8 * phase)
-                    Circle()
-                        .fill(color)
-                        .frame(width: 7, height: 7)
-                        .opacity(kind == .busy ? 1 - 0.6 * phase : 1)
-                }
-                .frame(width: 15, height: 15)
+                PillDot(color: color, phase: phase, halo: kind == .on, blink: kind == .busy)
             }
             Text(text)
                 .font(Term.mono(12, .semibold))
@@ -42,6 +33,25 @@ struct StatusPill: View {
         case .error: Term.red
         case .off: Term.muted
         }
+    }
+}
+
+/// 알약 안 점: 켜져 있으면 둘레로 빛이 번졌다 잦아들고(halo), 연결 중이면 깜빡인다(blink)
+private struct PillDot: View {
+    let color: Color
+    let phase: Double
+    let halo: Bool
+    let blink: Bool
+
+    var body: some View {
+        let ring = CGFloat(7 + 8 * phase)
+        let haloAlpha = halo ? 0.35 * (1 - phase) : 0
+        let dotAlpha = blink ? 1 - 0.6 * phase : 1
+        return ZStack {
+            Circle().fill(color.opacity(haloAlpha)).frame(width: ring, height: ring)
+            Circle().fill(color).frame(width: 7, height: 7).opacity(dotAlpha)
+        }
+        .frame(width: 15, height: 15)
     }
 }
 

@@ -45,9 +45,43 @@ struct RouteMap: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    // 한 식이 길면 타입 검사가 시간 안에 안 끝나서(Xcode 16) 지도·누르기·변화 감지를 나눠 둔다
     var body: some View {
-        // 60fps로 묶는다(프로모션 120Hz에서 무거운 지도를 매번 그리다 프레임이 튀지 않게)
-        TimelineView(.animation(minimumInterval: 1 / 60, paused: !awake && stage != .connecting && !moving)) { timeline in
+        tappableMap
+            .accessibilityElement()
+            .accessibilityLabel(accessibilityText)
+            .onChange(of: stage) { _, newStage in wake(for: newStage == .connected ? 10 : 3.5) }
+            .onChange(of: destination) { _, _ in wake(for: 2.5) }
+            .onChange(of: hop) { _, _ in wake(for: 2) }
+            // 레이더가 켜지고 꺼질 때 서서히(꺼지는 동안 그릴 시간)
+            .onChange(of: scanning) { _, _ in wake(for: 1.2) }
+            .task(id: awakeUntil) { await sleepWhenIdle() }
+    }
+
+    private var tappableMap: some View {
+        map
+            .frame(maxWidth: .infinity)
+            .frame(height: mapHeight)
+            .clipShape(RoundedRectangle(cornerRadius: corner))
+            .contentShape(Rectangle())
+            .onTapGesture(coordinateSpace: .local) { point in tapped(at: point) }
+    }
+
+    private func tapped(at point: CGPoint) {
+        guard let onSelect, let region = model.region(near: point) else { return }
+        onSelect(region)
+    }
+
+    /// 깨워 둔 시간이 지나면 타임라인을 멈춘다
+    private func sleepWhenIdle() async {
+        let wait = awakeUntil.timeIntervalSinceNow
+        if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+        guard !Task.isCancelled else { return }
+        awake = false
+    }
+
+    private var map: some View {
+        TimelineView(schedule) { timeline in
             Canvas { ctx, size in
                 // 멈춰 있던 타임라인의 날짜는 예전 값일 수 있어서 지금 시각과 비교해 늦은 쪽을 쓴다
                 let now = max(timeline.date, Date())
@@ -57,28 +91,20 @@ struct RouteMap: View {
                 model.draw(&ctx, size: size, now: now)
             }
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: height ?? (sizeClass == .regular ? 300 : 220))
-        .clipShape(RoundedRectangle(cornerRadius: chrome == .boxed ? 8 : 0))
-        .contentShape(Rectangle())
-        .onTapGesture(coordinateSpace: .local) { point in
-            guard let onSelect, let region = model.region(near: point) else { return }
-            onSelect(region)
-        }
-        .accessibilityElement()
-        .accessibilityLabel(accessibilityText)
-        .onChange(of: stage) { _, newStage in wake(for: newStage == .connected ? 10 : 3.5) }
-        .onChange(of: destination) { _, _ in wake(for: 2.5) }
-        .onChange(of: hop) { _, _ in wake(for: 2) }
-        // 레이더가 켜지고 꺼질 때 서서히(꺼지는 동안 그릴 시간)
-        .onChange(of: scanning) { _, _ in wake(for: 1.2) }
-        .task(id: awakeUntil) {
-            let wait = awakeUntil.timeIntervalSinceNow
-            if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
-            guard !Task.isCancelled else { return }
-            awake = false
-        }
     }
+
+    /// 60fps로 묶는다(프로모션 120Hz에서 무거운 지도를 매번 그리다 프레임이 튀지 않게)
+    private var schedule: AnimationTimelineSchedule {
+        let paused = !awake && stage != .connecting && !moving
+        return .animation(minimumInterval: 1.0 / 60.0, paused: paused)
+    }
+
+    private var mapHeight: CGFloat {
+        if let height { return height }
+        return sizeClass == .regular ? 300 : 220
+    }
+
+    private var corner: CGFloat { chrome == .boxed ? 8 : 0 }
 
     /// 계속 그려야 하는 움직임(흐름·레이더). 흐름은 주고받는 게 있을 때만 — 가만있으면 멈춰서 배터리를 아낀다
     private var moving: Bool {
