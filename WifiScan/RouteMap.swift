@@ -6,6 +6,8 @@ import SwiftUI
 /// - 연결됨: 경로를 끝까지 긋고 그 나라로 확대, 나라 점이 초록으로 켜지고 신호가 퍼진다
 /// - 실패: 커서가 멈추고 빨갛게 됐다가 사라진다
 /// - 대기 중엔 다른 나라로 가는 길도 옅게 그어 두고, 나라 점을 누르면(`onSelect`) 그 나라를 고른다
+/// - 연결돼 있으면 실제 주고받는 양만큼 경로 위로 점이 흐른다(받는 건 초록 ← · 보내는 건 하늘색 →)
+/// - 네트워크 검사 중엔 you 둘레를 레이더가 돈다
 struct RouteMap: View {
     enum Stage: Equatable {
         case idle, connecting, connected, failed
@@ -30,6 +32,11 @@ struct RouteMap: View {
     var height: CGFloat?
     /// 나라 점(또는 그 나라에 있는 you)을 누르면 부른다. nil이면 누를 수 없다.
     var onSelect: ((VPNRegion) -> Void)?
+    /// 지금 받는·보내는 속도(바이트/초). 연결돼 있을 때 경로 위 흐름의 양
+    var flowDown: Double = 0
+    var flowUp: Double = 0
+    /// 네트워크 검사 중(레이더)
+    var scanning = false
 
     @State private var model = RouteMapModel()
     /// 움직일 게 없으면 TimelineView를 멈춰 둔다(배터리)
@@ -39,12 +46,13 @@ struct RouteMap: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.animation(paused: !awake && stage != .connecting)) { timeline in
+        TimelineView(.animation(paused: !awake && stage != .connecting && !moving)) { timeline in
             Canvas { ctx, size in
                 // 멈춰 있던 타임라인의 날짜는 예전 값일 수 있어서 지금 시각과 비교해 늦은 쪽을 쓴다
                 let now = max(timeline.date, Date())
                 model.sync(stage: stage, destination: destination, hop: hop, chrome: chrome,
                            reduceMotion: reduceMotion, now: now)
+                model.flow(down: flowDown, up: flowUp, scanning: scanning, now: now)
                 model.draw(&ctx, size: size, now: now)
             }
         }
@@ -67,6 +75,12 @@ struct RouteMap: View {
             guard !Task.isCancelled else { return }
             awake = false
         }
+    }
+
+    /// 계속 그려야 하는 움직임(흐름·레이더). 흐름은 주고받는 게 있을 때만 — 가만있으면 멈춰서 배터리를 아낀다
+    private var moving: Bool {
+        if reduceMotion { return false }
+        return scanning || (stage == .connected && flowDown + flowUp > 1500)
     }
 
     private func wake(for seconds: Double) {
@@ -105,6 +119,10 @@ final class RouteMapModel {
     private var size = CGSize.zero
     private var reduceMotion = false
     private var chrome: RouteMap.Chrome = .boxed
+    private var flowDown = 0.0
+    private var flowUp = 0.0
+    private var scanning = false
+    private var scanAt = Date.distantPast
     /// 마지막으로 그린 나라 점의 화면 자리(누른 곳에서 가장 가까운 나라를 찾는다)
     private var hits: [(region: VPNRegion, point: CGPoint)] = []
 
@@ -150,6 +168,13 @@ final class RouteMapModel {
             lastHop = hop
             if hop != nil, stage == .connecting { run?.hop(now) }
         }
+    }
+
+    func flow(down: Double, up: Double, scanning newScanning: Bool, now: Date) {
+        flowDown = down
+        flowUp = up
+        if newScanning, !scanning { scanAt = now }
+        scanning = newScanning
     }
 
     private func transition(to newStage: RouteMap.Stage, now: Date) {
@@ -277,6 +302,7 @@ final class RouteMapModel {
         ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(paper))
         drawDots(&ctx, view: view, now: now)
         drawEdgeFade(&ctx, size: size)
+        if scanning { drawRadar(&ctx, view: view, now: now) }
         if stage == .onDevice {
             drawNodes(&ctx, view: view, highlighted: nil)
             drawYou(&ctx, view: view)
@@ -428,6 +454,11 @@ final class RouteMapModel {
             }
         }
 
+        // 다 그은 경로 위로 실제 주고받는 만큼 점이 흐른다
+        if stage == .connected, let run, run.finish != nil, head > 0.98, !reduceMotion {
+            drawFlow(&ctx, at: at, now: now)
+        }
+
         drawNodes(&ctx, view: view, highlighted: destination)
         drawYou(&ctx, view: view)
 
@@ -456,6 +487,57 @@ final class RouteMapModel {
             c.opacity = blink * fade
             c.fill(Path(CGRect(x: p.x - 3, y: p.y - 5.5, width: 6, height: 11)), with: .color(color))
         }
+    }
+
+    /// 받는 건 목적지 → you(초록), 보내는 건 you → 목적지(하늘색). 속도가 빠를수록 점이 많고 빠르다(로그 눈금).
+    private func drawFlow(_ ctx: inout GraphicsContext, at: (Double) -> CGPoint, now: Date) {
+        let t = now.timeIntervalSinceReferenceDate
+        let lanes: [(rate: Double, color: Color, toward: Bool, size: Double)] = [
+            (flowDown, Term.green, false, 3.2),
+            (flowUp, Term.key, true, 2.4),
+        ]
+        for lane in lanes where lane.rate > 400 {
+            let level = log10(lane.rate / 400)           // 400 B/s → 0, 4 MB/s → 4
+            let count = Int(min(18, max(2, (2 + level * 3.5).rounded())))
+            let speed = 0.22 + 0.08 * min(level, 4)
+            for i in 0..<count {
+                var f = (t * speed + Double(i) / Double(count)).truncatingRemainder(dividingBy: 1)
+                if !lane.toward { f = 1 - f }
+                let p = at(f)
+                let alpha = 0.25 + 0.75 * sin(.pi * f)   // 양 끝에선 흐려진다
+                let s = lane.size
+                ctx.fill(Path(CGRect(x: p.x - s / 2, y: p.y - s / 2, width: s, height: s)),
+                         with: .color(lane.color.opacity(alpha)))
+            }
+        }
+    }
+
+    /// you 둘레를 도는 레이더: 퍼지는 고리 셋 + 도는 부채꼴
+    private func drawRadar(_ ctx: inout GraphicsContext, view: Viewport, now: Date) {
+        let p = view.point(origin.world)
+        let since = now.timeIntervalSince(scanAt)
+        let reach = min(110, max(60, view.w * 0.22))
+        if reduceMotion {
+            strokeRing(&ctx, center: p, radius: reach * 0.6, color: Term.green.opacity(0.4))
+            return
+        }
+        for k in 0..<3 {
+            let u = (since / 1.8 + Double(k) / 3).truncatingRemainder(dividingBy: 1)
+            strokeRing(&ctx, center: p, radius: 8 + reach * u, color: Term.green.opacity(0.45 * (1 - u)))
+        }
+        let angle = since * 2.4
+        var wedge = Path()
+        wedge.move(to: p)
+        wedge.addArc(center: p, radius: reach, startAngle: .radians(angle - 0.9), endAngle: .radians(angle), clockwise: false)
+        wedge.closeSubpath()
+        let tip = CGPoint(x: p.x + reach * cos(angle), y: p.y + reach * sin(angle))
+        let back = CGPoint(x: p.x + reach * cos(angle - 0.9), y: p.y + reach * sin(angle - 0.9))
+        ctx.fill(wedge, with: .linearGradient(Gradient(colors: [Term.green.opacity(0), Term.green.opacity(0.28)]),
+                                              startPoint: back, endPoint: tip))
+        var beam = Path()
+        beam.move(to: p)
+        beam.addLine(to: tip)
+        ctx.stroke(beam, with: .color(Term.green.opacity(0.7)), lineWidth: 1)
     }
 
     /// 다른 나라 노드(you 바로 밑에 있는 건 가려서 뺀다)
@@ -504,7 +586,8 @@ final class RouteMapModel {
     /// 화면 배경으로 깔면 위 줄은 머리줄 밑 오른쪽, 아래 줄은 패널 바로 위로 옮긴다.
     private func drawHUD(_ ctx: inout GraphicsContext, view: Viewport) {
         let hero = chrome != .boxed
-        let side = hero ? 16.0 : 10.0
+        // 넓은 화면(아이패드)에선 글자를 가운데 680pt 단에 맞춘다
+        let side = hero ? max(16, (view.w - 680) / 2 + 16) : 10.0
         let topY = hero ? insets.top + 6 : 13
         let bottomY = view.h - insets.bottom - (hero ? 18 : 13)
         let lat = RouteMath.lat(mercY: view.cam.y - (insets.top - insets.bottom) / 2 / view.k)

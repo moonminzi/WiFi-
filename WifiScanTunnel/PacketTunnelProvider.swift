@@ -82,13 +82,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// 앱의 logs 화면이 부른다: 최근 로그 + 핸드셰이크·주고받은 양
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
         Task { @MainActor in
-            let summary: String
+            var report: [String: Any] = ["lines": self.journal.snapshot()]
             if let unicorn = self.unicorn {
-                summary = unicorn.summary
+                report["stats"] = unicorn.summary
+            } else if let stats = await self.stats() {
+                report["stats"] = stats.summary
+                // 앱이 1초마다 받아 속도(차이)를 낸다
+                report["rx"] = stats.rx
+                report["tx"] = stats.tx
             } else {
-                summary = await self.stats()?.summary ?? ""
+                report["stats"] = ""
             }
-            let report: [String: Any] = ["lines": self.journal.snapshot(), "stats": summary]
             completionHandler?(try? JSONSerialization.data(withJSONObject: report))
         }
     }

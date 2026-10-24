@@ -11,6 +11,12 @@ enum Demo {
     #endif
 
     static var on: Bool { state != nil }
+    #if DEBUG
+    /// 스크린샷: 화면 맨 아래로 내려서 찍기
+    static let scrollToEnd = UserDefaults.standard.bool(forKey: "nagoScrollEnd")
+    #else
+    static let scrollToEnd = false
+    #endif
     static var connected: Bool { state == "connected" }
     /// 데모 연결이 붙은 시각(12분 34초 전)
     static let since = Date().addingTimeInterval(-754)

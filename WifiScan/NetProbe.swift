@@ -1,8 +1,8 @@
 import Foundation
 import Observation
 
-/// 나라별 실제 왕복 시간. 각 AWS 리전의 DynamoDB `/ping`(인증 없음, 아주 작은 응답)에 두 번 묻고
-/// 두 번째(이미 열린 연결로 간 것) 시간을 쓴다. 첫 번째는 TLS 핸드셰이크가 섞여서 버린다.
+/// 나라별 실제 왕복 시간. 각 AWS 리전의 DynamoDB `/ping`(인증 없음, 아주 작은 응답)에 한 번 물어 연결을 데우고
+/// (TLS 핸드셰이크가 섞여서 버린다) 같은 연결로 두 번 더 재서 빠른 쪽을 쓴다.
 @MainActor
 @Observable
 final class LatencyProbe {
@@ -33,21 +33,28 @@ final class LatencyProbe {
     }
 
     nonisolated private static func ping(_ region: VPNRegion) async -> Int? {
-        guard let url = URL(string: "https://dynamodb.\(region.awsRegion).amazonaws.com/ping") else { return nil }
+        await samples(region, count: 2).compactMap { $0 }.min().map { Int($0.rounded()) }
+    }
+
+    /// 한 번 데워(TLS 핸드셰이크) 둔 연결로 count번 잰 왕복 시간(ms). 실패한 회는 nil.
+    nonisolated static func samples(_ region: VPNRegion, count: Int) async -> [Double?] {
+        guard let url = URL(string: "https://dynamodb.\(region.awsRegion).amazonaws.com/ping") else { return [] }
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 4
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         let session = URLSession(configuration: config)
         defer { session.finishTasksAndInvalidate() }
-        var best: Double?
-        for attempt in 0..<3 {
+        guard (try? await session.data(from: url)) != nil else { return Array(repeating: nil, count: count) }
+        var out: [Double?] = []
+        for _ in 0..<count {
             let start = Date()
-            guard let (_, response) = try? await session.data(from: url),
-                  (response as? HTTPURLResponse)?.statusCode == 200 else { return best.map { Int($0) } }
-            let ms = Date().timeIntervalSince(start) * 1000
-            if attempt > 0 { best = min(best ?? ms, ms) }
+            if let (_, response) = try? await session.data(from: url), (response as? HTTPURLResponse)?.statusCode == 200 {
+                out.append(Date().timeIntervalSince(start) * 1000)
+            } else {
+                out.append(nil)
+            }
         }
-        return best.map { Int($0.rounded()) }
+        return out
     }
 }
 

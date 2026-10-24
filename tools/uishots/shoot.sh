@@ -38,9 +38,11 @@ run_device() {  # 이름표, 찾을 이름
   xcrun simctl status_bar "$udid" override --time 9:41 --batteryState charged --batteryLevel 100 \
     --wifiBars 3 --cellularBars 4 || true
   xcrun simctl install "$udid" "$APP"
-  for demo in idle connecting connected failed; do
-    shoot "$label" "$udid" "vpn-$demo" -nagoTab 0 -nagoDemo "$demo"
+  for demo in idle connecting connected failed scan; do
+    shoot "$label" "$udid" "vpn-$demo" -nagoTab 0 -nagoDemo "$demo" -nagoScrollEnd NO
   done
+  shoot "$label" "$udid" vpn-connected-end -nagoTab 0 -nagoDemo connected -nagoScrollEnd YES
+  shoot "$label" "$udid" vpn-idle-end -nagoTab 0 -nagoDemo idle -nagoScrollEnd YES
   shoot "$label" "$udid" dash -nagoTab 1 -nagoDemo connected
   shoot "$label" "$udid" settings -nagoTab 2 -nagoDemo idle
   xcrun simctl shutdown "$udid" || true

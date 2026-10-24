@@ -319,6 +319,9 @@ final class VPNManager {
     struct TunnelReport: Decodable {
         let lines: [String]
         let stats: String?
+        /// 터널로 받은·보낸 바이트(wg만, 예전 확장이면 없음)
+        let rx: UInt64?
+        let tx: UInt64?
     }
 
     /// 켜져 있는 터널 확장의 로그와 상태(핸드셰이크, 주고받은 양). wg가 켜져 있을 때만 온다.

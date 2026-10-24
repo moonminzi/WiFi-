@@ -38,6 +38,10 @@ struct VPNView: View {
     @State private var exitInfo: ExitInfo?
     /// 연결된 채로 다른 나라를 누르면 갈아탈지 묻는다
     @State private var hopTarget: VPNRegion?
+    /// 터널로 오가는 속도(1초마다)
+    @State private var traffic = TrafficMeter()
+    /// 지금 네트워크 검사(앱을 열면 한 번 돈다)
+    @State private var scan = NetScan()
 
     struct Step: Identifiable {
         let id = UUID()
@@ -51,20 +55,28 @@ struct VPNView: View {
     var body: some View {
         GeometryReader { geo in
             let top = geo.safeAreaInsets.top
-            ScrollView {
-                VStack(spacing: 0) {
-                    hero(top: top, height: heroHeight(geo.size.height + top))
-                    console
-                        .padding(.horizontal, 16)
-                        .padding(.top, 14)
-                        .padding(.bottom, 24)
-                        .background(alignment: .top) { sheet }
-                        .termColumn()
-                        .padding(.top, -Self.overlap)
+            ScrollViewReader { reader in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        hero(top: top, height: heroHeight(geo.size.height + top))
+                        console
+                            .padding(.horizontal, 16)
+                            .padding(.top, 14)
+                            .padding(.bottom, 24)
+                            .background(alignment: .top) { sheet }
+                            .termColumn()
+                            .padding(.top, -Self.overlap)
+                        Color.clear.frame(height: 1).id("end")
+                    }
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .ignoresSafeArea(edges: .top)
+                .task {
+                    guard Demo.scrollToEnd else { return }
+                    try? await Task.sleep(for: .seconds(1.6))
+                    reader.scrollTo("end", anchor: .bottom)
                 }
             }
-            .scrollDismissesKeyboard(.interactively)
-            .ignoresSafeArea(edges: .top)
         }
         .background(Term.bg.ignoresSafeArea())
         .foregroundStyle(Term.text)
@@ -75,7 +87,10 @@ struct VPNView: View {
             if old.isActive, new == .disconnected { return .impact(weight: .light) }
             return nil
         }
-        .task { await vpn.reload() }
+        .task {
+            await vpn.reload()
+            await runScan()
+        }
         .task(id: vpn.status == .connected) { await pollLink() }
         .task(id: vpn.status) { await statusSettled() }
         .onAppear(perform: applyDemo)
@@ -95,8 +110,13 @@ struct VPNView: View {
         case "connected":
             region = .jp
             savedRegion = .jp
-            steps = demoSteps
+            // 연결된 시각(Demo.since) 바로 전에 찍힌 단계들
+            steps = Demo.steps.map { Step(at: Demo.since.addingTimeInterval(-$0.ago + Demo.steps[0].ago - 26), text: $0.text) }
             linkStats = Demo.linkStats
+            traffic.fillDemo()
+        case "scan":
+            region = .jp
+            scan.showDemo(running: true)
         case "failed":
             region = .us
             steps = Array(demoSteps.prefix(2)).map { Step(at: $0.at, text: $0.text.replacingOccurrences(of: "jp", with: "us")) }
@@ -161,7 +181,10 @@ struct VPNView: View {
                      hop: phase ?? (vpn.status.isBusy ? statusText : nil),
                      chrome: .hero(top: top + 56, bottom: Self.overlap),
                      height: height,
-                     onSelect: locked || effectiveProto == .unicorn ? nil : { select($0) })
+                     onSelect: locked || effectiveProto == .unicorn ? nil : { select($0) },
+                     flowDown: traffic.current?.down ?? 0,
+                     flowUp: traffic.current?.up ?? 0,
+                     scanning: scan.running)
                 // 위로 밀면 지도는 천천히 따라가고(패럴랙스), 아래로 당기면 늘어나서 빈 곳이 안 보인다
                 .visualEffect { content, proxy in
                     let y = proxy.frame(in: .scrollView).minY
@@ -176,6 +199,8 @@ struct VPNView: View {
                 Text(" $ ").foregroundStyle(Term.muted)
                 BlinkingCursor()
                 Spacer(minLength: 12)
+                scanButton
+                    .padding(.trailing, 8)
                 StatusPill(kind: pillKind, text: pillText)
             }
             .font(Term.mono(22, .bold))
@@ -223,8 +248,8 @@ struct VPNView: View {
                 Capsule().fill(Term.border).frame(width: 36, height: 4).padding(.top, 7)
             }
             .shadow(color: .black.opacity(0.5), radius: 18, y: -6)
-            // 아래쪽 테두리·그림자는 화면 밖으로 밀어 낸다
-            .padding(.bottom, -40)
+            // 아래쪽 테두리·그림자는 화면 밖으로 밀어 낸다(아이패드처럼 내용이 짧아도 화면 끝까지)
+            .padding(.bottom, -1200)
     }
 
     private var console: some View {
@@ -239,8 +264,34 @@ struct VPNView: View {
             if !steps.isEmpty || errorText != nil {
                 bootLog
             }
+            if scan.running || !scan.checks.isEmpty {
+                ScanPanel(scan: scan, vpnOn: vpn.status == .connected) { Task { await runScan() } }
+            }
         }
         .padding(.top, 8)
+    }
+
+    /// 머리줄의 레이더 단추: 지금 네트워크를 검사한다
+    private var scanButton: some View {
+        Button {
+            Task { await runScan() }
+        } label: {
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(scan.running ? Term.amber : Term.text)
+                .frame(width: 30, height: 30)
+                .background(Term.surface.opacity(0.85), in: Circle())
+                .overlay(Circle().stroke(scan.running ? Term.amber.opacity(0.5) : Term.border, lineWidth: 1))
+                .symbolEffect(.variableColor.iterative, isActive: scan.running)
+        }
+        .buttonStyle(.plain)
+        .disabled(scan.running)
+        .accessibilityLabel("scan this network")
+    }
+
+    private func runScan() async {
+        let on = vpn.status == .connected
+        await scan.run(vpnOn: on, expected: on && vpn.activeProto != .unicorn ? savedRegion : nil)
     }
 
     // MARK: 세션
@@ -287,7 +338,9 @@ struct VPNView: View {
             } else {
                 exitLine
             }
-            if !busy, vpn.status == .connected {
+            if !busy, vpn.status == .connected, traffic.hasData {
+                TrafficPanel(meter: traffic)
+            } else if !busy, vpn.status == .connected {
                 Text(linkStats.map { "link · " + $0 } ?? (vpn.activeProto == .ikev2 ? "link · ikev2 system tunnel" : "link · waiting for stats…"))
                     .font(Term.mono(12))
                     .foregroundStyle(linkStats == nil ? Term.muted : Term.green)
@@ -395,7 +448,7 @@ struct VPNView: View {
         case .connecting: return "connecting"
         case .reasserting: return "reconnecting"
         case .disconnecting: return "disconnecting"
-        case .invalid: return "not configured"
+        case .invalid: return "not set up · first connect asks once"
         default: return "disconnected · traffic goes out direct"
         }
     }
@@ -448,13 +501,15 @@ struct VPNView: View {
                     RegionCard(region: option,
                                selected: option == shownRegion,
                                live: option == savedRegion && vpn.status == .connected,
-                               measured: probe.rtt[option]) {
+                               measured: probe.rtt[option],
+                               fastest: option == fastestRegion) {
                         select(option)
                     }
                 }
             }
             .disabled(locked)
             .opacity(locked ? 0.55 : 1)
+            .accessibilityHint(shownRegion.detail)
             .confirmationDialog("hop to \(hopTarget?.geo.city ?? "")?", isPresented: hopping,
                                 titleVisibility: .visible, presenting: hopTarget) { target in
                 Button("hop → \(target.rawValue) · \(target.geo.city)") {
@@ -464,11 +519,13 @@ struct VPNView: View {
             } message: { target in
                 Text("disconnects \(savedRegion.rawValue), then connects \(target.rawValue)")
             }
-
-            Text(shownRegion.detail)
-                .font(Term.mono(12))
-                .foregroundStyle(Term.muted)
         }
+    }
+
+    /// 잰 것 중 가장 빠른 나라(둘 이상 쟀을 때만)
+    private var fastestRegion: VPNRegion? {
+        guard probe.rtt.count > 1 else { return nil }
+        return probe.rtt.min { $0.value < $1.value }?.key
     }
 
     private var exitHint: String {
@@ -586,14 +643,21 @@ struct VPNView: View {
     }
 
     /// 연결돼 있는 동안 터널 확장에 상태를 묻는다(ikev2는 시스템 터널이라 답이 없다).
+    /// 속도를 내려고 1초마다 묻는다(이 탭이 보이는 동안만).
     private func pollLink() async {
         guard vpn.status == .connected else {
             linkStats = nil
+            if !Demo.on { traffic.reset() }
             return
         }
+        guard !Demo.on else { return }
+        traffic.reset()
         while !Task.isCancelled {
-            if let stats = await vpn.tunnelReport()?.stats, !stats.isEmpty { linkStats = stats }
-            try? await Task.sleep(for: .seconds(5))
+            if let report = await vpn.tunnelReport() {
+                if let stats = report.stats, !stats.isEmpty { linkStats = stats }
+                if let rx = report.rx, let tx = report.tx { traffic.add(rx: rx, tx: tx) }
+            }
+            try? await Task.sleep(for: .seconds(1))
         }
     }
 

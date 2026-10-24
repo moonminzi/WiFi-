@@ -31,5 +31,10 @@ targets:
           - JetBrainsMono-SemiBold.ttf
           - JetBrainsMono-Bold.ttf
         UILaunchScreen: {}
+        # net scan의 portal 검사: captive.apple.com을 일부러 평문 http로 받아 바꿔치기를 본다
+        NSAppTransportSecurity:
+          NSExceptionDomains:
+            captive.apple.com:
+              NSExceptionAllowsInsecureHTTPLoads: true
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait]

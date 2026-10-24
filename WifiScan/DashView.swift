@@ -77,6 +77,7 @@ struct DashView: View {
     @State private var data: DashData?
     @State private var errorText: String?
     @State private var loading = false
+    @State private var fetchedAt: Date?
 
     @AppStorage("vpnUsername") private var username = "wifiscan"
     @AppStorage("vpnSavedRegion") private var savedRegion: VPNRegion = .kr
@@ -97,7 +98,8 @@ struct DashView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 14) {
+                header
                 if let data {
                     FleetPanel(data: data, liveCode: vpn.status == .connected ? savedRegion.rawValue : nil)
                 }
@@ -136,6 +138,28 @@ struct DashView: View {
             Text("\(peer.ip) \(peer.name ?? "")")
         }
         .sheet(item: $newPeer) { PeerConfigSheet(peer: $0) }
+    }
+
+    /// `~/dash $▌` + 마지막으로 받은 때
+    private var header: some View {
+        HStack(alignment: .center, spacing: 0) {
+            Text("~/").foregroundStyle(Term.muted)
+            Text("dash").foregroundStyle(Term.green)
+            Text(" $ ").foregroundStyle(Term.muted)
+            BlinkingCursor()
+            Spacer(minLength: 8)
+            Group {
+                if loading {
+                    Text("fetching…")
+                } else if let fetchedAt {
+                    Text(fetchedAt, style: .relative) + Text(" ago")
+                }
+            }
+            .font(Term.mono(11))
+            .foregroundStyle(Term.muted)
+        }
+        .font(Term.mono(22, .bold))
+        .padding(.top, 8)
     }
 
     private func peerTitle(_ peer: DashData.Peer) -> String {
@@ -261,6 +285,7 @@ struct DashView: View {
     private func load() async {
         if Demo.on {
             data = Demo.dash
+            fetchedAt = Date().addingTimeInterval(-12)
             return
         }
         guard let key = VPNPreset.key(username: username) else {
@@ -271,6 +296,7 @@ struct DashView: View {
         defer { loading = false }
         do {
             data = try await DashAPI.fetch(key: key)
+            fetchedAt = Date()
             errorText = nil
         } catch is CancellationError {
             return
@@ -558,6 +584,11 @@ struct FleetPanel: View {
 
     var body: some View {
         VStack(spacing: 8) {
+            FleetMap(nodes: data.nodes, liveCode: liveCode)
+                .frame(height: 190)
+                .background(Term.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Term.border, lineWidth: 1))
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], spacing: 8) {
                 ForEach(data.nodes, id: \.code) { node in
                     NodeCard(node: node, live: node.code == liveCode)
@@ -592,10 +623,28 @@ private struct NodeCard: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             Text(detail)
-                .font(Term.mono(10.5))
+                .font(Term.mono(11))
                 .foregroundStyle(Term.muted)
                 .lineLimit(1)
-                .minimumScaleFactor(0.7)
+                .minimumScaleFactor(0.85)
+            // 안 쓰면 알아서 꺼지기까지(유휴 타이머)
+            if node.state == "running", let idle = node.idle, let limit = node.idleLimit, limit > 0 {
+                VStack(alignment: .leading, spacing: 3) {
+                    GeometryReader { geo in
+                        let left = 1 - min(Double(idle) / Double(limit), 1)
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Term.track)
+                            Capsule().fill(left < 0.2 ? Term.amber : Term.green.opacity(0.7))
+                                .frame(width: max(3, geo.size.width * left))
+                        }
+                    }
+                    .frame(height: 3)
+                    Text("auto-stop in \(DashView.duration(max(limit - idle, 0) * 60))")
+                        .font(Term.mono(9.5))
+                        .foregroundStyle(Term.muted)
+                }
+                .padding(.top, 2)
+            }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -618,7 +667,6 @@ private struct NodeCard: View {
         var bits: [String] = []
         if let up = node.up { bits.append("up " + DashView.duration(up)) }
         bits.append("ike \(node.ike)")
-        if let idle = node.idle, let limit = node.idleLimit { bits.append("idle \(idle)/\(limit)m") }
         return bits.joined(separator: " · ")
     }
 }
