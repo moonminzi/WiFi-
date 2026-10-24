@@ -144,8 +144,14 @@ struct BlinkingCursor: View {
                 .fill(Term.green)
                 .frame(width: width, height: height)
                 // 터미널 커서처럼 대부분은 켜져 있다가 짧게 꺼진다
-                .opacity(1 - RouteMath.smooth(0.55, 0.9, phase))
+                // (이 파일은 NAGO DL도 같이 쓴다 — VPN 앱에만 있는 RouteMath 등은 쓰지 않는다)
+                .opacity(1 - Self.smooth(0.55, 0.9, phase))
         }
+    }
+
+    private static func smooth(_ a: Double, _ b: Double, _ x: Double) -> Double {
+        let t = min(1, max(0, (x - a) / (b - a)))
+        return t * t * (3 - 2 * t)
     }
 }
 
