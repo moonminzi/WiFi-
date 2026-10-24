@@ -8,16 +8,21 @@ struct StatusPill: View {
     let kind: Kind
     let text: String
 
-    @State private var breathe = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     var body: some View {
         HStack(spacing: 7) {
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
-                .shadow(color: kind == .off ? .clear : color.opacity(0.9), radius: breathe ? 5 : 1.5)
-                .opacity(kind == .busy && breathe ? 0.35 : 1)
+            // 켜져 있으면 천천히 숨 쉬고(빛 번짐), 연결 중이면 빠르게 깜빡인다
+            Pulse(period: kind == .busy ? 1.1 : 2.6, active: kind == .on || kind == .busy) { phase in
+                ZStack {
+                    Circle()
+                        .fill(color.opacity(kind == .off ? 0 : 0.35 * (1 - phase)))
+                        .frame(width: 7 + 8 * phase, height: 7 + 8 * phase)
+                    Circle()
+                        .fill(color)
+                        .frame(width: 7, height: 7)
+                        .opacity(kind == .busy ? 1 - 0.6 * phase : 1)
+                }
+                .frame(width: 15, height: 15)
+            }
             Text(text)
                 .font(Term.mono(12, .semibold))
                 .foregroundStyle(kind == .off ? Term.muted : color)
@@ -27,8 +32,6 @@ struct StatusPill: View {
         .background(Term.surface.opacity(0.85), in: Capsule())
         .overlay(Capsule().stroke(kind == .off ? Term.border : color.opacity(0.45), lineWidth: 1))
         .animation(.easeInOut(duration: 0.25), value: kind)
-        .onAppear { startBreathing() }
-        .onChange(of: kind) { _, _ in startBreathing() }
         .accessibilityElement(children: .combine)
     }
 
@@ -40,12 +43,6 @@ struct StatusPill: View {
         case .off: Term.muted
         }
     }
-
-    private func startBreathing() {
-        breathe = false
-        guard !reduceMotion, kind == .on || kind == .busy else { return }
-        withAnimation(.easeInOut(duration: kind == .busy ? 0.6 : 1.6).repeatForever()) { breathe = true }
-    }
 }
 
 /// 연결 진행 `api › boot › tunnel › up`. 지난 칸은 초록, 지금 칸은 노랗게 깜빡인다.
@@ -54,19 +51,19 @@ struct PhasePipeline: View {
     /// 유니콘 HTTPS는 서버를 켜지 않는다
     var onDevice = false
 
-    @State private var blink = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     private var labels: [String] { onDevice ? ["config", "local", "tunnel", "up"] : ["api", "boot", "tunnel", "up"] }
 
     var body: some View {
         HStack(spacing: 6) {
             ForEach(labels.indices, id: \.self) { i in
                 VStack(alignment: .leading, spacing: 5) {
-                    Capsule()
-                        .fill(fill(i))
-                        .frame(height: 3)
-                        .opacity(i == index && blink ? 0.35 : 1)
+                    Pulse(period: 1.1, active: i == index) { phase in
+                        Capsule()
+                            .fill(fill(i))
+                            .frame(height: 3)
+                            .opacity(1 - 0.65 * phase)
+                    }
+                    .frame(height: 3)
                     Text(labels[i])
                         .font(Term.mono(10, i == index ? .semibold : .regular))
                         .foregroundStyle(i <= index ? (i == index ? Term.amber : Term.green) : Term.muted)
@@ -75,10 +72,6 @@ struct PhasePipeline: View {
             }
         }
         .animation(.easeOut(duration: 0.3), value: index)
-        .onAppear {
-            guard !reduceMotion else { return }
-            withAnimation(.easeInOut(duration: 0.55).repeatForever()) { blink = true }
-        }
         .accessibilityElement()
         .accessibilityLabel("step \(min(index, labels.count - 1) + 1) of \(labels.count): \(labels[min(index, labels.count - 1)])")
     }

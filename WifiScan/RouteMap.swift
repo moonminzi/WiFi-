@@ -46,7 +46,8 @@ struct RouteMap: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.animation(paused: !awake && stage != .connecting && !moving)) { timeline in
+        // 60fps로 묶는다(프로모션 120Hz에서 무거운 지도를 매번 그리다 프레임이 튀지 않게)
+        TimelineView(.animation(minimumInterval: 1 / 60, paused: !awake && stage != .connecting && !moving)) { timeline in
             Canvas { ctx, size in
                 // 멈춰 있던 타임라인의 날짜는 예전 값일 수 있어서 지금 시각과 비교해 늦은 쪽을 쓴다
                 let now = max(timeline.date, Date())
@@ -69,6 +70,8 @@ struct RouteMap: View {
         .onChange(of: stage) { _, newStage in wake(for: newStage == .connected ? 10 : 3.5) }
         .onChange(of: destination) { _, _ in wake(for: 2.5) }
         .onChange(of: hop) { _, _ in wake(for: 2) }
+        // 레이더가 켜지고 꺼질 때 서서히(꺼지는 동안 그릴 시간)
+        .onChange(of: scanning) { _, _ in wake(for: 1.2) }
         .task(id: awakeUntil) {
             let wait = awakeUntil.timeIntervalSinceNow
             if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
@@ -123,6 +126,11 @@ final class RouteMapModel {
     private var flowUp = 0.0
     private var scanning = false
     private var scanAt = Date.distantPast
+    /// 검사가 끝난 시각(레이더가 서서히 사라진다)
+    private var scanEndAt: Date?
+    /// 카메라가 가만있으면 점 지도 모양은 그대로라 다시 만들지 않는다(레이더·흐름만 움직일 때)
+    private var dotKey: [Double] = []
+    private var dotLayers: [(land: Path, lit: Path, alpha: Double)] = []
     /// 마지막으로 그린 나라 점의 화면 자리(누른 곳에서 가장 가까운 나라를 찾는다)
     private var hits: [(region: VPNRegion, point: CGPoint)] = []
 
@@ -173,7 +181,14 @@ final class RouteMapModel {
     func flow(down: Double, up: Double, scanning newScanning: Bool, now: Date) {
         flowDown = down
         flowUp = up
-        if newScanning, !scanning { scanAt = now }
+        if newScanning, !scanning {
+            // 사라지는 중에 다시 켜지면 각도가 튀지 않게 이어 간다
+            let resuming = scanEndAt.map { now.timeIntervalSince($0) < 0.6 } ?? false
+            if !resuming { scanAt = now }
+            scanEndAt = nil
+        } else if !newScanning, scanning {
+            scanEndAt = now
+        }
         scanning = newScanning
     }
 
@@ -302,7 +317,8 @@ final class RouteMapModel {
         ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(paper))
         drawDots(&ctx, view: view, now: now)
         drawEdgeFade(&ctx, size: size)
-        if scanning { drawRadar(&ctx, view: view, now: now) }
+        let radar = radarAlpha(now)
+        if (scanning || scanEndAt != nil), radar > 0.005 { drawRadar(&ctx, view: view, now: now, alpha: radar) }
         if stage == .onDevice {
             drawNodes(&ctx, view: view, highlighted: nil)
             drawYou(&ctx, view: view)
@@ -326,6 +342,20 @@ final class RouteMapModel {
         default: glow = 0.3
         }
 
+        let key = [view.cam.x, view.cam.y, view.cam.z, view.w, view.h, Double(code)]
+        if key != dotKey {
+            dotKey = key
+            dotLayers = buildDots(view: view, levels: levels, lo: lo, mix: mix, code: code)
+        }
+        for layer in dotLayers {
+            ctx.fill(layer.land, with: .color(Term.dot.opacity(layer.alpha)))
+            ctx.fill(layer.lit, with: .color(Term.green.opacity(layer.alpha * glow)))
+        }
+    }
+
+    private func buildDots(view: Viewport, levels: [WorldDots.Level], lo: Int, mix: Double,
+                           code: UInt8) -> [(land: Path, lit: Path, alpha: Double)] {
+        var layers: [(land: Path, lit: Path, alpha: Double)] = []
         for (index, alpha) in [(lo, 1 - mix), (lo + 1, mix)] where alpha > 0.01 && index < levels.count {
             let level = levels[index]
             let cell = level.cell
@@ -346,9 +376,9 @@ final class RouteMapModel {
                     if v == code { lit.addRect(rect) } else { land.addRect(rect) }
                 }
             }
-            ctx.fill(land, with: .color(Term.dot.opacity(alpha)))
-            ctx.fill(lit, with: .color(Term.green.opacity(alpha * glow)))
+            layers.append((land, lit, alpha))
         }
+        return layers
     }
 
     /// 가장자리를 배경색으로 흐려서 점이 테두리에서 잘려 보이지 않게.
@@ -513,31 +543,50 @@ final class RouteMapModel {
     }
 
     /// you 둘레를 도는 레이더: 퍼지는 고리 셋 + 도는 부채꼴
-    private func drawRadar(_ ctx: inout GraphicsContext, view: Viewport, now: Date) {
+    /// 켜질 때 0.35초, 꺼질 때 0.6초에 걸쳐 서서히
+    private func radarAlpha(_ now: Date) -> Double {
+        let fadeIn = RouteMath.smooth(0, 0.35, now.timeIntervalSince(scanAt))
+        let fadeOut = scanEndAt.map { 1 - RouteMath.smooth(0, 0.6, now.timeIntervalSince($0)) } ?? 1
+        return fadeIn * fadeOut
+    }
+
+    /// 레이더: 테두리 원 + 퍼지는 고리 + 꼬리가 옅어지는 부채꼴(원뿔 그라디언트 한 장이라 이음매가 없다)
+    private func drawRadar(_ ctx: inout GraphicsContext, view: Viewport, now: Date, alpha: Double) {
         let p = view.point(origin.world)
         let since = now.timeIntervalSince(scanAt)
         let reach = min(110, max(60, view.w * 0.22))
+        let scope = Path(ellipseIn: CGRect(x: p.x - reach, y: p.y - reach, width: reach * 2, height: reach * 2))
+        ctx.fill(scope, with: .color(Term.green.opacity(0.035 * alpha)))
+        ctx.stroke(scope, with: .color(Term.green.opacity(0.18 * alpha)), lineWidth: 1)
         if reduceMotion {
-            strokeRing(&ctx, center: p, radius: reach * 0.6, color: Term.green.opacity(0.4))
+            strokeRing(&ctx, center: p, radius: reach * 0.5, color: Term.green.opacity(0.3 * alpha))
             return
         }
-        for k in 0..<3 {
-            let u = (since / 1.8 + Double(k) / 3).truncatingRemainder(dividingBy: 1)
-            strokeRing(&ctx, center: p, radius: 8 + reach * u, color: Term.green.opacity(0.45 * (1 - u)))
+        for k in 0..<2 {
+            let u = (since / 2.2 + Double(k) / 2).truncatingRemainder(dividingBy: 1)
+            let e = RouteMath.easeOut(u)
+            strokeRing(&ctx, center: p, radius: 6 + (reach - 6) * e, color: Term.green.opacity(0.4 * (1 - u) * alpha))
         }
-        let angle = since * 2.4
-        var wedge = Path()
-        wedge.move(to: p)
-        wedge.addArc(center: p, radius: reach, startAngle: .radians(angle - 0.9), endAngle: .radians(angle), clockwise: false)
-        wedge.closeSubpath()
+
+        // 한 바퀴 2.6초, 꼬리 66°
+        let angle = since * 2 * .pi / 2.6
+        let trail = 1.15
+        let span = trail / (2 * .pi)
+        let sweep = Gradient(stops: [
+            .init(color: Term.green.opacity(0), location: 0),
+            .init(color: Term.green.opacity(0.32 * alpha), location: span),
+            .init(color: Term.green.opacity(0), location: min(span + 0.003, 1)),
+            .init(color: Term.green.opacity(0), location: 1),
+        ])
+        ctx.fill(scope, with: .conicGradient(sweep, center: p, angle: .radians(angle - trail)))
+
         let tip = CGPoint(x: p.x + reach * cos(angle), y: p.y + reach * sin(angle))
-        let back = CGPoint(x: p.x + reach * cos(angle - 0.9), y: p.y + reach * sin(angle - 0.9))
-        ctx.fill(wedge, with: .linearGradient(Gradient(colors: [Term.green.opacity(0), Term.green.opacity(0.28)]),
-                                              startPoint: back, endPoint: tip))
         var beam = Path()
         beam.move(to: p)
         beam.addLine(to: tip)
-        ctx.stroke(beam, with: .color(Term.green.opacity(0.7)), lineWidth: 1)
+        ctx.stroke(beam, with: .color(Term.green.opacity(0.8 * alpha)), style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
+        ctx.fill(Path(ellipseIn: CGRect(x: tip.x - 2, y: tip.y - 2, width: 4, height: 4)),
+                 with: .color(Term.green.opacity(alpha)))
     }
 
     /// 다른 나라 노드(you 바로 밑에 있는 건 가려서 뺀다)

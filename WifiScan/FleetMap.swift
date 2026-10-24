@@ -10,6 +10,13 @@ struct FleetMap: View {
     let liveCode: String?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// 땅 점은 크기가 같으면 그대로라 한 번만 만든다(매 프레임 1천여 개를 다시 만들지 않게)
+    @State private var land = LandCache()
+
+    final class LandCache {
+        var size: CGSize = .zero
+        var path = Path()
+    }
 
     /// 런던(0°)부터 오리건(-120° = 240°)까지가 들어오는 띠. 가운데는 태평양 서쪽.
     private static let centerLon = 120.0
@@ -45,16 +52,20 @@ struct FleetMap: View {
         let levels = WorldDots.levels
         let level = levels.first { $0.cell * k >= 4 } ?? levels[levels.count - 1]
         let dot = max(1.2, min(2.6, level.cell * k * 0.45))
-        var land = Path()
-        for row in 0..<level.rows {
-            let y = sy(WorldDots.yTop - (Double(row) + 0.5) * level.cell)
-            guard y > -4, y < h + 4 else { continue }
-            for col in 0..<level.cols where level.value(col: col, row: row) != 0 {
-                let x = sx(-180 + (Double(col) + 0.5) * level.cell)
-                land.addRect(CGRect(x: x - dot / 2, y: y - dot / 2, width: dot, height: dot))
+        if land.size != size {
+            var path = Path()
+            for row in 0..<level.rows {
+                let y = sy(WorldDots.yTop - (Double(row) + 0.5) * level.cell)
+                guard y > -4, y < h + 4 else { continue }
+                for col in 0..<level.cols where level.value(col: col, row: row) != 0 {
+                    let x = sx(-180 + (Double(col) + 0.5) * level.cell)
+                    path.addRect(CGRect(x: x - dot / 2, y: y - dot / 2, width: dot, height: dot))
+                }
             }
+            land.size = size
+            land.path = path
         }
-        ctx.fill(land, with: .color(Term.dot.opacity(0.8)))
+        ctx.fill(land.path, with: .color(Term.dot.opacity(0.8)))
 
         let t = reduceMotion ? 0 : now.timeIntervalSinceReferenceDate
         let maxGB = max(nodes.map(\.egressGB).max() ?? 0, 1)

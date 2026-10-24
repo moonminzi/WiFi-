@@ -115,19 +115,37 @@ struct StatusBarScrim: View {
     }
 }
 
+/// 시계로 도는 반복 움직임. `phase`가 0 → 1 → 0을 `period`초마다 부드럽게 오간다.
+/// repeatForever 애니메이션은 탭을 오가며 onAppear가 다시 불리거나 상태가 바뀌면 겹치고 멈춰서,
+/// 상태 없이 지금 시각으로 그린다(언제 다시 나타나도 같은 자리에서 이어진다).
+struct Pulse<Content: View>: View {
+    var period: Double
+    var active = true
+    @ViewBuilder var content: (_ phase: Double) -> Content
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let running = active && !reduceMotion
+        TimelineView(.animation(minimumInterval: 1 / 60, paused: !running)) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            content(running ? 0.5 - 0.5 * cos(2 * .pi * t / period) : 0)
+        }
+    }
+}
+
 struct BlinkingCursor: View {
     var width: CGFloat = 11
     var height: CGFloat = 22
-    @State private var visible = true
 
     var body: some View {
-        Rectangle()
-            .fill(Term.green)
-            .frame(width: width, height: height)
-            .opacity(visible ? 1 : 0)
-            .onAppear {
-                withAnimation(.easeInOut(duration: 0.55).repeatForever()) { visible = false }
-            }
+        Pulse(period: 1.1) { phase in
+            Rectangle()
+                .fill(Term.green)
+                .frame(width: width, height: height)
+                // 터미널 커서처럼 대부분은 켜져 있다가 짧게 꺼진다
+                .opacity(1 - RouteMath.smooth(0.55, 0.9, phase))
+        }
     }
 }
 
