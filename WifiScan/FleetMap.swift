@@ -11,10 +11,13 @@ struct FleetMap: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// 화면 가운데 경도: 태평양 쪽(서울·도쿄·오리건·런던이 다 들어온다)
-    private static let centerLon = 150.0
-    private static let latTop = 72.0
-    private static let latBottom = -48.0
+    /// 런던(0°)부터 오리건(-120° = 240°)까지가 들어오는 띠. 가운데는 태평양 서쪽.
+    private static let centerLon = 120.0
+    private static let lonSpan = 300.0
+    private static let latTop = 66.0
+    private static let latBottom = -12.0
+    /// 이 띠의 가로세로 비(뷰 높이를 정할 때 쓴다)
+    static let aspect = lonSpan / (RouteMath.mercY(latTop) - RouteMath.mercY(latBottom)) * 0.86
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1 / 30, paused: reduceMotion)) { timeline in
@@ -29,8 +32,8 @@ struct FleetMap: View {
     private func draw(_ ctx: inout GraphicsContext, size: CGSize, now: Date) {
         let w = Double(size.width), h = Double(size.height)
         let yTop = RouteMath.mercY(Self.latTop), yBottom = RouteMath.mercY(Self.latBottom)
-        // 가로를 꽉 채우고(360°), 세로는 위아래 위도 범위가 들어오게 가운데 맞춤
-        let k = min(w / 360, h / (yTop - yBottom))
+        // 띠가 상자를 꽉 채우게(남는 쪽은 잘린다)
+        let k = max(w / Self.lonSpan, h / (yTop - yBottom))
         let cy = (yTop + yBottom) / 2
         func sx(_ lon: Double) -> Double {
             w / 2 + (RouteMath.unwrap(lon, near: Self.centerLon) - Self.centerLon) * k
@@ -104,16 +107,21 @@ struct FleetMap: View {
             let filled = node.state == "running" || node.state == "pending" || node.state == "stopping"
             ctx.fill(Path(rect), with: .color(filled ? color : Term.surface))
             ctx.stroke(Path(rect), with: .color(color), lineWidth: 1.2)
-            label(&ctx, node.code, at: CGPoint(x: p.x + 8, y: p.y - 7), weight: .semibold,
+            // 오른쪽 가까이에 다른 서버가 있으면(서울 옆 도쿄) 이름을 왼쪽에 단다
+            let crowded = nodes.contains { other in
+                guard other.code != node.code, let r = VPNRegion(rawValue: other.code) else { return false }
+                let q = point(r.geo)
+                return q.x > p.x && q.x - p.x < 44 && abs(q.y - p.y) < 16
+            }
+            label(&ctx, node.code, at: CGPoint(x: crowded ? p.x - 8 : p.x + 8, y: p.y - 6),
+                  anchor: crowded ? .trailing : .leading, weight: .semibold,
                   color: node.code == liveCode ? Term.green : Term.text)
-            label(&ctx, String(format: "%.1fGB", node.egressGB), at: CGPoint(x: p.x + 8, y: p.y + 6),
-                  size: 8.5, color: Term.muted)
         }
 
-        // you
-        ctx.fill(Path(ellipseIn: CGRect(x: you.x - 3, y: you.y - 3, width: 6, height: 6)), with: .color(Term.text))
-        ring(&ctx, you, 6, Term.text.opacity(0.35))
-        label(&ctx, "you", at: CGPoint(x: you.x - 8, y: you.y + 10), anchor: .trailing, color: Term.text)
+        // you: 점은 서버 밑에 숨을 수 있어서 이름은 아래 가운데에
+        ctx.fill(Path(ellipseIn: CGRect(x: you.x - 2.5, y: you.y - 2.5, width: 5, height: 5)), with: .color(Term.text))
+        ring(&ctx, you, 7, Term.text.opacity(0.4))
+        label(&ctx, "you", at: CGPoint(x: you.x, y: you.y + 14), anchor: .center, size: 9, color: Term.text)
     }
 
     static func color(_ state: String) -> Color {

@@ -111,6 +111,7 @@ struct DashView: View {
             .termColumn()
         }
         .refreshable { await load() }
+        .overlay { StatusBarScrim() }
         .task {
             // 이 탭이 보이는 동안만 돈다(다른 탭으로 가면 취소됨).
             while !Task.isCancelled {
@@ -585,7 +586,8 @@ struct FleetPanel: View {
     var body: some View {
         VStack(spacing: 8) {
             FleetMap(nodes: data.nodes, liveCode: liveCode)
-                .frame(height: 190)
+                .aspectRatio(FleetMap.aspect, contentMode: .fit)
+                .frame(maxWidth: .infinity)
                 .background(Term.surface)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Term.border, lineWidth: 1))

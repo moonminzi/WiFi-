@@ -79,9 +79,24 @@ struct TermPage<Content: View>: View {
             .termColumn()
         }
         .scrollDismissesKeyboard(.interactively)
+        .overlay { StatusBarScrim() }
         .background(Term.bg.ignoresSafeArea())
         .foregroundStyle(Term.text)
         .tint(Term.green)
+    }
+}
+
+/// 스크롤한 내용이 상태 막대(시간·배터리) 밑으로 비쳐 보이지 않게 덮는 띠. 화면 맨 위에 overlay로 단다.
+struct StatusBarScrim: View {
+    var body: some View {
+        LinearGradient(stops: [.init(color: Term.bg, location: 0), .init(color: Term.bg, location: 0.7),
+                               .init(color: Term.bg.opacity(0), location: 1)],
+                       startPoint: .top, endPoint: .bottom)
+            .frame(height: 10)
+            .ignoresSafeArea(edges: .top)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 

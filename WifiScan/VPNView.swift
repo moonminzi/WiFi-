@@ -78,6 +78,7 @@ struct VPNView: View {
                 }
             }
         }
+        .overlay { StatusBarScrim() }
         .background(Term.bg.ignoresSafeArea())
         .foregroundStyle(Term.text)
         .tint(Term.green)
@@ -388,6 +389,7 @@ struct VPNView: View {
         switch vpn.status {
         case .connected:
             exitInfo = nil
+            if Demo.on { await probe.measure() }
             try? await Task.sleep(for: .seconds(1.5))
             guard !Task.isCancelled else { return }
             exitInfo = await ExitInfo.fetch()

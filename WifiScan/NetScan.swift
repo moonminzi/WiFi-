@@ -128,7 +128,7 @@ final class NetScan {
         Check(id: "nxdomain", detail: "missing names answered → 175.223.10.4 (ad dns)", level: .warn),
         Check(id: "doh", detail: "encrypted dns reachable", level: .pass),
         Check(id: "tls", detail: "chain ends at a system root", level: .pass),
-        Check(id: "ipv6", detail: "native ipv6 · goes outside a v4-only vpn", level: .info),
+        Check(id: "ipv6", detail: "ipv6 available · rescan with vpn on to test leaks", level: .info),
         Check(id: "exit", detail: "211.36.1.9 · KR · sites see this", level: .info),
         Check(id: "quality", detail: "kr 4ms · jitter 1ms · loss 0/6", level: .pass),
     ]
@@ -226,7 +226,7 @@ private enum Probes {
     static func ipv6Check(vpnOn: Bool, expected: VPNRegion?, path: NWPath?) async -> Check {
         guard vpnOn else {
             let v6 = path?.supportsIPv6 == true
-            return Check(id: "ipv6", detail: v6 ? "native ipv6 · goes outside a v4-only vpn" : "ipv4 only", level: .info)
+            return Check(id: "ipv6", detail: v6 ? "ipv6 available · rescan with vpn on to test leaks" : "ipv4 only", level: .info)
         }
         guard let url = URL(string: "https://[2606:4700:4700::1111]/cdn-cgi/trace"),
               let (data, _) = try? await session.data(from: url),
