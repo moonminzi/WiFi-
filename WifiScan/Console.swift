@@ -96,6 +96,8 @@ struct RegionCard: View {
     let selected: Bool
     /// 지금 이 나라로 붙어 있다
     let live: Bool
+    /// 실제로 잰 왕복 시간(ms). 없으면 거리로 어림한다.
+    var measured: Int?
     let action: () -> Void
 
     var body: some View {
@@ -117,9 +119,9 @@ struct RegionCard: View {
                     .foregroundStyle(Term.muted)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
-                Text("~\(Self.rtt(region))ms")
-                    .font(Term.mono(10))
-                    .foregroundStyle(selected ? Term.key : Term.muted)
+                Text(measured.map { "\($0)ms" } ?? "~\(Self.rtt(region))ms")
+                    .font(Term.mono(10, measured == nil ? .regular : .semibold))
+                    .foregroundStyle(rttColor)
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -129,8 +131,16 @@ struct RegionCard: View {
         }
         .buttonStyle(.plain)
         .animation(.easeOut(duration: 0.2), value: selected)
-        .accessibilityLabel("\(region.geo.city), about \(Self.rtt(region)) milliseconds")
+        .accessibilityLabel("\(region.geo.city), \(measured.map { "\($0)" } ?? "about \(Self.rtt(region))") milliseconds")
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// 잰 값은 빠를수록 초록 → 노랑 → 빨강
+    private var rttColor: Color {
+        guard let measured else { return selected ? Term.key : Term.muted }
+        if measured < 80 { return Term.green }
+        if measured < 180 { return Term.amber }
+        return Term.red
     }
 
     /// 빛이 광섬유로 1ms에 200km쯤 가니 왕복은 km/100ms. 장비·우회 몫으로 조금 더한다(어림값).

@@ -28,6 +28,15 @@
     (서울에서 kr처럼 you 밑에 가려진 나라는 you를 누름). 대기 중에는 고르지 않은 나라로 가는 길도 옅게 그어 둔다
   - `// boot log`: 이번 연결의 단계마다 `+  3.2s ✓ jp: booting…`처럼 걸린 시간과 함께 쌓이고, 실패하면 ✗ 이유가 남는다
   - 연결되면 성공 햅틱, 나라를 바꾸면 선택 햅틱
+  - **연결 중 취소**: 해외 서버가 켜지는 동안 버튼이 `jp: booting · cancel ✕`가 된다. 이미 시작한 연결은 내린다
+- **실측 지연**: 끊겨 있을 때 나라마다 그 AWS 리전의 `dynamodb.<리전>.amazonaws.com/ping`에 세 번 묻고(첫 번째는 TLS가 섞여 버림)
+  가장 빠른 값을 카드에 쓴다(80ms 미만 초록 · 180ms 미만 노랑 · 그 위 빨강). 못 재면 거리 어림(`~`)
+- **출구 확인**: 연결되면 `1.1.1.1/cdn-cgi/trace`로 밖에서 보이는 IP·나라를 읽어 `exit 54.199.12.4 · JP NRT ✓ matches`.
+  고른 나라와 다르면 `! not JP — leak?`. 끊겨 있으면 지금 회선 IP(`isp … · sites see this`). 줄을 누르면 다시 확인
+- **갈아타기(hop)**: 연결된 채로 다른 나라 점·카드를 누르면 `hop → us · oregon` 확인 뒤 끊고 그 나라로 다시 붙는다
+- 화면 스크린샷: `.github/workflows/ui-shots.yml`(PR에서 `WifiScan/`이 바뀌면, 또는 수동 실행)이 화면 코드만 시뮬레이터용으로 빌드해
+  아이폰·아이폰 SE·아이패드에서 vpn(idle/connecting/connected/failed)·dash·settings를 찍어 `ui-shots` 아티팩트로 올린다.
+  서버 없이 그리려고 Debug 빌드에서만 `-nagoDemo connected`, `-nagoTab 1` 실행 인자를 읽는다(`WifiScan/Demo.swift`)
 - **dash 탭 요약**(2.0): 터미널 창 위에 서버 카드(상태 불빛·IP·가동 시간·ike·유휴, 지금 붙은 서버엔 `you`)와
   이번 달 송신량 게이지·비용·시간별 막대
 - 자체 서명 CA라서 최초 1회 `server/WifiScanVPN.mobileconfig` 설치 + 인증서 신뢰가 필요
