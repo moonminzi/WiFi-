@@ -37,8 +37,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let dns: [String]
         let mtu: Int
         let engine: String
-        /// NepTUN 스레드 사이 대기열 묶음 수(설정 탭 queue)
-        let queue: Int
+        /// NepTUN 이벤트 루프 수(설정 탭 loops). 예전 설정(queue만 있음)이면 2
+        let loops: Int
         let region: String?
         let apiKey: String?
 
@@ -56,7 +56,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             self.dns = (p["dns"] as? [String]) ?? ["1.1.1.1"]
             self.mtu = (p["mtu"] as? Int) ?? 1420
             self.engine = (p["engine"] as? String) ?? "neptun"
-            self.queue = (p["queue"] as? Int) ?? 8
+            self.loops = (p["loops"] as? Int) ?? 2
             self.region = p["region"] as? String
             self.apiKey = p["apiKey"] as? String
         }
@@ -114,7 +114,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         current = settings
-        let engineLabel = settings.engine == "go" ? "go" : "neptun q\(settings.queue)"
+        let engineLabel = settings.engine == "go" ? "go" : "neptun ×\(settings.loops)"
         journal.add("start \(engineLabel) → \(settings.endpoint)" + (onDemand ? " · on-demand" : ""))
         let done: (Error?) -> Void = { [weak self] error in
             Task { @MainActor in
@@ -275,9 +275,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     return
                 }
                 let engine = NeptunEngine()
+                engine.journal = { [weak self] line in self?.journal.add(line) }
                 do {
                     try engine.start(tunFD: fd, privateKey: s.privateKey, serverPub: s.serverPub, endpoint: s.endpoint,
-                                     queue: s.queue)
+                                     loops: s.loops)
                     self.neptun = engine
                     completionHandler(nil)
                 } catch {

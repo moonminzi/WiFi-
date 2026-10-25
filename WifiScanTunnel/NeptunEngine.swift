@@ -12,6 +12,11 @@ final class NeptunEngine {
     private var monitor: NWPathMonitor?
     private var lastInterfaces: [String]?
     private let queue = DispatchQueue(label: "nago.neptun")
+    /// 터널 로그(앱 logs 화면)에 남길 한 줄
+    var journal: ((String) -> Void)?
+
+    /// wireguard-go와 같은 UDP 소켓 버퍼(받기·보내기)
+    private static let socketBuffer: Int32 = 7 << 20
 
     /// 서버(피어) 하나짜리 UAPI 설정. privateKey가 없으면 피어만 바꾼다.
     private static func uapi(privateKey: String?, serverPub: String, endpoint: String) -> String {
@@ -30,18 +35,22 @@ final class NeptunEngine {
     }
 
     /// 엔진 시작. 실패하면 이유를 던진다.
-    /// - queue: 스레드 사이 대기열 묶음 수(묶음당 최대 50패킷). 작을수록 다운로드 중 핑이 낮다
-    func start(tunFD: Int32, privateKey: String, serverPub: String, endpoint: String, queue batches: Int) throws {
+    /// - loops: 이벤트 루프 수(1~4). 애플에선 NepTUN이 패킷을 이벤트 루프에서 바로 처리한다
+    ///   (작업 스레드·스레드 사이 대기열이 없다). utun 읽기와 UDP 받기는 한 번에 한 스레드만 잡으니(kqueue EV_DISPATCH)
+    ///   2개면 내려받기(받기→복호화→utun 쓰기)와 올리기·ACK(utun 읽기→암호화→보내기)가 다른 코어에서 겹친다.
+    ///   피어 잠금은 암·복호화하는 동안만 잡는다
+    func start(tunFD: Int32, privateKey: String, serverPub: String, endpoint: String, loops: Int) throws {
         let uapi = Self.uapi(privateKey: privateKey, serverPub: serverPub, endpoint: endpoint)
-        // NordVPN(libtelio)과 같은 설정: 애플 기기에선 이벤트 루프 1개(성능 코어 하나)가 가장 빠르다.
-        // 암호화/전송은 엔진의 작업 스레드들이 코어 수만큼 나눠 한다.
-        let threads: UInt32 = 1
-        guard let handle = uapi.withCString({ nago_tun_start(tunFD, $0, threads, UInt32(clamping: batches)) }) else {
+        let threads = UInt32(min(max(loops, 1), 4))
+        // 마지막 인자(스레드 사이 대기열)는 애플에서 쓰이지 않는다
+        guard let handle = uapi.withCString({ nago_tun_start(tunFD, $0, threads, 0) }) else {
             throw NSError(domain: "nago.neptun", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "neptun: \(Self.lastError())"])
         }
         tun = handle
-        Self.log.info("started with \(threads) threads, queue \(batches)")
+        Self.log.info("started with \(threads) loops")
+        // UDP 소켓은 엔진을 만들 때 열린다(open_listen_socket). 바로 키운다
+        tuneSockets(reason: "start")
 
         // 와이파이↔셀룰러 전환 때 UDP 소켓을 새로 만들어야 끊기지 않는다(WireGuardKit의 bump sockets와 같은 일).
         let monitor = NWPathMonitor()
@@ -56,6 +65,57 @@ final class NeptunEngine {
         guard let tun, path.status == .satisfied, let last = lastInterfaces, last != interfaces else { return }
         Self.log.info("network changed \(last, privacy: .public) → \(interfaces, privacy: .public)")
         nago_tun_network_changed(tun)
+        // 엔진이 소켓을 다시 만들었을 수 있어서 한 번 더(이미 큰 소켓은 그대로)
+        queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.tuneSockets(reason: "network") }
+    }
+
+    // MARK: UDP 소켓 버퍼
+
+    /// NepTUN은 애플에서 UDP 소켓 버퍼를 건드리지 않는다(skt_buffer_size는 애플 밖에서만 쓰임).
+    /// 기본 크기면 내려받기가 몰리거나 이벤트 루프가 잠깐 비켜 있을 때 커널이 패킷을 버리고 TCP가 속도를 줄인다.
+    /// 엔진 소켓을 바깥에서 받을 길이 없어서 utun을 찾을 때처럼 fd를 훑어, 이 확장의 IPv4/IPv6 UDP 소켓을 키운다
+    /// (utun은 AF_SYSTEM이라 빠진다). 실제로 잡힌 크기를 로그에 남긴다.
+    private func tuneSockets(reason: String) {
+        var tuned: [String] = []
+        for fd: Int32 in 0...1024 where Self.isInternetUDP(fd) {
+            let rcv = Self.grow(fd, SO_RCVBUF)
+            let snd = Self.grow(fd, SO_SNDBUF)
+            tuned.append("fd\(fd) rcv \(rcv >> 10)K snd \(snd >> 10)K")
+        }
+        let line = "udp buffers (\(reason)): " + (tuned.isEmpty ? "no sockets" : tuned.joined(separator: ", "))
+        Self.log.info("\(line, privacy: .public)")
+        journal?(line)
+    }
+
+    private static func isInternetUDP(_ fd: Int32) -> Bool {
+        var type: Int32 = 0
+        var typeLength = socklen_t(MemoryLayout<Int32>.size)
+        guard getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &typeLength) == 0, type == SOCK_DGRAM else { return false }
+        var address = sockaddr_storage()
+        var addressLength = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        let named = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &addressLength) }
+        }
+        let family = Int32(address.ss_family)
+        return named == 0 && (family == AF_INET || family == AF_INET6)
+    }
+
+    /// 7MB부터 되는 데까지(시스템 상한에 걸리면 반씩 줄여 가며) 키우고, 실제로 잡힌 크기를 돌려준다.
+    /// 이미 그보다 크면 건드리지 않는다.
+    private static func grow(_ fd: Int32, _ option: Int32) -> Int32 {
+        let length = socklen_t(MemoryLayout<Int32>.size)
+        var current: Int32 = 0
+        var currentLength = length
+        _ = getsockopt(fd, SOL_SOCKET, option, &current, &currentLength)
+        var size = socketBuffer
+        while size > current, size >= 256 << 10 {
+            if setsockopt(fd, SOL_SOCKET, option, &size, length) == 0 { break }
+            size /= 2
+        }
+        var actual: Int32 = 0
+        var actualLength = length
+        _ = getsockopt(fd, SOL_SOCKET, option, &actual, &actualLength)
+        return actual
     }
 
     func stop() {

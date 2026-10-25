@@ -8,8 +8,9 @@ struct SettingsView: View {
     @AppStorage("vpnUsername") private var username = "wifiscan"
     @AppStorage("vpnProtocol") private var proto: VPNProto = .auto
     @AppStorage("wgEngine") private var wgEngine = "neptun"
-    /// NepTUN 스레드 사이 대기열 묶음 수. 작을수록 다운로드 중 핑이 낮고, 클수록 몰릴 때 덜 버린다
-    @AppStorage("wgQueue") private var wgQueue = 8
+    /// NepTUN 이벤트 루프 수. 2면 내려받기와 올리기(ACK 포함)가 다른 코어에서 돈다.
+    /// (예전 queue 설정은 iOS에서 NepTUN이 쓰지 않아 뺐다 — README)
+    @AppStorage("wgLoops") private var wgLoops = 2
     @AppStorage("vpnFastMode") private var fastMode = true
     @AppStorage("vpnAdblock") private var adblock = false
     @AppStorage("vpnAutoConnect") private var autoConnect: VPNAutoConnect = .off
@@ -121,8 +122,8 @@ struct SettingsView: View {
                 }
                 if wgEngine == "neptun" {
                     TermDivider()
-                    row("queue") {
-                        TermChoice(options: [8, 16, 64].map { (label: "\($0)", value: $0) }, selection: $wgQueue)
+                    row("loops") {
+                        TermChoice(options: [1, 2].map { (label: "\($0)", value: $0) }, selection: $wgLoops)
                     }
                 }
             }

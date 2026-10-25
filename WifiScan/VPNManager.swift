@@ -132,6 +132,17 @@ final class VPNManager {
         return false
     }
 
+    /// 연결을 시작한 직후, 시스템이 상태를 '연결 중'으로 바꿀 때까지(보통 1초 안) 기다린다.
+    /// 그 틈에 화면이 잠깐 '끊김'으로 돌아갔다가 다시 연결 중이 되면 지도 경로가 처음부터 다시 그어진다.
+    func waitUntilStarted(seconds: Double) async {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline, !Task.isCancelled {
+            refreshStatus()
+            if status.isActive { return }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+    }
+
     /// 서버/사용자/비밀번호로 VPN 설정을 저장한다.
     /// 처음 저장할 때 "VPN 구성 추가" 시스템 허용 창이 한 번 뜬다.
     /// 비밀번호는 평문으로 저장하지 않고 키체인에 넣은 뒤 그 참조만 설정에 연결한다.
@@ -236,13 +247,13 @@ final class VPNManager {
 
     /// WireGuard 설정을 저장한다. 처음 한 번은 "VPN 구성 추가" 허용 창이 뜬다.
     /// - engine: "neptun"(Rust, NordVPN 엔진) 또는 "go"(wireguard-go, 공식 앱과 같은 엔진)
-    /// - queue: NepTUN 스레드 사이 대기열 묶음 수(작을수록 다운로드 중 핑이 낮음)
+    /// - loops: NepTUN 이벤트 루프 수(1~2). 2면 내려받기와 올리기가 다른 코어에서 돈다
     /// - region, apiKey: 터널 확장이 핸드셰이크가 끊기면 국가 API로 서버를 깨우고 새 주소로 바꿀 때 쓴다.
     /// - killSwitch: 터널이 끊긴 동안 다른 트래픽을 막는다(includeAllNetworks). 확장 자신의 통신은 막히지 않는다.
     /// - allowLAN: 킬 스위치를 켠 상태에서 프린터·AirPlay 같은 같은 망 기기는 터널 밖으로 보낸다.
     ///   킬 스위치가 꺼져 있으면 iOS가 원래 같은 망 트래픽을 터널에 넣지 않는다.
     func saveWireGuard(privateKey: String, address: String, serverPub: String, endpoint: String,
-                       dns: [String], engine: String, queue: Int, region: String, apiKey: String,
+                       dns: [String], engine: String, loops: Int, region: String, apiKey: String,
                        autoConnect: VPNAutoConnect, killSwitch: Bool, allowLAN: Bool) async throws {
         let tunnel = try await NETunnelProviderManager.loadAllFromPreferences().first ?? NETunnelProviderManager()
         let proto = NETunnelProviderProtocol()
@@ -257,7 +268,7 @@ final class VPNManager {
             "dns": dns,
             "mtu": 1420,
             "engine": engine,
-            "queue": queue,
+            "loops": loops,
             "region": region,
             "apiKey": apiKey,
         ]

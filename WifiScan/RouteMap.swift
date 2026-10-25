@@ -194,6 +194,8 @@ final class RouteMapModel {
             destination = newDestination
             arc = arcs[newDestination] ?? RouteArc(from: origin, to: newDestination.geo)
             fly(from: from, now: now)
+            // 연결 중에 나라가 바뀌면(갈아타기) 새 길에서 처음부터
+            if stage == .connecting, newStage == .connecting { run = RouteRun(start: now) }
         }
         if newStage != stage {
             transition(to: newStage, now: now)
@@ -218,16 +220,32 @@ final class RouteMapModel {
         scanning = newScanning
     }
 
+    /// 연결 중에 상태가 잠깐 '대기'로 튀었다 돌아와도 경로를 지우지 않고 기다리는 시간
+    private static let idleGrace = 1.0
+
+    /// 사라지기로 했지만 아직 유예 시간 안이라 이어 갈 수 있는 경로인지
+    private func resumable(at now: Date) -> Bool {
+        guard let run, run.failure == nil, run.finish == nil, let gone = run.gone else { return false }
+        return gone > now
+    }
+
     private func transition(to newStage: RouteMap.Stage, now: Date) {
+        let previous = stage
         stage = newStage
         stageAt = now
         switch newStage {
         case .connecting:
-            run = RouteRun(start: now)
+            // 잠깐 대기로 튀었던 거면 같은 경로를 그대로 이어 간다(웨이포인트·커서가 처음부터 다시 그려지지 않게)
+            if resumable(at: now) {
+                run?.gone = nil
+            } else {
+                run = RouteRun(start: now)
+            }
             focusAt = nil
             setFraming(.route, now: now)
         case .connected:
-            // 앱을 연 순간 이미 연결돼 있었거나 실패한 경로가 남아 있으면 처음부터 빠르게 긋는다
+            if resumable(at: now) { run?.gone = nil }
+            // 앱을 연 순간 이미 연결돼 있었거나 실패·사라진 경로만 처음부터 빠르게 긋는다
             if run == nil || run?.failure != nil || run?.gone != nil { run = RouteRun(start: now) }
             run?.complete(now)
             focusAt = now.addingTimeInterval(reduceMotion ? 0 : 0.6)
@@ -235,9 +253,13 @@ final class RouteMapModel {
             run?.fail(now)
             if run?.gone == nil { run?.gone = now.addingTimeInterval(2.5) }
         case .idle:
-            if run != nil, run?.gone == nil { run?.gone = now }
+            // 연결 중에서 바로 넘어온 거면 유예 시간 동안은 그대로 두었다가 사라진다(그새 다시 연결 중이 되면 이어 간다)
+            if run != nil, run?.gone == nil {
+                run?.gone = now.addingTimeInterval(previous == .connecting ? Self.idleGrace : 0)
+            }
             focusAt = nil
-            setFraming(.route, now: now)
+            // 유예 중엔 카메라도 그대로(끊겼다 돌아올 때 화면이 들썩이지 않게)
+            if previous != .connecting { setFraming(.route, now: now) }
         case .onDevice:
             run = nil
             focusAt = nil

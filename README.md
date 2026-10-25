@@ -66,6 +66,21 @@
 - WireGuard 키는 폰에서 처음 한 번 만들고 공개키만 피어 목록(SSM 파라미터 `/nago/wg/peers`)에 등록. 서버 4대 모두 같은 목록으로 맞춰짐(`server/wireguard/setup-wg.sh`, `nago-peer sync`)
 - **wg engine**(iOS): `neptun`(기본) — NordVPN이 쓰는 Rust 엔진 NepTUN(BSD-3)을 `NagoTun/`(C 인터페이스)으로 감쌈. utun fd를 엔진 스레드가 직접 읽고 씀 / `go` — WireGuardKit(공식 WireGuard 앱과 같은 wireguard-go)
   - 리눅스 검증(서울→도쿄): NepTUN 다운 약 250~290Mbps, 커널 WireGuard 약 270Mbps로 같은 급. `NagoTun/examples/linux_tun.rs`로 서버에서 재현 가능
+  - **애플에서 NepTUN이 도는 방식**(고정한 rev `ce18515`의 소스 기준): 작업 스레드·스레드 사이 대기열(`packet_workers`)은 애플 밖에서만 만든다.
+    아이폰에선 이벤트 루프가 패킷을 그 자리에서 처리한다(utun 읽기→암호화→`send_to` / `recv_from`→복호화→utun 쓰기, 묶음 없이 한 개씩)
+    - 그래서 예전 설정 `queue`(8·16·64)는 **iOS에선 아무 영향이 없었다** → 빼고 `loops`로 바꿈
+    - **loops**(이벤트 루프 수, 기본 2): utun 읽기와 UDP 받기는 kqueue `EV_DISPATCH`라 한 번에 한 스레드만 잡는다.
+      1개면 내려받기와 그동안의 ACK 올리기가 한 코어를 나눠 쓰고, 2개면 다른 코어에서 겹친다.
+      피어 잠금은 암·복호화하는 동안만 잡고 `send_to`/utun 쓰기는 잠금 밖이다. 3개 이상은 잡을 일이 없어 1·2만 둠
+    - **UDP 소켓 버퍼**: NepTUN은 애플에서 소켓 버퍼를 건드리지 않아(기본 크기) 받는 쪽이 잠깐 밀리면 커널이 패킷을 버린다.
+      wireguard-go처럼 7MB로 키운다(안 되면 반씩 줄여 가며). 엔진 소켓을 바깥에서 받을 길이 없어 utun 찾을 때처럼 fd를 훑어
+      IPv4/IPv6 UDP 소켓에 건다. 실제로 잡힌 크기는 settings → logs의 터널 로그에 `udp buffers (start): fd7 rcv 7168K …`로 남는다
+    - 안드로이드·리눅스는 NepTUN의 `skt_buffer_size`로 같은 7MB(시스템 상한에서 잘림). `queue`는 거기서만 쓰이고 8 그대로(작아야 다운로드 중 핑이 낮다)
+    - MTU 1420은 그대로(IPv6로 나가는 망·PPPoE에서도 조각나지 않는 WireGuard 기본값)
+- **speed test**(vpn 탭 아래): Cloudflare 속도 측정 서버에 연결 4개(세션을 따로 둬 HTTP/2 한 연결에 몰리지 않게)로 7초씩 받기·올리기,
+  처음 1.5초는 빼고 잰다. 쉬는 동안 핑(5번 중간값)과 받는 동안 핑(0.4초마다)도 같이 — 둘의 차이가 대기열이 쌓이는 정도.
+  결과는 설정(`wg/neptun ×2 · jp`, `wg/go · jp`, `direct` …)과 함께 최근 8개까지 남아서, loops·engine을 바꿔 가며 같은 나라로 재면 바로 비교된다.
+  한 번에 최대 약 300MB를 쓴다
   - iOS 빌드 때 `NagoTunRust` 타깃이 `NagoTun/build-ios.sh`로 `cargo build --target aarch64-apple-ios`(Rust 필요)
 - iOS 빌드: `Vendor/WireGuardKit`(wireguard-apple 1.0.16-27, MIT, Xcode 16용 두 줄 수정) + Go 1.24로 libwg-go.a를 만드는 `WireGuardGoBridgeiOS` 타깃
 - 재서명할 때 확장(`.tunnel`)도 같이 서명돼야 하고, 두 App ID 모두 Network Extensions(packet tunnel) 권한이 필요

@@ -14,7 +14,7 @@ struct VPNView: View {
     @AppStorage("vpnAdblock") private var adblock = false
     @AppStorage("vpnProtocol") private var proto: VPNProto = .auto
     @AppStorage("wgEngine") private var wgEngine = "neptun"
-    @AppStorage("wgQueue") private var wgQueue = 8
+    @AppStorage("wgLoops") private var wgLoops = 2
     @AppStorage("vpnAutoConnect") private var autoConnect: VPNAutoConnect = .off
     @AppStorage("vpnKillSwitch") private var killSwitch = false
     @AppStorage("vpnAllowLAN") private var allowLAN = true
@@ -42,6 +42,8 @@ struct VPNView: View {
     @State private var traffic = TrafficMeter()
     /// 지금 네트워크 검사(앱을 열면 한 번 돈다)
     @State private var scan = NetScan()
+    /// 속도 측정(설정을 바꿔 가며 비교)
+    @State private var speed = SpeedTest()
 
     struct Step: Identifiable {
         let id = UUID()
@@ -115,6 +117,7 @@ struct VPNView: View {
             steps = Demo.steps.map { Step(at: Demo.since.addingTimeInterval(-$0.ago + Demo.steps[0].ago - 26), text: $0.text) }
             linkStats = Demo.linkStats
             traffic.fillDemo()
+            speed.showDemo()
         case "scan":
             region = .jp
             scan.showDemo(running: true)
@@ -153,7 +156,7 @@ struct VPNView: View {
             return parts
         }
         var parts = [effectiveProto == .wireguard ? "wg/\(wgEngine)" : effectiveProto.label]
-        if effectiveProto == .wireguard, wgEngine == "neptun", wgQueue != 8 { parts[0] += " q\(wgQueue)" }
+        if effectiveProto == .wireguard, wgEngine == "neptun" { parts[0] += " ×\(wgLoops)" }
         if fastMode, effectiveProto != .wireguard { parts.append("gcm") }
         if adblock {
             parts.append("adblock")
@@ -268,6 +271,10 @@ struct VPNView: View {
             if scan.running || !scan.checks.isEmpty {
                 ScanPanel(scan: scan, vpnOn: vpn.status == .connected) { Task { await runScan() } }
             }
+            SpeedPanel(test: speed, via: speedVia) {
+                let via = speedVia
+                Task { await speed.run(via: via) }
+            }
         }
         .padding(.top, 8)
     }
@@ -288,6 +295,18 @@ struct VPNView: View {
         .buttonStyle(.plain)
         .disabled(scan.running)
         .accessibilityLabel("scan this network")
+    }
+
+    /// 속도 측정 결과에 남길 설정 이름: 연결돼 있으면 "wg/neptun ×2 · jp", 아니면 "direct"
+    private var speedVia: String {
+        guard vpn.status == .connected else { return "direct" }
+        switch vpn.activeProto {
+        case .unicorn?: return "unicorn"
+        case .ikev2?: return "ikev2 · \(savedRegion.rawValue)"
+        default:
+            let engine = wgEngine == "neptun" ? "wg/neptun ×\(wgLoops)" : "wg/\(wgEngine)"
+            return "\(engine) · \(savedRegion.rawValue)"
+        }
     }
 
     private func runScan() async {
@@ -716,6 +735,8 @@ struct VPNView: View {
             case .unicorn:
                 break       // 서버가 없어서 위에서 먼저 처리한다(여기까지 오지 않는다)
             }
+            // 시스템이 '연결 중'을 알려 올 때까지 busy를 유지해 화면이 한 번 끊겼다 다시 그려지지 않게
+            await vpn.waitUntilStarted(seconds: 3)
             savedRegion = region
         } catch {
             if Task.isCancelled {
@@ -746,6 +767,7 @@ struct VPNView: View {
             step("unicorn: \(settings.summary)")
             try await vpn.saveUnicorn(settings, autoConnect: autoConnect)
             try vpn.connectTunnel()
+            await vpn.waitUntilStarted(seconds: 3)
         } catch {
             fail(error.localizedDescription)
         }
@@ -780,7 +802,7 @@ struct VPNView: View {
         step("\(region.rawValue): wg/\(wgEngine) → \(endpoint)")
         try await vpn.saveWireGuard(privateKey: reg.privateKey, address: reg.address + "/32",
                                     serverPub: serverPub, endpoint: endpoint, dns: wgDNS, engine: wgEngine,
-                                    queue: wgQueue, region: region.rawValue, apiKey: key,
+                                    loops: wgLoops, region: region.rawValue, apiKey: key,
                                     autoConnect: autoConnect, killSwitch: killSwitch, allowLAN: allowLAN)
         try vpn.connectTunnel()
     }

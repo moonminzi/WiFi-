@@ -65,11 +65,20 @@ fn errno_of(response: &str) -> c_int {
         .unwrap_or(-1)
 }
 
+/// UDP 소켓 버퍼(받기·보내기). wireguard-go와 같은 7MB. 받는 쪽이 잠깐 밀릴 때 커널이 패킷을 버리지 않게 한다.
+/// 리눅스·안드로이드는 시스템 상한(rmem_max)에서 조용히 잘리고, 실패해도 NepTUN은 경고만 남긴다.
+/// 애플에서는 NepTUN이 이 값을 쓰지 않아서 iOS 터널 확장(NeptunEngine.swift)이 소켓을 찾아 직접 키운다.
+const SOCKET_BUFFER: usize = 7 << 20;
+
 /// 터널을 시작한다. 실패하면 NULL.
 /// - `tun_fd`: iOS utun 또는 안드로이드 TUN 디스크립터(네트워크 설정을 적용한 뒤에 넘겨야 MTU가 맞다). 엔진이 닫는다
 /// - `uapi`: "set=1\nprivate_key=…\npublic_key=…\nendpoint=…\nallowed_ip=…\n\n"
-/// - `threads`: 이벤트 루프 스레드 수(NordVPN과 같게 아이폰 1, 안드로이드 4)
-/// - `queue`: 스레드 사이 대기열 묶음 수(0이면 8). 작을수록 다운로드 중 핑이 낮고, 클수록 몰릴 때 덜 버린다
+/// - `threads`: 이벤트 루프 스레드 수(아이폰 기본 2, 안드로이드 4).
+///   애플은 패킷을 이벤트 루프에서 바로 처리한다(읽기→암호화→보내기 / 받기→복호화→쓰기). utun 읽기와 UDP 받기는
+///   kqueue EV_DISPATCH라 한 번에 한 스레드만 잡으므로, 2개면 올리기(받는 중의 ACK 포함)와 내려받기가 다른 코어에서 돈다.
+///   피어 잠금은 암·복호화하는 동안만 잡고 send/write는 잠금 밖이라 둘이 겹친다
+/// - `queue`: 애플 밖(안드로이드·리눅스)에서만 쓰는 스레드 사이 대기열 묶음 수(0이면 8).
+///   애플에선 NepTUN이 이 대기열(packet_workers)을 아예 만들지 않아서 값이 아무 영향이 없다
 #[no_mangle]
 pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u32, queue: u32) -> *mut NagoTun {
     let Some(cmd) = text(uapi).map(|c| normalize(&c)) else {
@@ -80,7 +89,7 @@ pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u3
         Err(e) => return fail(format!("tun fd {tun_fd}: {e:?}")),
     };
     let config = DeviceConfig {
-        n_threads: threads.clamp(1, 8) as usize,
+        n_threads: threads.clamp(1, 4) as usize,
         // NordVPN(libtelio)과 같게: 애플은 끄고, 안드로이드는 서버마다 connect한 소켓을 쓴다
         use_connected_socket: cfg!(target_os = "android"),
         #[cfg(target_os = "linux")]
@@ -89,11 +98,10 @@ pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u3
         protect: Arc::new(MakeExternalNeptunNoop),
         firewall_process_inbound_callback: None,
         firewall_process_outbound_callback: None,
-        skt_buffer_size: None,
-        // 스레드 사이 대기열(묶음당 최대 50패킷). 크면 다운로드가 몰릴 때 패킷이 쌓여 그만큼 핑이 오른다
-        // (NepTUN 기본 500묶음이면 수백 ms, 채널 하나가 40MB까지 커져 iOS 확장 메모리 한도 50MB에도 걸림).
-        // 8묶음(약 600KB)이면 300Mbps에서 쌓이는 지연이 20ms 안팎이고, 넘치면 TCP가 속도를 맞춘다.
-        // 64묶음(약 5MB)까지만 받는다(iOS 메모리 한도).
+        skt_buffer_size: Some(SOCKET_BUFFER),
+        // 스레드 사이 대기열(애플 밖에서만 쓰임, 묶음당 최대 50패킷). 가득 차면 이벤트 루프가 기다린다(블로킹 send).
+        // 크면 다운로드가 몰릴 때 패킷이 쌓여 그만큼 핑이 오른다(NepTUN 기본 500묶음이면 수백 ms).
+        // 8묶음(약 600KB)이면 300Mbps에서 쌓이는 지연이 20ms 안팎이고, 순간 버스트는 위의 소켓 버퍼가 받는다.
         inter_thread_channel_size: Some(if queue == 0 { 8 } else { queue.clamp(1, 64) as usize }),
         max_inter_thread_batched_pkts: None,
     };
