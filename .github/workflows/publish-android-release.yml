@@ -1,0 +1,21 @@
+name: Publish Android release (one-off)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create android-2.0.0 NAGO-VPN-2.0.0.apk \
+            --target 1159bc960279d0fa08db97021701cc95a0adae58 \
+            --title "NAGO VPN Android 2.0.0" \
+            --notes-file release-notes.md
