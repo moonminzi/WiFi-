@@ -23,6 +23,8 @@ sys.exit(1)' "$1"
 
 shoot() {  # 기기 이름표, udid, 장면 이름, 실행 인자…
   label="$1"; udid="$2"; scene="$3"; shift 3
+  # 기본 화면 모양은 system이고 시뮬레이터는 라이트라서, 따로 정하지 않은 장면은 다크로 찍는다
+  case " $* " in *" -appearance "*) ;; *) set -- "$@" -appearance dark ;; esac
   xcrun simctl terminate "$udid" "$BUNDLE" >/dev/null 2>&1 || true
   xcrun simctl launch "$udid" "$BUNDLE" "$@" >/dev/null
   sleep 5

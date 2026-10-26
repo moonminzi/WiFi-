@@ -691,9 +691,9 @@ final class RouteMapModel {
         let lon = RouteMath.normalized(view.cam.x)
         let coords = String(format: "%.2f°%@ %.2f°%@", abs(lat), lat >= 0 ? "N" : "S", abs(lon), lon >= 0 ? "E" : "W")
         if hero {
-            label(&ctx, coords, at: CGPoint(x: view.w - side, y: topY), anchor: .trailing, color: Term.muted)
+            label(&ctx, coords, at: CGPoint(x: view.w - side, y: topY), anchor: .trailing, color: Term.muted, backed: true)
         } else {
-            label(&ctx, coords, at: CGPoint(x: side, y: topY), anchor: .leading, color: Term.muted)
+            label(&ctx, coords, at: CGPoint(x: side, y: topY), anchor: .leading, color: Term.muted, backed: true)
         }
 
         let to = destination.geo
@@ -711,12 +711,12 @@ final class RouteMapModel {
             bottom = "\(origin.city) → \(to.city)"
         }
         if hero {
-            label(&ctx, distance, at: CGPoint(x: view.w - side, y: bottomY), anchor: .trailing, color: Term.muted)
+            label(&ctx, distance, at: CGPoint(x: view.w - side, y: bottomY), anchor: .trailing, color: Term.muted, backed: true)
         } else {
-            label(&ctx, distance, at: CGPoint(x: view.w - side, y: topY), anchor: .trailing, color: Term.muted)
+            label(&ctx, distance, at: CGPoint(x: view.w - side, y: topY), anchor: .trailing, color: Term.muted, backed: true)
         }
         label(&ctx, bottom, at: CGPoint(x: side, y: bottomY), anchor: .leading,
-              color: stage == .connected ? Term.green : Term.muted)
+              color: stage == .connected ? Term.green : Term.muted, backed: true)
     }
 
     private func strokeRing(_ ctx: inout GraphicsContext, center: CGPoint, radius: Double, color: Color) {
@@ -724,10 +724,17 @@ final class RouteMapModel {
         ctx.stroke(Path(ellipseIn: rect), with: .color(color), lineWidth: 1)
     }
 
+    /// `backed`: 글자 뒤에 배경색 판을 옅게 깐다(HUD — 밑에 깔린 나라 점에 글자가 묻히지 않게)
     private func label(_ ctx: inout GraphicsContext, _ text: String, at point: CGPoint, anchor: UnitPoint,
-                       size: CGFloat = 10, weight: Font.Weight = .regular, color: Color) {
+                       size: CGFloat = 10, weight: Font.Weight = .regular, color: Color, backed: Bool = false) {
         var resolved = ctx.resolve(Text(text).font(Term.mono(size, weight)))
         resolved.shading = .color(color)
+        if backed {
+            let box = resolved.measure(in: CGSize(width: 1000, height: 100))
+            let rect = CGRect(x: point.x - anchor.x * box.width, y: point.y - anchor.y * box.height,
+                              width: box.width, height: box.height).insetBy(dx: -4, dy: -2)
+            ctx.fill(Path(roundedRect: rect, cornerRadius: 3), with: .color(Term.bg.opacity(0.75)))
+        }
         ctx.draw(resolved, at: point, anchor: anchor)
     }
 }

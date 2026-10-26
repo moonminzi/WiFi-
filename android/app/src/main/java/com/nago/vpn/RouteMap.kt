@@ -749,19 +749,20 @@ class RouteMapModel {
         val lat = RouteMath.lat(view.cam.y - (top - bottom) / 2 / view.k)
         val lon = RouteMath.normalized(view.cam.x)
         val coords = "%.2f°%s %.2f°%s".format(abs(lat), if (lat >= 0) "N" else "S", abs(lon), if (lon >= 0) "E" else "W")
-        label(tm, coords, Offset(size.width - side, topY), Anchor.Trailing, 10.sp, FontWeight.Normal, Term.muted)
+        label(tm, coords, Offset(size.width - side, topY), Anchor.Trailing, 10.sp, FontWeight.Normal, Term.muted, backed = true)
         val to = destination.geo
         val distance = if (arc.local) "local" else "${RouteMath.grouped(origin.km(to).toInt())} km"
         val route = if (stage == RouteStage.Connected) "${origin.city} ══ ${to.city}" else "${origin.city} → ${to.city}"
-        label(tm, distance, Offset(size.width - side, bottomY), Anchor.Trailing, 10.sp, FontWeight.Normal, Term.muted)
+        label(tm, distance, Offset(size.width - side, bottomY), Anchor.Trailing, 10.sp, FontWeight.Normal, Term.muted, backed = true)
         label(tm, route, Offset(side, bottomY), Anchor.Leading, 10.sp, FontWeight.Normal,
-            if (stage == RouteStage.Connected) Term.green else Term.muted)
+            if (stage == RouteStage.Connected) Term.green else Term.muted, backed = true)
     }
 
     private enum class Anchor { Leading, Trailing, Center }
 
+    /** [backed]: 글자 뒤에 배경색 판을 옅게 깐다(HUD — 밑에 깔린 나라 점에 글자가 묻히지 않게) */
     private fun DrawScope.label(tm: TextMeasurer, text: String, at: Offset, anchor: Anchor, size: TextUnit,
-                                weight: FontWeight, color: Color) {
+                                weight: FontWeight, color: Color, backed: Boolean = false) {
         val layout = tm.measure(text, Term.mono(size, weight, color))
         val width = layout.size.width
         val left = when (anchor) {
@@ -769,6 +770,14 @@ class RouteMapModel {
             Anchor.Trailing -> at.x - width
             Anchor.Center -> at.x - width / 2f
         }
-        drawText(layout, topLeft = Offset(left, at.y - layout.size.height / 2f))
+        val top = at.y - layout.size.height / 2f
+        if (backed) {
+            drawRoundRect(
+                Term.bg.copy(alpha = 0.75f), Offset(left - 4 * density, top - 2 * density),
+                Size(width + 8 * density, layout.size.height + 4 * density),
+                androidx.compose.ui.geometry.CornerRadius(3 * density),
+            )
+        }
+        drawText(layout, topLeft = Offset(left, top))
     }
 }
