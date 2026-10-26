@@ -197,6 +197,11 @@ struct VPNView: View {
                         .offset(y: y < 0 ? -y * 0.45 : 0)
                 }
 
+            // 상태 빛: 머리줄 쪽에서 상태 색이 은은하게 번진다
+            StateGlow(kind: pillKind)
+                .frame(height: height)
+                .allowsHitTesting(false)
+
             HStack(alignment: .center, spacing: 0) {
                 Text("~/").foregroundStyle(Term.muted)
                 Text("vpn").foregroundStyle(Term.green)
@@ -251,7 +256,7 @@ struct VPNView: View {
             .overlay(alignment: .top) {
                 Capsule().fill(Term.border).frame(width: 36, height: 4).padding(.top, 7)
             }
-            .shadow(color: .black.opacity(0.5), radius: 18, y: -6)
+            .shadow(color: Term.shadow, radius: 18, y: -6)
             // 아래쪽 테두리·그림자는 화면 밖으로 밀어 낸다(아이패드처럼 내용이 짧아도 화면 끝까지)
             .padding(.bottom, -1200)
     }
@@ -267,16 +272,36 @@ struct VPNView: View {
             }
             if !steps.isEmpty || errorText != nil {
                 bootLog
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
             if scan.running || !scan.checks.isEmpty {
-                ScanPanel(scan: scan, vpnOn: vpn.status == .connected) { Task { await runScan() } }
+                scanPanel
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
-            SpeedPanel(test: speed, via: speedVia) {
-                let via = speedVia
-                Task { await speed.run(via: via) }
-            }
+            speedPanel
         }
         .padding(.top, 8)
+        // 패널이 생기고 사라질 때 툭 끊기지 않게
+        .animation(.snappy(duration: 0.35), value: steps.isEmpty)
+        .animation(.snappy(duration: 0.35), value: errorText)
+        .animation(.snappy(duration: 0.35), value: scan.running)
+    }
+
+    /// 검사가 끝나면 등급에 따라 햅틱(문제 없음 성공 · 있으면 경고)
+    private var scanPanel: some View {
+        ScanPanel(scan: scan, vpnOn: vpn.status == .connected) { Task { await runScan() } }
+            .sensoryFeedback(trigger: scan.finishedAt) { _, finished in
+                guard finished != nil else { return nil }
+                return scan.hasProblems ? .warning : .success
+            }
+    }
+
+    private var speedPanel: some View {
+        SpeedPanel(test: speed, via: speedVia) {
+            let via = speedVia
+            Task { await speed.run(via: via) }
+        }
+        .sensoryFeedback(.success, trigger: speed.last?.at)
     }
 
     /// 머리줄의 레이더 단추: 지금 네트워크를 검사한다
@@ -338,28 +363,31 @@ struct VPNView: View {
                 .foregroundStyle(vpn.status == .connected ? Term.green : Term.num)
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
+                // 나라를 바꾸면 이름이 부드럽게 바뀐다
+                .contentTransition(.interpolate)
+                .animation(.snappy(duration: 0.35), value: shownRegion)
                 Spacer(minLength: 8)
                 if let since = vpn.connectedSince, vpn.status == .connected {
-                    TimelineView(.periodic(from: since, by: 1)) { timeline in
-                        Text(Self.clock(timeline.date.timeIntervalSince(since)))
-                            .font(Term.mono(22, .semibold))
-                            .foregroundStyle(Term.num)
-                            .monospacedDigit()
-                    }
+                    SessionClock(since: since)
                 } else if !onDevice {
                     Text(distanceText(shownRegion))
                         .font(Term.mono(13))
                         .foregroundStyle(Term.muted)
+                        .contentTransition(.numericText())
+                        .animation(.snappy, value: shownRegion)
                 }
             }
 
             if busy || vpn.status.isBusy {
                 PhasePipeline(index: pipelineIndex, onDevice: onDevice)
+                    .transition(.opacity)
             } else {
                 exitLine
+                    .transition(.opacity)
             }
             if !busy, vpn.status == .connected, traffic.hasData {
                 TrafficPanel(meter: traffic)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             } else if !busy, vpn.status == .connected {
                 Text(linkStats.map { "link · " + $0 } ?? (vpn.activeProto == .ikev2 ? "link · ikev2 system tunnel" : "link · waiting for stats…"))
                     .font(Term.mono(12))
@@ -370,6 +398,8 @@ struct VPNView: View {
 
             FlagRow(flags: flags)
         }
+        .animation(.snappy(duration: 0.35), value: busy)
+        .animation(.snappy(duration: 0.35), value: vpn.status)
     }
 
     /// `exit 54.199.12.4 · JP ✓` — 밖에서 보이는 IP가 고른 나라인지. 연결 전엔 지금 회선(isp) IP.

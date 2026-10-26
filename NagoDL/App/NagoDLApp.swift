@@ -12,14 +12,15 @@ struct NagoDLApp: App {
         // 탭 바도 터미널 배경색 + 고정폭 글꼴(NAGO VPN과 같은 모양)
         let appearance = UITabBarAppearance()
         appearance.configureWithOpaqueBackground()
-        appearance.backgroundColor = UIColor(Term.bg)
-        appearance.shadowColor = UIColor(Term.border)
+        // Term 색은 다크·라이트 두 벌이다. 이 앱은 다크로 고정(.preferredColorScheme(.dark))이라 다크 쪽으로 보인다.
+        appearance.backgroundColor = Term.UI.bg
+        appearance.shadowColor = Term.UI.border
         let font = Term.uiMono(11, .semibold)
         for item in [appearance.stackedLayoutAppearance, appearance.inlineLayoutAppearance, appearance.compactInlineLayoutAppearance] {
-            item.normal.titleTextAttributes = [.font: font, .foregroundColor: UIColor(Term.muted)]
-            item.normal.iconColor = UIColor(Term.muted)
-            item.selected.titleTextAttributes = [.font: font, .foregroundColor: UIColor(Term.green)]
-            item.selected.iconColor = UIColor(Term.green)
+            item.normal.titleTextAttributes = [.font: font, .foregroundColor: Term.UI.muted]
+            item.normal.iconColor = Term.UI.muted
+            item.selected.titleTextAttributes = [.font: font, .foregroundColor: Term.UI.green]
+            item.selected.iconColor = Term.UI.green
         }
         UITabBar.appearance().standardAppearance = appearance
         UITabBar.appearance().scrollEdgeAppearance = appearance

@@ -63,6 +63,8 @@ struct SpeedPanel: View {
                 Text(Self.mbps(test.liveMbps))
                     .foregroundStyle(Term.num)
                     .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .animation(.snappy(duration: 0.2), value: test.liveMbps)
                 Text("Mbps").font(Term.mono(11)).foregroundStyle(Term.muted)
             }
             .font(Term.mono(24, .bold))
@@ -96,6 +98,8 @@ struct SpeedPanel: View {
         HStack(alignment: .lastTextBaseline, spacing: 4) {
             Text(arrow).foregroundStyle(color)
             Text(Self.mbps(value)).foregroundStyle(Term.num).monospacedDigit()
+                .contentTransition(.numericText())
+                .animation(.snappy(duration: 0.5), value: value)
             Text("Mbps").font(Term.mono(10.5)).foregroundStyle(Term.muted)
         }
         .font(Term.mono(20, .bold))

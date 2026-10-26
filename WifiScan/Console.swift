@@ -17,6 +17,7 @@ struct StatusPill: View {
             Text(text)
                 .font(Term.mono(12, .semibold))
                 .foregroundStyle(kind == .off ? Term.muted : color)
+                .contentTransition(.interpolate)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -52,6 +53,56 @@ private struct PillDot: View {
             Circle().fill(color).frame(width: 7, height: 7).opacity(dotAlpha)
         }
         .frame(width: 15, height: 15)
+    }
+}
+
+/// 지도 위 머리줄 쪽에서 번지는 상태 빛. secured 초록 · linking 노랑(숨 쉼) · failed 빨강, exposed는 없음.
+/// 상태가 바뀌면 0.9초에 걸쳐 서로 스며든다.
+struct StateGlow: View {
+    let kind: StatusPill.Kind
+
+    var body: some View {
+        ZStack {
+            glow(Term.green).opacity(kind == .on ? 1 : 0)
+            Pulse(period: 1.8, active: kind == .busy) { phase in
+                glow(Term.amber).opacity(kind == .busy ? 0.55 + 0.45 * phase : 0)
+            }
+            glow(Term.red).opacity(kind == .error ? 1 : 0)
+        }
+        .animation(.easeInOut(duration: 0.9), value: kind)
+        .accessibilityHidden(true)
+    }
+
+    private func glow(_ color: Color) -> some View {
+        RadialGradient(colors: [color.opacity(0.22), color.opacity(0)],
+                       center: UnitPoint(x: 0.82, y: 0), startRadius: 4, endRadius: 340)
+    }
+}
+
+/// 접속 시간 `12:34` — 숫자가 바뀔 때 굴러가듯
+struct SessionClock: View {
+    let since: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: since, by: 1)) { timeline in
+            let seconds = Int(max(0, timeline.date.timeIntervalSince(since)))
+            Text(VPNView.clock(TimeInterval(seconds)))
+                .font(Term.mono(22, .semibold))
+                .foregroundStyle(Term.num)
+                .monospacedDigit()
+                .contentTransition(.numericText())
+                .animation(.snappy(duration: 0.3), value: seconds)
+        }
+    }
+}
+
+/// 카드처럼 누르는 것: 누르면 살짝 작아졌다가 튕겨 돌아온다
+struct PressScale: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.95 : 1)
+            .brightness(configuration.isPressed ? 0.04 : 0)
+            .animation(.spring(response: 0.25, dampingFraction: 0.6), value: configuration.isPressed)
     }
 }
 
@@ -134,6 +185,8 @@ struct RegionCard: View {
                 Text(measured.map { "\($0)ms" } ?? "~\(Self.rtt(region))ms")
                     .font(Term.mono(10, measured == nil ? .regular : .semibold))
                     .foregroundStyle(rttColor)
+                    .contentTransition(.numericText())
+                    .animation(.snappy, value: measured)
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -141,7 +194,7 @@ struct RegionCard: View {
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? Term.green : Term.border, lineWidth: selected ? 1.5 : 1))
             .contentShape(RoundedRectangle(cornerRadius: 8))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressScale())
         .animation(.easeOut(duration: 0.2), value: selected)
         .accessibilityLabel("\(region.geo.city), \(measured.map { "\($0)" } ?? "about \(Self.rtt(region))") milliseconds")
         .accessibilityAddTraits(selected ? .isSelected : [])
@@ -234,6 +287,8 @@ struct TrafficPanel: View {
             Text(arrow).foregroundStyle(color)
             Text(TrafficMeter.speed(value)).foregroundStyle(Term.num)
                 .monospacedDigit()
+                .contentTransition(.numericText())
+                .animation(.snappy, value: value)
         }
         .font(Term.mono(15, .semibold))
     }
@@ -325,10 +380,13 @@ struct ScanPanel: View {
                     Text(scan.running ? "…" : scan.grade)
                         .font(Term.mono(28, .bold))
                         .foregroundStyle(gradeColor)
+                        .contentTransition(.interpolate)
                     Text(scan.running ? "--" : "\(scan.score)")
                         .font(Term.mono(9.5))
                         .foregroundStyle(Term.muted)
+                        .contentTransition(.numericText())
                 }
+                .animation(.snappy(duration: 0.4), value: scan.running)
                 .frame(width: 54, height: 54)
                 .background(gradeColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(gradeColor.opacity(0.6), lineWidth: 1.2))

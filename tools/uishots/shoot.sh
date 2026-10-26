@@ -45,6 +45,11 @@ run_device() {  # 이름표, 찾을 이름
   shoot "$label" "$udid" vpn-idle-end -nagoTab 0 -nagoDemo idle -nagoScrollEnd YES
   shoot "$label" "$udid" dash -nagoTab 1 -nagoDemo connected
   shoot "$label" "$udid" settings -nagoTab 2 -nagoDemo idle
+  # 라이트 모드(settings → appearance와 같은 키를 실행 인자로)
+  shoot "$label" "$udid" light-vpn-connected -nagoTab 0 -nagoDemo connected -nagoScrollEnd NO -appearance light
+  shoot "$label" "$udid" light-vpn-connected-end -nagoTab 0 -nagoDemo connected -nagoScrollEnd YES -appearance light
+  shoot "$label" "$udid" light-dash -nagoTab 1 -nagoDemo connected -appearance light
+  shoot "$label" "$udid" light-settings -nagoTab 2 -nagoDemo idle -appearance light
   xcrun simctl shutdown "$udid" || true
 }
 

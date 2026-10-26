@@ -6,6 +6,7 @@ struct SettingsView: View {
     @State private var vpn = VPNManager()
 
     @AppStorage("vpnUsername") private var username = "wifiscan"
+    @AppStorage("appearance") private var appearance: Appearance = .system
     @AppStorage("vpnProtocol") private var proto: VPNProto = .auto
     @AppStorage("wgEngine") private var wgEngine = "neptun"
     /// NepTUN 이벤트 루프 수. 2면 내려받기와 올리기(ACK 포함)가 다른 코어에서 돈다.
@@ -47,6 +48,7 @@ struct SettingsView: View {
             if locked {
                 StatusLine(kind: .warn, text: "locked while connected")
             }
+            appearanceBlock
             accountBlock
             protocolBlock
             if proto == .unicorn {
@@ -243,6 +245,14 @@ struct SettingsView: View {
     }
 
     // MARK: - 조각
+
+    /// 색 모드: 기기 설정을 따르거나 다크·라이트로 고정. 연결 중에도 바꿀 수 있다(잠그지 않음)
+    private var appearanceBlock: some View {
+        TermBlock(label: "appearance") {
+            TermChoice(options: Appearance.allCases.map { (label: $0.rawValue, value: $0) }, selection: $appearance)
+        }
+        .animation(.easeInOut(duration: 0.3), value: appearance)
+    }
 
     private func key(_ text: String) -> some View {
         Text(text)

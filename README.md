@@ -46,6 +46,11 @@
 - 화면 스크린샷: `.github/workflows/ui-shots.yml`(PR에서 `WifiScan/`이 바뀌면, 또는 수동 실행)이 화면 코드만 시뮬레이터용으로 빌드해
   아이폰·아이폰 SE·아이패드에서 vpn(idle/connecting/connected/failed)·dash·settings를 찍어 `ui-shots` 아티팩트로 올린다.
   서버 없이 그리려고 Debug 빌드에서만 `-nagoDemo connected`, `-nagoTab 1` 실행 인자를 읽는다(`WifiScan/Demo.swift`)
+- **appearance**(settings 맨 위): `system`(기본, 기기 설정을 따름) · `dark` · `light`. 색은 모두 두 벌(`Term` in `WifiScan/Theme.swift`) —
+  라이트는 초록빛 종이색 바탕에 글자색을 한 단계씩 진하게(밝은 바탕에서 대비 4.5:1 넘게). 지도·서버 지도·탭 막대도 같이 바뀐다. NAGO DL은 다크 고정
+- **움직임 마감**: 숫자(접속 시간·속도·왕복 시간·속도 측정·검사 점수)는 굴러가듯 바뀌고, 나라 이름은 부드럽게 바뀐다.
+  지도 위 머리줄 쪽에 상태 빛(secured 초록 · linking 노랑이 숨 쉼 · failed 빨강)이 번진다.
+  버튼·카드는 누르면 살짝 눌렸다 튕기고, boot log·net scan·흐름 패널은 접히듯 나타난다. 검사·속도 측정이 끝나면 햅틱
 - **dash 탭 요약**(2.0): `~/dash $▌` 머리줄(마지막으로 받은 때) 아래
   - 서버 지도: 태평양을 가운데 둔 점 세계 지도에 서버 네 대(켜짐 초록·숨 쉬는 고리, 켜지는 중 노랑 깜빡, 꺼짐 빈 칸),
     이번 달 송신량만큼 옅은 원, 지금 붙은 서버까지 you에서 경로와 흐르는 점
