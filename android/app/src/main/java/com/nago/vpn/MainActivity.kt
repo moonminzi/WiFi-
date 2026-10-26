@@ -31,6 +31,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -317,6 +318,8 @@ class MainActivity : ComponentActivity() {
         val meter = TrafficMeter()
         var handshakeMs by mutableLongStateOf(0L)
         var hopTo by mutableStateOf<VpnRegion?>(null)
+        /** 사용자가 cancel을 눌렀다(앱이 닫혀서 멈춘 것과 구분 — 그때는 터널을 건드리지 않는다) */
+        var cancelRequested = false
         var connectedAt by mutableLongStateOf(prefs.getLong("connectedAt", 0L))
         var job: Job? = null
     }
@@ -334,6 +337,7 @@ class MainActivity : ComponentActivity() {
         }
         ui.error = null
         ui.cancelled = false
+        ui.cancelRequested = false
         ui.steps.clear()
         ui.busy = true
         ui.region = target
@@ -358,9 +362,11 @@ class MainActivity : ComponentActivity() {
                 }
                 ui.savedRegion = target
             } catch (e: CancellationException) {
-                ui.cancelled = true
-                NagoLog.add("cancelled")
-                stopAll(includeStarting = true)
+                if (ui.cancelRequested) {
+                    ui.cancelled = true
+                    NagoLog.add("cancelled")
+                    stopAll(includeStarting = true)
+                }
             } catch (e: Exception) {
                 val message = e.message ?: e.javaClass.simpleName
                 ui.error = message
@@ -469,7 +475,7 @@ class MainActivity : ComponentActivity() {
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
                             .weight(1f)
-                            .clickable { onSelect(name) }
+                            .clickable(remember { MutableInteractionSource() }, indication = null) { onSelect(name) }
                             .padding(bottom = 12.dp),
                     ) {
                         Box(Modifier.size(bar, 2.dp).background(Term.green, RoundedCornerShape(1.dp)))
@@ -517,7 +523,8 @@ class MainActivity : ComponentActivity() {
             when (link) {
                 LinkState.Connected -> {
                     ui.exit = null
-                    if (!wgUp) {
+                    // neptun은 앱 자신을 터널에서 빼 둬서 앱이 재면 평소 회선이 보인다 — 그때는 재지 않는다
+                    if (!NeptunVpnService.up.value) {
                         delay(1_500)
                         ui.exit = ExitInfo.fetch()
                     }
@@ -693,10 +700,15 @@ class MainActivity : ComponentActivity() {
             connected -> "up → ${ui.savedRegion.name} · $proto"
             busy -> "linking ${ui.region.name}"
             link == LinkState.Connecting -> "connecting"
-            link == LinkState.Failed -> "failed · ${VpnEvents.lastEvent.value ?: "ikev2"}"
+            link == LinkState.Failed -> "failed · ikev2"
             ike == null && !wgUp -> "not set up · first connect asks once"
             else -> "disconnected · traffic goes out direct"
         }
+
+        // 시스템이 알려 준 ikev2 오류나 neptun 엔진 실패(끊겨 있을 때만)
+        val event by VpnEvents.lastEvent.collectAsState()
+        val engineFailure by NeptunVpnService.failure.collectAsState()
+        val notice = (event ?: engineFailure)?.takeIf { !connected && !busy && link != LinkState.Connecting }
 
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -738,6 +750,8 @@ class MainActivity : ComponentActivity() {
                 if (linking) PhasePipeline(pipelineIndex(link)) else ExitLine(connected, wgUp)
             }
 
+            notice?.let { Text("! $it", style = Term.mono(12.sp, color = Term.amber), maxLines = 2, overflow = TextOverflow.Ellipsis) }
+
             AnimatedVisibility(connected && !busy, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) {
                 if (wgUp) {
                     val ago = ui.handshakeMs.takeIf { it > 0 }?.let { (System.currentTimeMillis() - it) / 1000 }
@@ -764,17 +778,18 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * `isp 211.36.1.9 · KR ICN · sites see this` — 밖에서 보이는 IP. ikev2로 연결되면 고른 나라인지 맞춰 본다.
-     * 앱 안 wg는 앱 자신이 터널 밖이라 출구를 직접 못 재니 서버 주소를 보여 준다.
+     * `isp 211.36.1.9 · KR ICN · sites see this` — 밖에서 보이는 IP. 연결되면 고른 나라인지 맞춰 본다.
+     * neptun은 앱 자신이 터널 밖이라 출구를 직접 못 재니 서버 주소를 보여 준다.
      */
     @Composable
     private fun ExitLine(connected: Boolean, wgUp: Boolean) {
+        val bypass = connected && wgUp && NeptunVpnService.up.value
         val muted = SpanStyle(color = Term.muted)
         val num = SpanStyle(color = Term.num)
         val line = buildAnnotatedString {
             val exit = ui.exit
             when {
-                connected && wgUp -> {
+                bypass -> {
                     val endpoint = prefs.getString("wgEndpoint", null)?.substringBeforeLast(':')
                     withStyle(muted) { append("exit ") }
                     withStyle(num) { append(endpoint ?: "—") }
@@ -798,7 +813,7 @@ class MainActivity : ComponentActivity() {
             style = Term.mono(12.sp),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.clickable(enabled = !(connected && wgUp)) {
+            modifier = Modifier.clickable(enabled = !bypass) {
                 work.launch { ui.exit = ExitInfo.fetch() }
             },
         )
@@ -830,7 +845,10 @@ class MainActivity : ComponentActivity() {
                 .sweep(busy, Term.amber)
                 .pressable(enabled) {
                     when {
-                        busy -> ui.job?.cancel()
+                        busy -> {
+                            ui.cancelRequested = true
+                            ui.job?.cancel()
+                        }
                         active -> {
                             NagoLog.add("disconnect")
                             ui.error = null
