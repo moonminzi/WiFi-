@@ -136,4 +136,14 @@ object WgVpn {
     suspend fun down(context: Context) = withContext(Dispatchers.IO) {
         runCatching { backend(context).setState(tunnel, Tunnel.State.DOWN, null) }
     }
+
+    /** 받은·보낸 바이트와 마지막 핸드셰이크. 꺼져 있으면 null */
+    suspend fun stats(context: Context): LinkStats? = withContext(Dispatchers.IO) {
+        if (state.value != Tunnel.State.UP) return@withContext null
+        runCatching {
+            val s = backend(context).getStatistics(tunnel)
+            val handshake = s.peers().maxOfOrNull { s.peer(it)?.latestHandshakeEpochMillis() ?: 0L } ?: 0L
+            LinkStats(s.totalRx(), s.totalTx(), handshake)
+        }.getOrNull()
+    }
 }

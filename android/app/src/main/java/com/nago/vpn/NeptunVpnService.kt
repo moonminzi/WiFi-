@@ -44,6 +44,11 @@ class NeptunVpnService : VpnService() {
         val up = MutableStateFlow(false)
         val failure = MutableStateFlow<String?>(null)
         @Volatile private var pending: Session? = null
+        /** 지금 엔진을 돌리는 서비스(통계 읽기용) */
+        @Volatile private var running: NeptunVpnService? = null
+
+        /** 받은·보낸 바이트와 마지막 핸드셰이크. 꺼져 있으면 null. 엔진 잠금을 잡으니 메인 스레드에서 부르지 않는다. */
+        fun stats(): LinkStats? = running?.readStats()
 
         fun start(context: Context, session: Session) {
             pending = session
@@ -173,6 +178,7 @@ class NeptunVpnService : VpnService() {
         }
         synchronized(lock) { handle = h }
         session = s
+        running = this
         up.value = true
         NagoLog.add("neptun: up → ${s.endpoint}")
         watchNetwork()
@@ -201,7 +207,26 @@ class NeptunVpnService : VpnService() {
         }
         if (stopped && reason != null) NagoLog.add("neptun: $reason")
         session = null
+        if (running === this) running = null
         up.value = false
+    }
+
+    private fun readStats(): LinkStats? {
+        val text = synchronized(lock) { if (handle != 0L) NeptunNative.get(handle) else null } ?: return null
+        var rx = 0L
+        var tx = 0L
+        var sec = 0L
+        var nsec = 0L
+        text.lineSequence().forEach { line ->
+            val value = line.substringAfter('=').toLongOrNull() ?: return@forEach
+            when (line.substringBefore('=')) {
+                "rx_bytes" -> rx += value
+                "tx_bytes" -> tx += value
+                "last_handshake_time_sec" -> sec = maxOf(sec, value)
+                "last_handshake_time_nsec" -> nsec = value
+            }
+        }
+        return LinkStats(rx, tx, if (sec > 0) sec * 1000 + nsec / 1_000_000 else 0L)
     }
 
     /** 와이파이↔모바일 데이터가 바뀌면 엔진이 서버에 맞춰 연결해 둔 소켓을 새로 만든다. */

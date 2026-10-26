@@ -686,6 +686,9 @@ struct VPNView: View {
         // 연결 중(connecting)에도 끊을 수 있게 둔다. 끊는 중에만 막는다.
         .disabled(vpn.status == .disconnecting
                   || (!busy && !vpn.status.isActive && effectiveProto != .unicorn && username.isEmpty))
+        // 단계(웨이포인트)가 하나 찍힐 때마다 가볍게 톡, 실패하면 오류 진동
+        .sensoryFeedback(.impact(weight: .light, intensity: 0.6), trigger: steps.count) { old, new in new > old }
+        .sensoryFeedback(.error, trigger: errorText) { _, new in new != nil }
     }
 
     private var buttonKind: TermButtonStyle.Kind {

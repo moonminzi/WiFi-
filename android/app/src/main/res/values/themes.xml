@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 터미널 느낌의 다크 배경(GitHub Dark). 화면은 Compose로 그린다. -->
+    <!-- 앱이 뜨기 전 창 배경(다크 터미널색). 화면 색은 Compose가 appearance 설정에 따라 그린다. -->
     <style name="Theme.Nago" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">#0D1117</item>
-        <item name="android:statusBarColor">#0D1117</item>
-        <item name="android:navigationBarColor">#0D1117</item>
+        <item name="android:windowBackground">#0A0D0A</item>
+        <item name="android:statusBarColor">#0A0D0A</item>
+        <item name="android:navigationBarColor">#0A0D0A</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>
