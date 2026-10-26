@@ -192,6 +192,7 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
 - 데이터 암호: AES-256-GCM(재키 때 서버 사정에 따라 AES-CBC+SHA256), MTU 1400
 - 빌드: `gradle -p android assembleDebug` (CI: `.github/workflows/build-apk.yml`, 비밀번호 없는 디버그 APK)
 - 전달용 APK는 `app/src/main/assets/preset.txt`(커밋 안 함)에 비밀번호를 넣고 `NAGO_KEYSTORE`/`NAGO_KEYSTORE_PASS` 환경변수로 서명해서 만든다
+- CI 서명: 저장소 secrets에 `NAGO_KEYSTORE_B64`(nago-release.jks를 base64 한 줄로)와 `NAGO_KEYSTORE_PASS`를 넣으면 `build-apk.yml`이 서명된 release APK(`NagoVPN-release-apk`, com.nago.vpn — 기존 앱 위에 덮어 깔림)도 만든다. 공개 레포라 artifact는 누구나 받을 수 있어서 비밀번호는 넣지 않는다(앱에서 입력, 내장판은 로컬에서)
 - 설치: APK 파일을 열고 "출처를 알 수 없는 앱" 허용 → 설치 → 처음 연결할 때 "VPN 연결 요청" 허용
 
 ## 빌드 방법 A: XcodeGen (추천)
