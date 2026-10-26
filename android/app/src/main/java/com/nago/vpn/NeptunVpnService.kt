@@ -117,7 +117,7 @@ class NeptunVpnService : VpnService() {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        NagoLog.init(this)
+        NagoLog.catchCrashes(this)
         if (intent?.action == ACTION_STOP) {
             teardown("stop")
             stopSelf()
@@ -130,8 +130,15 @@ class NeptunVpnService : VpnService() {
             fail("neptun: no saved config")
             return START_NOT_STICKY
         }
-        bringUp(s)
-        return START_STICKY
+        // 여기서 예외가 나면 앱 프로세스째 죽고, START_STICKY라 시스템이 다시 띄우며 또 죽는다 → 실패로 돌린다
+        return try {
+            bringUp(s)
+            START_STICKY
+        } catch (e: Exception) {
+            teardown(null)
+            fail("neptun: ${e.javaClass.simpleName}: ${e.message}")
+            START_NOT_STICKY
+        }
     }
 
     override fun onRevoke() {
@@ -241,9 +248,11 @@ class NeptunVpnService : VpnService() {
                 NagoLog.add("neptun: network changed")
             }
         }
-        // 앱은 VPN에서 빠져 있어서 앱 기준 기본 망 = 실제 와이파이/모바일 데이터
-        getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(cb)
-        networkCallback = cb
+        // 앱은 VPN에서 빠져 있어서 앱 기준 기본 망 = 실제 와이파이/모바일 데이터.
+        // 못 걸어도(권한 등) 터널은 그대로 두고 로그만 남긴다 — 망이 바뀌면 watchdog이 핸드셰이크로 알아챈다
+        runCatching { getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(cb) }
+            .onSuccess { networkCallback = cb }
+            .onFailure { NagoLog.add("! neptun: network watch off (${it.message})") }
     }
 
     /**

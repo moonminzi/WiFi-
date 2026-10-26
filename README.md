@@ -183,6 +183,8 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
   - settings → appearance: system / dark / light. 글꼴은 JetBrains Mono(OFL, `assets/OFL-JetBrainsMono.txt`)
   - 햅틱: 나라 고를 때 틱, 단계마다 톡, 연결되면 확인, 실패하면 거절 진동(시스템 "터치 진동" 설정을 따름)
   - 연결 작업은 화면 밖(Activity)에서 돌아서 설정 탭에 다녀와도 끊기지 않는다. 연결 중 버튼이 cancel이 된다
+- **neptun 강제 종료 고침(2.0.0)**: 엔진이 뜬 직후 망 전환 감시(`registerDefaultNetworkCallback`)가 `ACCESS_NETWORK_STATE` 권한이 없어 `SecurityException`으로 앱 프로세스째 죽었다(서비스가 START_STICKY라 다시 떠서 또 죽음). 권한을 넣고, 서비스 시작 중 예외는 앱을 죽이지 않고 연결 실패로 돌린다
+  - 진단: 앱이 예외로 죽으면 그 이유(예외·위치)를, 엔진 네이티브 크래시·응답 없음이면 다음 실행 때 한 줄을 settings → logs에 남긴다
 
 - 안드로이드 **내장 IKEv2**(VpnManager + `Ikev2VpnProfile`)를 쓴다. 별도 VPN 엔진이나 라이브러리 없음
 - 서버 CA를 앱에 넣어서(`res/raw/nago_ca.pem`) 기기에 인증서를 설치할 필요가 없다

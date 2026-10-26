@@ -121,7 +121,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         vpnManager = getSystemService(VpnManager::class.java)
-        NagoLog.init(this)
+        NagoLog.catchCrashes(this)
+        NagoLog.reportLastExit(this)
         setContent { App() }
     }
 
