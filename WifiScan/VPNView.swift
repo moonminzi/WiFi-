@@ -356,7 +356,11 @@ struct VPNView: View {
                     if onDevice {
                         Text("on-device")
                     } else {
-                        Text(shownRegion.flag + " ") + Text(shownRegion.geo.city)
+                        HStack(alignment: .lastTextBaseline, spacing: 10) {
+                            DotFlag(region: shownRegion, width: 38)
+                                .alignmentGuide(.lastTextBaseline) { $0[.bottom] - 3 }
+                            Text(shownRegion.geo.city)
+                        }
                     }
                 }
                 .font(Term.mono(28, .bold))

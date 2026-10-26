@@ -55,6 +55,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -140,6 +141,64 @@ fun PhasePipeline(index: Int) {
     }
 }
 
+/**
+ * 나라 국기를 지도와 같은 점(LED)으로 찍는다. 이모지 국기는 기기·글꼴마다 모양이 달라서 터미널 화면에서 튄다.
+ * 15×9 점 그림은 iOS(Console.swift DotFlag)와 같다. 라이트에선 판을 조금 어둡게 해서 흰 점이 보이게.
+ */
+object DotFlags {
+    const val COLS = 15
+    const val ROWS = 9
+
+    /** W 흰 · R 빨강 · B 파랑(태극) · N 남색(성조기) · U 파랑(유니언 잭) · K 검정(괘) */
+    val art = mapOf(
+        VpnRegion.kr to listOf("WWKWWWWWWWWWKWW", "WKKKWWWWWWWKKKW", "WKKWWWRRRWWWKKW", "WWWWWRRRBBWWWWW", "WWWWWRRRBBWWWWW",
+            "WWWWWRRBBBWWWWW", "WKKWWWBBBWWWKKW", "WKKKWWWWWWWKKKW", "WWKWWWWWWWWWKWW"),
+        VpnRegion.jp to listOf("WWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWW", "WWWWWWRRRWWWWWW", "WWWWWRRRRRWWWWW", "WWWWWRRRRRWWWWW",
+            "WWWWWRRRRRWWWWW", "WWWWWWRRRWWWWWW", "WWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWW"),
+        VpnRegion.us to listOf("NNNNNNRRRRRRRRR", "NWNWNWWWWWWWWWW", "NNNNNNRRRRRRRRR", "NWNWNWWWWWWWWWW", "NNNNNNRRRRRRRRR",
+            "WWWWWWWWWWWWWWW", "RRRRRRRRRRRRRRR", "WWWWWWWWWWWWWWW", "RRRRRRRRRRRRRRR"),
+        VpnRegion.uk to listOf("RRWUUUWRWUUUWRR", "WWRWWUWRWUWWRWW", "UUWRRWWRWWRRWUU", "WWWWWWWRWWWWWWW", "RRRRRRRRRRRRRRR",
+            "WWWWWWWRWWWWWWW", "UUWRRWWRWWRRWUU", "WWRWWUWRWUWWRWW", "RRWUUUWRWUUUWRR"),
+    )
+
+    fun color(ch: Char, dark: Boolean) = Color(
+        when (ch) {
+            'R' -> 0xFFD63440
+            'B' -> 0xFF284AAA
+            'N' -> 0xFF2C3878
+            'U' -> 0xFF243E8C
+            'K' -> if (dark) 0xFF3A403A else 0xFF1C1E1C
+            else -> if (dark) 0xFFE8ECE5 else 0xFFFFFFFF
+        },
+    )
+}
+
+/** 점 국기. [width]가 판 너비, 높이는 15:9 비율에 여백을 더한 만큼 */
+@Composable
+fun DotFlag(region: VpnRegion, width: Dp, modifier: Modifier = Modifier) {
+    val pad = width * 0.06f
+    val height = (width - pad * 2) / DotFlags.COLS * DotFlags.ROWS + pad * 2
+    val dark = Term.dark
+    val plate = if (dark) Term.chrome else Term.border
+    val rows = DotFlags.art[region].orEmpty()
+    Canvas(modifier.size(width, height)) {
+        val p = pad.toPx()
+        val pitch = (size.width - 2 * p) / DotFlags.COLS
+        val dot = pitch * 0.78f
+        drawRoundRect(plate, cornerRadius = CornerRadius(maxOf(2.dp.toPx(), pitch * 1.1f)))
+        rows.forEachIndexed { j, row ->
+            row.forEachIndexed { i, ch ->
+                drawRoundRect(
+                    DotFlags.color(ch, dark),
+                    topLeft = Offset(p + i * pitch + (pitch - dot) / 2, p + j * pitch + (pitch - dot) / 2),
+                    size = Size(dot, dot),
+                    cornerRadius = CornerRadius(dot * 0.28f),
+                )
+            }
+        }
+    }
+}
+
 /** 빛이 광섬유로 1ms에 200km쯤 가니 왕복은 km/100ms. 장비·우회 몫으로 조금 더한다(어림값). */
 fun estimatedRtt(region: VpnRegion): Int = Math.round(Geo.here.km(region.geo) / 100 * 1.3 + 6).toInt()
 
@@ -167,7 +226,7 @@ fun RegionCard(
             .padding(10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(region.flag, style = TextStyle(fontSize = 18.sp))
+            DotFlag(region, 28.dp)
             Spacer(Modifier.weight(1f))
             if (live) {
                 Box(

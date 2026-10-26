@@ -144,6 +144,69 @@ struct PhasePipeline: View {
     }
 }
 
+/// 나라 국기를 지도와 같은 점(LED)으로 찍는다. 이모지 국기는 기기·글꼴마다 모양이 달라서 터미널 화면에서 튄다.
+/// 15×9 점 그림은 안드로이드(DotFlag.kt)와 같다. 라이트에선 판을 조금 어둡게 해서 흰 점이 보이게.
+struct DotFlag: View {
+    let region: VPNRegion
+    /// 판 너비(pt). 높이는 15:9 비율에 여백을 더한 만큼
+    var width: CGFloat = 24
+    @Environment(\.colorScheme) private var scheme
+
+    static let cols = 15
+    static let rows = 9
+
+    /// W 흰 · R 빨강 · B 파랑(태극) · N 남색(성조기) · U 파랑(유니언 잭) · K 검정(괘)
+    static let art: [VPNRegion: [String]] = [
+        .kr: ["WWKWWWWWWWWWKWW", "WKKKWWWWWWWKKKW", "WKKWWWRRRWWWKKW", "WWWWWRRRBBWWWWW", "WWWWWRRRBBWWWWW",
+              "WWWWWRRBBBWWWWW", "WKKWWWBBBWWWKKW", "WKKKWWWWWWWKKKW", "WWKWWWWWWWWWKWW"],
+        .jp: ["WWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWW", "WWWWWWRRRWWWWWW", "WWWWWRRRRRWWWWW", "WWWWWRRRRRWWWWW",
+              "WWWWWRRRRRWWWWW", "WWWWWWRRRWWWWWW", "WWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWW"],
+        .us: ["NNNNNNRRRRRRRRR", "NWNWNWWWWWWWWWW", "NNNNNNRRRRRRRRR", "NWNWNWWWWWWWWWW", "NNNNNNRRRRRRRRR",
+              "WWWWWWWWWWWWWWW", "RRRRRRRRRRRRRRR", "WWWWWWWWWWWWWWW", "RRRRRRRRRRRRRRR"],
+        .uk: ["RRWUUUWRWUUUWRR", "WWRWWUWRWUWWRWW", "UUWRRWWRWWRRWUU", "WWWWWWWRWWWWWWW", "RRRRRRRRRRRRRRR",
+              "WWWWWWWRWWWWWWW", "UUWRRWWRWWRRWUU", "WWRWWUWRWUWWRWW", "RRWUUUWRWUUUWRR"],
+    ]
+
+    static func height(for width: CGFloat) -> CGFloat {
+        let pad = width * 0.06
+        return (width - 2 * pad) / CGFloat(cols) * CGFloat(rows) + 2 * pad
+    }
+
+    var body: some View {
+        let dark = scheme == .dark
+        Canvas { ctx, size in
+            let pad = size.width * 0.06
+            let pitch = (size.width - 2 * pad) / CGFloat(Self.cols)
+            let dot = pitch * 0.78
+            ctx.fill(Path(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: max(2, pitch * 1.1)),
+                     with: .color(dark ? Term.chrome : Term.border))
+            for (j, row) in (Self.art[region] ?? []).enumerated() {
+                for (i, ch) in row.enumerated() {
+                    let rect = CGRect(x: pad + CGFloat(i) * pitch + (pitch - dot) / 2,
+                                      y: pad + CGFloat(j) * pitch + (pitch - dot) / 2, width: dot, height: dot)
+                    ctx.fill(Path(roundedRect: rect, cornerRadius: dot * 0.28), with: .color(Self.color(ch, dark: dark)))
+                }
+            }
+        }
+        .frame(width: width, height: Self.height(for: width))
+        .accessibilityHidden(true)
+    }
+
+    private static func color(_ ch: Character, dark: Bool) -> Color {
+        func rgb(_ hex: UInt32) -> Color {
+            Color(red: Double(hex >> 16 & 0xFF) / 255, green: Double(hex >> 8 & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
+        }
+        switch ch {
+        case "R": return rgb(0xD63440)
+        case "B": return rgb(0x284AAA)
+        case "N": return rgb(0x2C3878)
+        case "U": return rgb(0x243E8C)
+        case "K": return rgb(dark ? 0x3A403A : 0x1C1E1C)
+        default: return rgb(dark ? 0xE8ECE5 : 0xFFFFFF)
+        }
+    }
+}
+
 /// 나갈 국가 카드 한 장: 깃발, 코드, 도시, 대략 왕복 시간
 struct RegionCard: View {
     let region: VPNRegion
@@ -160,7 +223,7 @@ struct RegionCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 0) {
-                    Text(region.flag).font(.system(size: 18))
+                    DotFlag(region: region, width: 28)
                     Spacer(minLength: 2)
                     if live {
                         Circle().fill(Term.green).frame(width: 6, height: 6)

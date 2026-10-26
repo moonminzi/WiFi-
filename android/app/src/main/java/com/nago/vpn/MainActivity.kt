@@ -669,7 +669,7 @@ class MainActivity : ComponentActivity() {
             title = { Text("hop to ${target.geo.city}?", style = Term.mono(16.sp, FontWeight.Bold, Term.text)) },
             text = {
                 Text(
-                    "${from.flag} ${from.name} → ${target.flag} ${target.name}\ndisconnects ${from.name}, then connects ${target.name}",
+                    "${from.name} ${from.geo.city} → ${target.name} ${target.geo.city}\ndisconnects ${from.name}, then connects ${target.name}",
                     style = Term.mono(12.sp, color = Term.muted),
                 )
             },
@@ -730,8 +730,11 @@ class MainActivity : ComponentActivity() {
                     label = "city",
                     modifier = Modifier.weight(1f, fill = false),
                 ) { region ->
-                    Text("${region.flag} ${region.geo.city}", style = Term.mono(28.sp, FontWeight.Bold, cityColor),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        DotFlag(region, 38.dp, Modifier.padding(top = 3.dp))
+                        Text(region.geo.city, style = Term.mono(28.sp, FontWeight.Bold, cityColor),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
                 Spacer(Modifier.weight(1f).widthIn(min = 8.dp))
                 if (connected && ui.connectedAt > 0) {

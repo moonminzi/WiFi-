@@ -122,8 +122,6 @@ val VpnRegion.geo: Geo
 /** 지도 칸 값(2부터 VpnRegion 순서) */
 val VpnRegion.mapCode: Int get() = 2 + ordinal
 
-val VpnRegion.flag: String get() = detail.substringBefore(' ')
-
 object RouteMath {
     fun mercY(lat: Double): Double {
         val l = min(85.0, max(-85.0, lat)) * PI / 180
