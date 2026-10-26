@@ -16,7 +16,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create android-2.0.0 NAGO-VPN-2.0.0.apk \
-            --target 1159bc960279d0fa08db97021701cc95a0adae58 \
-            --title "NAGO VPN Android 2.0.0" \
+          gh release create android-2.0.1 NAGO-VPN-2.0.1.apk \
+            --target c286ccb3ee71f3a82bdc5ef037d261f8c55f7f1a \
+            --title "NAGO VPN Android 2.0.1" \
             --notes-file release-notes.md
