@@ -636,11 +636,25 @@ struct VPNView: View {
                 .disabled(locked)
                 .opacity(locked ? 0.55 : 1)
                 .transition(.opacity)
-                Text("deletes itself after 30m idle · wg only")
+                onDemandFootnote
                     .font(Term.mono(10))
                     .foregroundStyle(Term.muted.opacity(0.8))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
             }
         }
+    }
+
+    /// 고른 임시 나라가 있으면 그 나라 왕복 시간을 숫자로(칸에는 막대만 있다), 없으면 누르는 법
+    private var onDemandFootnote: Text {
+        guard shownRegion.onDemand else {
+            return Text("hold a chip for rtt · wg only · gone after 30m idle")
+        }
+        let measured = probe.rtt[shownRegion]
+        let ms = Text(measured.map { "\($0)ms" } ?? "~\(RegionCard.rtt(shownRegion))ms")
+            .foregroundStyle(measured.map(RegionCard.rttTint) ?? Term.muted)
+        return Text("› \(shownRegion.rawValue) \(shownRegion.geo.city) ").foregroundStyle(Term.text)
+            + ms + Text(" · gone after 30m idle")
     }
 
     private func regionChip(_ option: VPNRegion) -> some View {

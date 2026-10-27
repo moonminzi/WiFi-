@@ -17,6 +17,12 @@ enum Demo {
     #else
     static let scrollToEnd = false
     #endif
+    #if DEBUG
+    /// 스크린샷: 이 임시 나라 칸을 누르고 있는 것처럼 말풍선을 띄워 둔다(`-nagoPeek de`)
+    static let peek = UserDefaults.standard.string(forKey: "nagoPeek").flatMap(VPNRegion.init(rawValue:))
+    #else
+    static let peek: VPNRegion? = nil
+    #endif
     static var connected: Bool { state == "connected" }
     /// 데모 연결이 붙은 시각(12분 34초 전)
     static let since = Date().addingTimeInterval(-754)

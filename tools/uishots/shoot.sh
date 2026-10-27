@@ -45,7 +45,8 @@ run_device() {  # 이름표, 찾을 이름
   done
   # 접어 둔 패널은 실행 인자로만 편다(인자 도메인이라 저장되지 않아 다음 장면은 처음처럼 접혀 있다)
   shoot "$label" "$udid" vpn-scan -nagoTab 0 -nagoDemo scan -nagoScrollEnd NO -foldScan NO
-  shoot "$label" "$udid" vpn-ondemand -nagoTab 0 -nagoDemo idle -nagoScrollEnd YES -foldOnDemand NO
+  # 임시 나라 de를 고르고 br 칸을 누르고 있는 모습(말풍선)
+  shoot "$label" "$udid" vpn-ondemand -nagoTab 0 -nagoDemo idle -nagoScrollEnd YES -foldOnDemand NO -vpnRegion de -nagoPeek br
   shoot "$label" "$udid" vpn-connected-end -nagoTab 0 -nagoDemo connected -nagoScrollEnd YES
   shoot "$label" "$udid" vpn-idle-end -nagoTab 0 -nagoDemo idle -nagoScrollEnd YES
   shoot "$label" "$udid" dash -nagoTab 1 -nagoDemo connected

@@ -303,8 +303,12 @@ struct RegionCard: View {
     /// 잰 값은 빠를수록 초록 → 노랑 → 빨강
     private var rttColor: Color {
         guard let measured else { return selected ? Term.key : Term.muted }
-        if measured < 80 { return Term.green }
-        if measured < 180 { return Term.amber }
+        return Self.rttTint(measured)
+    }
+
+    static func rttTint(_ ms: Int) -> Color {
+        if ms < 80 { return Term.green }
+        if ms < 180 { return Term.amber }
         return Term.red
     }
 
@@ -315,7 +319,8 @@ struct RegionCard: View {
     }
 }
 
-/// 임시 서버 나라 한 칸: 작은 깃발 · 코드 · 왕복 시간. 카드보다 훨씬 작게(여러 개가 두 줄에 들어가게)
+/// 임시 서버 나라 한 칸: 작은 깃발 · 코드 · 왕복 시간 막대. 카드보다 훨씬 작게(여러 개가 두 줄에 들어가게).
+/// 칸이 좁아 "~238ms"가 잘리니 숫자는 칸에 두지 않는다 — 누르고 있으면 칸 위에 말풍선(RegionPeek)으로 뜬다
 struct RegionChip: View {
     let region: VPNRegion
     let selected: Bool
@@ -330,19 +335,12 @@ struct RegionChip: View {
                 Text(region.rawValue)
                     .font(Term.mono(12, .bold))
                     .foregroundStyle(selected ? Term.green : Term.num)
+                Spacer(minLength: 2)
                 if live {
                     Circle().fill(Term.green).frame(width: 5, height: 5)
                         .shadow(color: Term.green, radius: 2)
                 } else {
-                    // 좁은 화면(SE)에선 칸이 좁아 "238ms"가 잘린다 — 들어가지 않으면 숫자만
-                    let ms = measured.map { "\($0)" } ?? "~\(RegionCard.rtt(region))"
-                    ViewThatFits(in: .horizontal) {
-                        Text(ms + "ms")
-                        Text(ms)
-                    }
-                    .font(Term.mono(9, measured == nil ? .regular : .semibold))
-                    .foregroundStyle(Term.muted)
-                    .lineLimit(1)
+                    RTTPips(ms: measured ?? RegionCard.rtt(region), measured: measured != nil)
                 }
             }
             .padding(.horizontal, 7)
@@ -352,10 +350,113 @@ struct RegionChip: View {
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(selected ? Term.green : Term.border, lineWidth: selected ? 1.5 : 1))
             .contentShape(RoundedRectangle(cornerRadius: 6))
         }
-        .buttonStyle(PressScale())
+        .buttonStyle(PeekPress(forced: Demo.peek == region) {
+            RegionPeek(region: region, live: live, measured: measured)
+        })
         .animation(.easeOut(duration: 0.2), value: selected)
         .accessibilityLabel("\(region.geo.city), on demand, \(measured.map { "\($0)" } ?? "about \(RegionCard.rtt(region))") milliseconds")
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// 왕복 시간 막대 3칸(신호 세기처럼 많을수록 빠름): 80ms 미만 3 · 180ms 미만 2 · 그 위 1.
+/// 잰 값은 카드 숫자와 같은 색, 거리로 어림한 값은 회색
+struct RTTPips: View {
+    let ms: Int
+    let measured: Bool
+
+    var body: some View {
+        let lit = ms < 80 ? 3 : ms < 180 ? 2 : 1
+        let tint = measured ? RegionCard.rttTint(ms) : Term.muted
+        HStack(alignment: .bottom, spacing: 1.5) {
+            ForEach(0..<3, id: \.self) { bar in
+                RoundedRectangle(cornerRadius: 0.75)
+                    .fill(bar < lit ? tint : Term.track)
+                    .frame(width: 2.5, height: 4 + CGFloat(bar) * 2.5)
+            }
+        }
+        .animation(.snappy, value: lit)
+        .animation(.snappy, value: measured)
+    }
+}
+
+/// 임시 나라 칸을 누르고 있으면 칸 위에 뜨는 말풍선: 도시 · 왕복 시간
+struct RegionPeek: View {
+    let region: VPNRegion
+    let live: Bool
+    var measured: Int?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 4) {
+                if live {
+                    Circle().fill(Term.green).frame(width: 5, height: 5)
+                }
+                Text(region.geo.city)
+                    .font(Term.mono(10))
+                    .foregroundStyle(Term.muted)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(measured.map { "\($0)" } ?? "~\(RegionCard.rtt(region))")
+                    .font(Term.mono(17, .bold))
+                    .foregroundStyle(measured.map(RegionCard.rttTint) ?? Term.num)
+                Text(measured == nil ? "ms est." : "ms")
+                    .font(Term.mono(10))
+                    .foregroundStyle(Term.muted)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Term.chrome, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Term.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
+    }
+}
+
+/// 키보드 글쇠처럼: 누르고 있으면 칸 위에 말풍선, 떼면 고른다(밀어서 벗어나면 취소).
+/// 짧게 탭할 때 말풍선이 번쩍이지 않게 0.15초 넘게 누를 때만 띄운다. 누름 모양은 PressScale과 같다
+struct PeekPress<Peek: View>: ButtonStyle {
+    /// 스크린샷용: 누르지 않아도 말풍선을 띄워 둔다
+    var forced = false
+    @ViewBuilder let peek: () -> Peek
+
+    func makeBody(configuration: Configuration) -> some View {
+        PeekPressBody(label: configuration.label, pressed: configuration.isPressed, forced: forced, peek: peek)
+    }
+}
+
+private struct PeekPressBody<Content: View, Peek: View>: View {
+    let label: Content
+    let pressed: Bool
+    let forced: Bool
+    let peek: () -> Peek
+    @State private var peeking = false
+
+    var body: some View {
+        label
+            .scaleEffect(pressed ? 0.95 : 1)
+            .brightness(pressed ? 0.04 : 0)
+            .animation(.spring(response: 0.25, dampingFraction: 0.6), value: pressed)
+            .overlay(alignment: .top) {
+                if peeking || forced {
+                    peek()
+                        .fixedSize()
+                        // 말풍선 아래 끝을 칸 위 6pt에(앞 줄 칸들은 먼저 그려져서 말풍선이 그 위에 덮인다)
+                        .alignmentGuide(.top) { $0[.bottom] + 6 }
+                        .transition(.scale(scale: 0.6, anchor: .bottom).combined(with: .opacity))
+                        .allowsHitTesting(false)
+                }
+            }
+            .task(id: pressed) {
+                guard pressed else {
+                    withAnimation(.easeOut(duration: 0.12)) { peeking = false }
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+                withAnimation(.spring(response: 0.22, dampingFraction: 0.7)) { peeking = true }
+            }
+            .sensoryFeedback(.impact(weight: .light, intensity: 0.5), trigger: peeking) { _, new in new }
     }
 }
 
