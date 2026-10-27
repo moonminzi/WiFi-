@@ -40,9 +40,12 @@ run_device() {  # 이름표, 찾을 이름
   xcrun simctl status_bar "$udid" override --time 9:41 --batteryState charged --batteryLevel 100 \
     --wifiBars 3 --cellularBars 4 || true
   xcrun simctl install "$udid" "$APP"
-  for demo in idle connecting connected failed scan; do
+  for demo in idle connecting connected failed; do
     shoot "$label" "$udid" "vpn-$demo" -nagoTab 0 -nagoDemo "$demo" -nagoScrollEnd NO
   done
+  # 접어 둔 패널은 실행 인자로만 편다(인자 도메인이라 저장되지 않아 다음 장면은 처음처럼 접혀 있다)
+  shoot "$label" "$udid" vpn-scan -nagoTab 0 -nagoDemo scan -nagoScrollEnd NO -foldScan NO
+  shoot "$label" "$udid" vpn-ondemand -nagoTab 0 -nagoDemo idle -nagoScrollEnd YES -foldOnDemand NO
   shoot "$label" "$udid" vpn-connected-end -nagoTab 0 -nagoDemo connected -nagoScrollEnd YES
   shoot "$label" "$udid" vpn-idle-end -nagoTab 0 -nagoDemo idle -nagoScrollEnd YES
   shoot "$label" "$udid" dash -nagoTab 1 -nagoDemo connected

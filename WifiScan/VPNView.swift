@@ -130,7 +130,6 @@ struct VPNView: View {
             speed.showDemo()
         case "scan":
             region = .jp
-            foldScan = false
             scan.showDemo(running: true)
         case "failed":
             region = .us
