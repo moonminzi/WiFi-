@@ -6,39 +6,55 @@ struct SpeedPanel: View {
     let test: SpeedTest
     /// 지금 재면 남을 설정 이름("wg/neptun ×2 · jp", "direct" …)
     let via: String
+    /// 접으면 머리줄 한 줄(마지막 결과나 지금 속도)만 남는다
+    @Binding var folded: Bool
     let run: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            if test.running {
-                live
-            } else if let last = test.last {
-                summary(last)
+            if !folded {
+                if test.running {
+                    live
+                } else if let last = test.last {
+                    summary(last)
+                }
+                if test.phase == .failed, let error = test.errorText {
+                    Text("✗ " + error)
+                        .font(Term.mono(11.5))
+                        .foregroundStyle(Term.red)
+                }
+                if test.history.count > 1 {
+                    history
+                }
+                Text("via \(via) · speed.cloudflare.com · up to ~\(SpeedTest.maxUsageMB) MB")
+                    .font(Term.mono(10))
+                    .foregroundStyle(Term.muted.opacity(0.8))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             }
-            if test.phase == .failed, let error = test.errorText {
-                Text("✗ " + error)
-                    .font(Term.mono(11.5))
-                    .foregroundStyle(Term.red)
-            }
-            if test.history.count > 1 {
-                history
-            }
-            Text("via \(via) · speed.cloudflare.com · up to ~\(SpeedTest.maxUsageMB) MB")
-                .font(Term.mono(10))
-                .foregroundStyle(Term.muted.opacity(0.8))
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
         }
-        .padding(12)
+        .padding(folded ? 10 : 12)
         .background(Term.surface, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Term.border, lineWidth: 1))
     }
 
+    /// 접혀 있을 때 머리줄에 붙이는 한마디
+    private var foldedLine: (text: String, color: Color)? {
+        if test.running { return ("\(arrow(test.phase)) \(Self.mbps(test.liveMbps)) Mbps", Term.amber) }
+        if test.phase == .failed { return ("✗ failed", Term.red) }
+        guard let last = test.last else { return nil }
+        return ("↓\(Int(last.downMbps.rounded())) ↑\(Int(last.upMbps.rounded())) Mbps", Term.num)
+    }
+
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            FoldChevron(folded: folded)
             Text("// speed test").foregroundStyle(Term.muted)
-            Spacer()
+            if folded, let line = foldedLine {
+                Text(line.text).foregroundStyle(line.color).monospacedDigit().lineLimit(1)
+            }
+            Spacer(minLength: 4)
             Button(action: run) {
                 Text(test.running ? test.phase.rawValue + "…" : "run ▸")
                     .foregroundStyle(test.running ? Term.amber : Term.green)
@@ -52,6 +68,9 @@ struct SpeedPanel: View {
             .accessibilityLabel(test.running ? "speed test running" : "run speed test")
         }
         .font(Term.mono(11))
+        .contentShape(Rectangle())
+        .onTapGesture { withAnimation(.snappy(duration: 0.3)) { folded.toggle() } }
+        .accessibilityAction(named: folded ? "expand" : "collapse") { folded.toggle() }
     }
 
     /// 재는 중: 지금 단계와 흐르는 속도, 진행 막대

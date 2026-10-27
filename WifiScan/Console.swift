@@ -106,6 +106,20 @@ struct PressScale: ButtonStyle {
     }
 }
 
+/// 접었다 펴는 패널 머리줄의 화살표(▸ 접힘 · ▾ 펼침)
+struct FoldChevron: View {
+    let folded: Bool
+
+    var body: some View {
+        Image(systemName: "chevron.right")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(Term.muted)
+            .rotationEffect(.degrees(folded ? 0 : 90))
+            .frame(width: 10)
+            .accessibilityHidden(true)
+    }
+}
+
 /// 연결 진행 `api › boot › tunnel › up`. 지난 칸은 초록, 지금 칸은 노랗게 깜빡인다.
 struct PhasePipeline: View {
     let index: Int
@@ -301,6 +315,45 @@ struct RegionCard: View {
     }
 }
 
+/// 임시 서버 나라 한 칸: 작은 깃발 · 코드 · 왕복 시간. 카드보다 훨씬 작게(여러 개가 두 줄에 들어가게)
+struct RegionChip: View {
+    let region: VPNRegion
+    let selected: Bool
+    let live: Bool
+    var measured: Int?
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                DotFlag(region: region, width: 18)
+                Text(region.rawValue)
+                    .font(Term.mono(12, .bold))
+                    .foregroundStyle(selected ? Term.green : Term.num)
+                if live {
+                    Circle().fill(Term.green).frame(width: 5, height: 5)
+                        .shadow(color: Term.green, radius: 2)
+                } else {
+                    Text(measured.map { "\($0)ms" } ?? "~\(RegionCard.rtt(region))")
+                        .font(Term.mono(9, measured == nil ? .regular : .semibold))
+                        .foregroundStyle(Term.muted)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? Term.green.opacity(0.08) : Term.surface, in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(selected ? Term.green : Term.border, lineWidth: selected ? 1.5 : 1))
+            .contentShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(PressScale())
+        .animation(.easeOut(duration: 0.2), value: selected)
+        .accessibilityLabel("\(region.geo.city), on demand, \(measured.map { "\($0)" } ?? "about \(RegionCard.rtt(region))") milliseconds")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
 /// `wg/neptun` `adblock` 처럼 지금 설정을 칩으로
 struct FlagRow: View {
     let flags: [String]
@@ -436,33 +489,58 @@ struct Sparkline: View {
 struct ScanPanel: View {
     let scan: NetScan
     let vpnOn: Bool
+    /// 접으면 머리줄 한 줄(등급·한마디)만 남는다
+    @Binding var folded: Bool
     let rescan: () -> Void
     /// vpn 탭 isp 줄과 같은 설정: 켜져 있으면 exit 줄의 IP도 가린다
     @AppStorage("hideIP") private var hideIP = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("// net scan").foregroundStyle(Term.muted)
-                Spacer()
-                if scan.running {
-                    Text("scanning \(scan.current ?? "")…").foregroundStyle(Term.amber)
-                } else if let at = scan.finishedAt {
-                    (Text(at, style: .relative) + Text(" ago")).foregroundStyle(Term.muted)
-                }
-                Button(action: rescan) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(scan.running ? Term.muted : Term.text)
-                        .frame(width: 26, height: 22)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .disabled(scan.running)
-                .accessibilityLabel("scan again")
+            header
+            if !folded {
+                result
             }
-            .font(Term.mono(11))
+        }
+        .padding(folded ? 10 : 12)
+        .background(Term.surface, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Term.border, lineWidth: 1))
+    }
 
+    /// 머리줄을 누르면 접고 편다(다시 검사 단추는 따로)
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            FoldChevron(folded: folded)
+            Text("// net scan").foregroundStyle(Term.muted)
+            if folded, !scan.running {
+                Text(scan.grade).font(Term.mono(11, .bold)).foregroundStyle(gradeColor)
+                Text(verdict).foregroundStyle(gradeColor).lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            if scan.running {
+                Text("scanning \(scan.current ?? "")…").foregroundStyle(Term.amber).lineLimit(1)
+            } else if !folded, let at = scan.finishedAt {
+                (Text(at, style: .relative) + Text(" ago")).foregroundStyle(Term.muted).lineLimit(1)
+            }
+            Button(action: rescan) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(scan.running ? Term.muted : Term.text)
+                    .frame(width: 26, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(scan.running)
+            .accessibilityLabel("scan again")
+        }
+        .font(Term.mono(11))
+        .contentShape(Rectangle())
+        .onTapGesture { withAnimation(.snappy(duration: 0.3)) { folded.toggle() } }
+        .accessibilityAction(named: folded ? "expand" : "collapse") { folded.toggle() }
+    }
+
+    private var result: some View {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 14) {
                 VStack(spacing: 0) {
                     Text(scan.running ? "…" : scan.grade)
@@ -505,9 +583,7 @@ struct ScanPanel: View {
             }
             .animation(.easeOut(duration: 0.2), value: scan.checks.count)
         }
-        .padding(12)
-        .background(Term.surface, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Term.border, lineWidth: 1))
+        .transition(.opacity)
     }
 
     private func row(_ symbol: String, _ symbolColor: Color, _ id: String, _ detail: String, detailColor: Color) -> some View {

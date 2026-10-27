@@ -21,6 +21,10 @@ struct VPNView: View {
     @AppStorage("hideIP") private var hideIP = false
     @AppStorage("vpnAllowLAN") private var allowLAN = true
     @AppStorage("vpnCustomDNS") private var customDNS = ""
+    /// 접어 둔 패널(net scan · speed test · 임시 서버 나라). 처음엔 접혀 있다
+    @AppStorage("foldScan") private var foldScan = true
+    @AppStorage("foldSpeed") private var foldSpeed = true
+    @AppStorage("foldOnDemand") private var foldOnDemand = true
 
     @State private var busy = false
     /// `jp: booting…` 같은 진행 상황 한 줄
@@ -126,6 +130,7 @@ struct VPNView: View {
             speed.showDemo()
         case "scan":
             region = .jp
+            foldScan = false
             scan.showDemo(running: true)
         case "failed":
             region = .us
@@ -300,7 +305,7 @@ struct VPNView: View {
 
     /// 검사가 끝나면 등급에 따라 햅틱(문제 없음 성공 · 있으면 경고)
     private var scanPanel: some View {
-        ScanPanel(scan: scan, vpnOn: vpn.status == .connected) { Task { await runScan() } }
+        ScanPanel(scan: scan, vpnOn: vpn.status == .connected, folded: $foldScan) { Task { await runScan() } }
             .sensoryFeedback(trigger: scan.finishedAt) { _, finished in
                 guard finished != nil else { return nil }
                 return scan.hasProblems ? .warning : .success
@@ -308,7 +313,7 @@ struct VPNView: View {
     }
 
     private var speedPanel: some View {
-        SpeedPanel(test: speed, via: speedVia) {
+        SpeedPanel(test: speed, via: speedVia, folded: $foldSpeed) {
             let via = speedVia
             Task { await speed.run(via: via) }
         }
@@ -580,23 +585,8 @@ struct VPNView: View {
             .accessibilityHint(shownRegion.detail)
             // 임시 서버 나라(관리자용): 고르면 그 나라에 서버를 새로 만든다
             if !Edition.isUser {
-                Text("// on demand · new server ~1m · deletes itself after 30m idle")
-                    .font(Term.mono(11))
-                    .foregroundStyle(Term.muted)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                    .padding(.top, 4)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(VPNRegion.allCases.filter(\.onDemand)) { option in
-                            regionCard(option)
-                                .frame(width: 80)
-                        }
-                    }
-                }
-                .scrollClipDisabled()
-                .disabled(locked)
-                .opacity(locked ? 0.55 : 1)
+                onDemandPanel
+                    .padding(.top, 2)
             }
         }
         .confirmationDialog("hop to \(hopTarget?.geo.city ?? "")?", isPresented: hopping,
@@ -609,6 +599,55 @@ struct VPNView: View {
             Text(target.onDemand
                  ? "disconnects \(savedRegion.rawValue), then makes a new server in \(target.geo.city) (~1m)"
                  : "disconnects \(savedRegion.rawValue), then connects \(target.rawValue)")
+        }
+    }
+
+    /// 임시 서버 나라: 처음엔 한 줄로 접혀 있고(고른 나라만 보임), 펴면 작은 칸으로 두 줄
+    private var onDemandPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 6) {
+                FoldChevron(folded: foldOnDemand)
+                Text("// on demand").foregroundStyle(Term.muted)
+                Text("+\(VPNRegion.allCases.filter(\.onDemand).count) · new server ~1m")
+                    .foregroundStyle(Term.muted.opacity(0.7))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 4)
+                // 접혀 있어도 지금 고른 임시 나라는 보이게
+                if foldOnDemand, shownRegion.onDemand {
+                    regionChip(shownRegion)
+                        .fixedSize()
+                        .allowsHitTesting(false)
+                }
+            }
+            .font(Term.mono(11))
+            .frame(minHeight: 22)
+            .contentShape(Rectangle())
+            .onTapGesture { withAnimation(.snappy(duration: 0.3)) { foldOnDemand.toggle() } }
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(foldOnDemand ? "on demand countries, collapsed" : "on demand countries")
+            if !foldOnDemand {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 74), spacing: 6)], alignment: .leading, spacing: 6) {
+                    ForEach(VPNRegion.allCases.filter(\.onDemand)) { option in
+                        regionChip(option)
+                    }
+                }
+                .disabled(locked)
+                .opacity(locked ? 0.55 : 1)
+                .transition(.opacity)
+                Text("deletes itself after 30m idle · wg only")
+                    .font(Term.mono(10))
+                    .foregroundStyle(Term.muted.opacity(0.8))
+            }
+        }
+    }
+
+    private func regionChip(_ option: VPNRegion) -> some View {
+        RegionChip(region: option,
+                   selected: option == shownRegion,
+                   live: option == savedRegion && vpn.status == .connected,
+                   measured: probe.rtt[option]) {
+            select(option)
         }
     }
 
