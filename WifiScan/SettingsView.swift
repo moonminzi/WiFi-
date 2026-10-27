@@ -240,8 +240,22 @@ struct SettingsView: View {
         }
     }
 
+    /// 마지막 몇 줄(연결 단계 · 실패 이유 — 예전 vpn 탭의 boot log)을 바로 보여 주고, 전체는 view로
     private var logsBlock: some View {
         TermBlock(label: "logs") {
+            let recent = Array(log.lines.suffix(6))
+            if !recent.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(recent.enumerated()), id: \.offset) { _, line in
+                        // "MM-dd HH:mm:ss 내용"에서 날짜는 떼고 시각부터
+                        Text(String(line.dropFirst(6)))
+                            .foregroundStyle(line.contains("✗") ? Term.red : Term.muted)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+                .font(Term.mono(10.5))
+            }
             Button {
                 showLogs = true
             } label: {

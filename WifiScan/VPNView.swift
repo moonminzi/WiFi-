@@ -30,14 +30,14 @@ struct VPNView: View {
     /// `jp: booting…` 같은 진행 상황 한 줄
     @State private var phase: String?
     @State private var errorText: String?
-    /// 이번 연결 한 번의 진행 단계. 콘솔의 `// boot log`에 시각과 함께 쌓인다.
+    /// 이번 연결 한 번의 진행 단계(단계마다 햅틱). 기록은 settings → logs에 남는다(NagoLog).
     @State private var steps: [Step] = []
     /// wg/유니콘 터널이 알려 주는 핸드셰이크·주고받은 양(연결돼 있는 동안 5초마다)
     @State private var linkStats: String?
     /// 진행 중인 연결. 해외 서버는 켜지는 데 몇 분 걸려서 그동안 버튼으로 취소할 수 있다.
     @State private var connectTask: Task<Void, Never>?
-    /// 마지막 연결을 직접 취소했는지(boot log 끝줄 표시)
-    @State private var cancelled = false
+    /// 실패 줄을 누르면 연결 기록(settings → logs와 같은 화면)
+    @State private var showLogs = false
     /// 나라별 실제 왕복 시간(카드에 표시)
     @State private var probe = LatencyProbe()
     /// 밖에서 보이는 내 IP·나라. 연결되면 나가는 서버 것이어야 한다.
@@ -277,14 +277,17 @@ struct VPNView: View {
         VStack(alignment: .leading, spacing: 16) {
             sessionPanel
             connectButton
+            // 진행은 연결 버튼(지금 단계)과 단계 막대로 보이고, 단계 기록은 settings → logs로 갔다.
+            // 실패하면 버튼 바로 아래 이유 한 줄만 — 누르면 기록 전체
+            if let errorText, !busy {
+                failureLine(errorText)
+                    .padding(.top, -6)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
             if onDevice {
                 unicornPanel
             } else {
                 exitPanel
-            }
-            if !steps.isEmpty || errorText != nil {
-                bootLog
-                    .transition(.move(edge: .top).combined(with: .opacity))
             }
             if scan.running || !scan.checks.isEmpty {
                 scanPanel
@@ -297,9 +300,9 @@ struct VPNView: View {
         }
         .padding(.top, 8)
         // 패널이 생기고 사라질 때 툭 끊기지 않게
-        .animation(.snappy(duration: 0.35), value: steps.isEmpty)
         .animation(.snappy(duration: 0.35), value: errorText)
         .animation(.snappy(duration: 0.35), value: scan.running)
+        .sheet(isPresented: $showLogs) { LogsView(vpn: vpn) }
     }
 
     /// 검사가 끝나면 등급에 따라 햅틱(문제 없음 성공 · 있으면 경고)
@@ -688,51 +691,24 @@ struct VPNView: View {
         }
     }
 
-    // MARK: 진행 기록
-
-    private var bootLog: some View {
-        TermBlock(label: "boot log") {
-            VStack(alignment: .leading, spacing: 4) {
-                let start = steps.first?.at ?? Date()
-                ForEach(steps.suffix(7)) { item in
-                    let last = item.id == steps.last?.id
-                    logLine(offset: item.at.timeIntervalSince(start), symbol: symbol(last: last),
-                            text: item.text, color: last ? lastColor : Term.text)
-                }
-                if vpn.status == .connected, !busy, let since = vpn.connectedSince, !steps.isEmpty {
-                    logLine(offset: since.timeIntervalSince(start), symbol: ("✓", Term.green),
-                            text: "tunnel up", color: Term.green)
-                }
-                if let errorText {
-                    logLine(offset: nil, symbol: ("✗", Term.red), text: errorText, color: Term.red)
-                }
+    private func failureLine(_ message: String) -> some View {
+        Button {
+            showLogs = true
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("✗").foregroundStyle(Term.red)
+                Text(message)
+                    .foregroundStyle(Term.red)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 6)
+                Text("log ›").foregroundStyle(Term.muted)
             }
+            .font(Term.mono(12))
+            .contentShape(Rectangle())
         }
-    }
-
-    private func symbol(last: Bool) -> (String, Color) {
-        guard last else { return ("✓", Term.green) }
-        if errorText != nil { return ("✗", Term.red) }
-        if cancelled { return ("–", Term.muted) }
-        if busy { return (">", Term.amber) }
-        return ("✓", Term.green)
-    }
-
-    private var lastColor: Color {
-        if errorText != nil { return Term.red }
-        return cancelled ? Term.muted : Term.text
-    }
-
-    private func logLine(offset: TimeInterval?, symbol: (String, Color), text: String, color: Color) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(offset.map { String(format: "+%5.1fs", max(0, $0)) } ?? "       ")
-                .foregroundStyle(Term.muted)
-            Text(symbol.0).foregroundStyle(symbol.1)
-            Text(text).foregroundStyle(color)
-                .lineLimit(2)
-        }
-        .font(Term.mono(12))
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .buttonStyle(.plain)
+        .accessibilityHint("opens the connection log")
     }
 
     // MARK: 연결 버튼
@@ -818,7 +794,6 @@ struct VPNView: View {
             return
         }
         steps = []
-        cancelled = false
         busy = true
         defer {
             busy = false
@@ -874,7 +849,6 @@ struct VPNView: View {
 
     /// 버튼으로 취소: 이미 저장·시작한 연결이 있으면 내린다.
     private func cancelConnect() async {
-        cancelled = true
         phase = nil
         steps.append(Step(at: Date(), text: "cancelled"))
         NagoLog.add("cancelled")
