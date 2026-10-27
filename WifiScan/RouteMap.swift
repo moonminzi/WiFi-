@@ -701,26 +701,42 @@ final class RouteMapModel {
         for offset in [-360.0, 0, 360] {
             let x = view.sx(base + offset), y = view.sy(RouteMath.mercY(geo.lat))
             guard x > -40, x < view.w + 40, y > -20, y < view.h + 20 else { continue }
-            hits.append((region, CGPoint(x: x, y: y)))
-            // 임시 서버 나라는 고르기 전엔 작은 점만(유럽에 이름이 겹쳐 쌓이지 않게)
-            if region.onDemand && !on {
-                let dot = CGRect(x: x - 2.5, y: y - 2.5, width: 5, height: 5)
+            // 목적지가 아닌 나라는 머리줄·아래 패널 밑에선 땅 점처럼 흐려진다. 안 그러면 땅은 흐려졌는데
+            // 북쪽에 있는 uk만 머리줄 옆에 또렷하게 떠 있다(넓게 볼 때). 거의 안 보이면 누를 수도 없다
+            let shown = on ? 1 : edgeVisibility(y: y, height: view.h)
+            guard shown > 0.02 else { continue }
+            if shown > 0.5 { hits.append((region, CGPoint(x: x, y: y))) }
+            var ctx = ctx
+            ctx.opacity *= shown
+            // 고르지 않은 나라는 이름 없이 점만: 늘 있는 서버는 빈 칸, 임시 서버 나라는 더 작은 칸.
+            // (예전엔 늘 있는 서버만 이름을 달아서, 임시 나라를 고를 때마다 상관없는 uk 글자만 혼자 떠 있었다.
+            // 이름은 아래 카드·칸에 있고, 지도의 점은 눌러서 고를 수 있다)
+            if !on {
+                let side: CGFloat = region.onDemand ? 5 : 7
+                let dot = CGRect(x: x - side / 2, y: y - side / 2, width: side, height: side)
                 ctx.fill(Path(dot), with: .color(paper))
-                ctx.stroke(Path(dot), with: .color(Term.muted.opacity(0.7)), lineWidth: 1)
+                ctx.stroke(Path(dot), with: .color(region.onDemand ? Term.muted.opacity(0.7) : Term.muted),
+                           lineWidth: region.onDemand ? 1 : 1.2)
                 continue
             }
             let rect = CGRect(x: x - 3.5, y: y - 3.5, width: 7, height: 7)
-            ctx.fill(Path(rect), with: .color(on ? Term.green : paper))
-            ctx.stroke(Path(rect), with: .color(on ? Term.green : Term.muted), lineWidth: 1.2)
-            let text = on && stage == .connected ? "\(region.rawValue) · \(geo.city)" : region.rawValue
-            // 목적지는 연결되면 고리(반지름 14) 밖에서 시작한다 — 안에서 시작하면 고리가 글자를 긋는다
-            let dx = on && arc.local && stage != .onDevice ? Self.orbit + 7 : (on ? 22 : 8)
-            // 목적지 나라는 땅 점이 초록으로 켜져서 초록 글자가 묻힌다 → 배경색 판 + 초록 테두리(꼬리표).
-            // 다른 나라 이름도 회색 땅 점 위라 옅은 판을 깐다
-            label(&ctx, text, at: CGPoint(x: x + dx, y: y), anchor: .leading,
-                  weight: on ? .semibold : .regular, color: on ? Term.green : Term.muted,
-                  backed: true, outline: on ? Term.green.opacity(0.45) : nil)
+            ctx.fill(Path(rect), with: .color(Term.green))
+            ctx.stroke(Path(rect), with: .color(Term.green), lineWidth: 1.2)
+            let text = stage == .connected ? "\(region.rawValue) · \(geo.city)" : region.rawValue
+            // 연결되면 고리(반지름 14) 밖에서 시작한다 — 안에서 시작하면 고리가 글자를 긋는다
+            let dx = arc.local && stage != .onDevice ? Self.orbit + 7 : 22
+            // 목적지 나라는 땅 점이 초록으로 켜져서 초록 글자가 묻힌다 → 배경색 판 + 초록 테두리(꼬리표)
+            label(&ctx, text, at: CGPoint(x: x + dx, y: y), anchor: .leading, weight: .semibold, color: Term.green,
+                  backed: true, outline: Term.green.opacity(0.45))
         }
+    }
+
+    /// 0(머리줄·아래 패널 밑) ~ 1(보이는 지도). 화면 배경으로 깔 때 위는 머리줄 아래 끝(insets.top - 12)부터,
+    /// 아래는 도시 → 도시 줄 언저리부터 흐린다. 상자 안 지도(insets 0)에선 테두리 바로 근처만
+    private func edgeVisibility(y: Double, height: Double) -> Double {
+        let top = RouteMath.smooth(insets.top - 12, insets.top + 14, y)
+        let bottom = 1 - RouteMath.smooth(height - insets.bottom - 30, height - insets.bottom - 6, y)
+        return min(top, bottom)
     }
 
     private func drawYou(_ ctx: inout GraphicsContext, view: Viewport) {

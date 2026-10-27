@@ -47,8 +47,8 @@ run_device() {  # 이름표, 찾을 이름
   shoot "$label" "$udid" vpn-scan -nagoTab 0 -nagoDemo scan -nagoScrollEnd NO -foldScan NO
   # 임시 나라 de를 고르고 br 칸을 누르고 있는 모습(말풍선)
   shoot "$label" "$udid" vpn-ondemand -nagoTab 0 -nagoDemo idle -nagoScrollEnd YES -foldOnDemand NO -nagoRegion de -nagoPeek br
-  # 맨 위에서 아래로 당긴 모습: 지도·머리줄은 제자리, 패널만 내려온다
-  shoot "$label" "$udid" vpn-pulled -nagoTab 0 -nagoDemo idle -nagoScrollEnd NO -nagoRegion br -nagoPull 90
+  # 맨 위에서 아래로 당긴 모습: 지도·머리줄은 제자리, 패널만 내려온다. 유럽(de)을 골라 옆의 uk가 이름 없이 점만인지도
+  shoot "$label" "$udid" vpn-pulled -nagoTab 0 -nagoDemo idle -nagoScrollEnd NO -nagoRegion de -nagoPull 90
   # 목적지 나라 땅 점이 초록으로 켜진 위에 이름표(us · oregon)가 읽히는지
   shoot "$label" "$udid" vpn-connected-us -nagoTab 0 -nagoDemo connected -nagoScrollEnd NO -nagoRegion us
   shoot "$label" "$udid" vpn-connected-end -nagoTab 0 -nagoDemo connected -nagoScrollEnd YES
