@@ -123,8 +123,8 @@ struct VPNView: View {
             steps = demoSteps
             phase = demoSteps.last?.text
         case "connected":
-            region = .jp
-            savedRegion = .jp
+            region = Demo.region ?? .jp
+            savedRegion = region
             // 연결된 시각(Demo.since) 바로 전에 찍힌 단계들
             steps = Demo.steps.map { Step(at: Demo.since.addingTimeInterval(-$0.ago + Demo.steps[0].ago - 26), text: $0.text) }
             linkStats = Demo.linkStats

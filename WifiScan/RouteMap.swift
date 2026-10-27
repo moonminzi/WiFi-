@@ -713,9 +713,13 @@ final class RouteMapModel {
             ctx.fill(Path(rect), with: .color(on ? Term.green : paper))
             ctx.stroke(Path(rect), with: .color(on ? Term.green : Term.muted), lineWidth: 1.2)
             let text = on && stage == .connected ? "\(region.rawValue) · \(geo.city)" : region.rawValue
-            let dx = on && arc.local && stage != .onDevice ? Self.orbit + 7 : 8
+            // 목적지는 연결되면 고리(반지름 14) 밖에서 시작한다 — 안에서 시작하면 고리가 글자를 긋는다
+            let dx = on && arc.local && stage != .onDevice ? Self.orbit + 7 : (on ? 22 : 8)
+            // 목적지 나라는 땅 점이 초록으로 켜져서 초록 글자가 묻힌다 → 배경색 판 + 초록 테두리(꼬리표).
+            // 다른 나라 이름도 회색 땅 점 위라 옅은 판을 깐다
             label(&ctx, text, at: CGPoint(x: x + dx, y: y), anchor: .leading,
-                  weight: on ? .semibold : .regular, color: on ? Term.green : Term.muted)
+                  weight: on ? .semibold : .regular, color: on ? Term.green : Term.muted,
+                  backed: true, outline: on ? Term.green.opacity(0.45) : nil)
         }
     }
 
@@ -728,12 +732,12 @@ final class RouteMapModel {
         ctx.fill(Path(ellipseIn: CGRect(x: p.x - 3.2, y: p.y - 3.2, width: 6.4, height: 6.4)), with: .color(Term.text))
         strokeRing(&ctx, center: p, radius: 6.5, color: Term.text.opacity(0.35))
         if stage == .onDevice {
-            label(&ctx, "you", at: CGPoint(x: p.x, y: p.y + 16), anchor: .center, color: Term.text)
+            label(&ctx, "you", at: CGPoint(x: p.x, y: p.y + 16), anchor: .center, color: Term.text, backed: true)
         } else if arc.local {
             // 고리는 꼭대기에서 출발한다
-            label(&ctx, "you", at: CGPoint(x: p.x, y: p.y - Self.orbit - 10), anchor: .center, color: Term.text)
+            label(&ctx, "you", at: CGPoint(x: p.x, y: p.y - Self.orbit - 10), anchor: .center, color: Term.text, backed: true)
         } else {
-            label(&ctx, "you", at: CGPoint(x: p.x - 9, y: p.y), anchor: .trailing, color: Term.text)
+            label(&ctx, "you", at: CGPoint(x: p.x - 12, y: p.y), anchor: .trailing, color: Term.text, backed: true)
         }
     }
 
@@ -782,16 +786,23 @@ final class RouteMapModel {
         ctx.stroke(Path(ellipseIn: rect), with: .color(color), lineWidth: 1)
     }
 
-    /// `backed`: 글자 뒤에 배경색 판을 옅게 깐다(HUD — 밑에 깔린 나라 점에 글자가 묻히지 않게)
+    /// `backed`: 글자 뒤에 배경색 판을 옅게 깐다(밑에 깔린 나라 점에 글자가 묻히지 않게).
+    /// `outline`: 판을 더 진하게 하고 테두리를 둘러 꼬리표처럼(목적지 — 켜진 초록 땅 점 위)
     private func label(_ ctx: inout GraphicsContext, _ text: String, at point: CGPoint, anchor: UnitPoint,
-                       size: CGFloat = 10, weight: Font.Weight = .regular, color: Color, backed: Bool = false) {
+                       size: CGFloat = 10, weight: Font.Weight = .regular, color: Color, backed: Bool = false,
+                       outline: Color? = nil) {
         var resolved = ctx.resolve(Text(text).font(Term.mono(size, weight)))
         resolved.shading = .color(color)
         if backed {
             let box = resolved.measure(in: CGSize(width: 1000, height: 100))
+            let pad: CGSize = outline == nil ? CGSize(width: 4, height: 2) : CGSize(width: 6, height: 3.5)
             let rect = CGRect(x: point.x - anchor.x * box.width, y: point.y - anchor.y * box.height,
-                              width: box.width, height: box.height).insetBy(dx: -4, dy: -2)
-            ctx.fill(Path(roundedRect: rect, cornerRadius: 3), with: .color(Term.bg.opacity(0.75)))
+                              width: box.width, height: box.height).insetBy(dx: -pad.width, dy: -pad.height)
+            let plate = Path(roundedRect: rect, cornerRadius: outline == nil ? 3 : 4)
+            ctx.fill(plate, with: .color(Term.bg.opacity(outline == nil ? 0.75 : 0.9)))
+            if let outline {
+                ctx.stroke(plate, with: .color(outline), lineWidth: 1)
+            }
         }
         ctx.draw(resolved, at: point, anchor: anchor)
     }
