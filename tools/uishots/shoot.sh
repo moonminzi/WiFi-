@@ -47,6 +47,8 @@ run_device() {  # 이름표, 찾을 이름
   shoot "$label" "$udid" vpn-scan -nagoTab 0 -nagoDemo scan -nagoScrollEnd NO -foldScan NO
   # 임시 나라 de를 고르고 br 칸을 누르고 있는 모습(말풍선)
   shoot "$label" "$udid" vpn-ondemand -nagoTab 0 -nagoDemo idle -nagoScrollEnd YES -foldOnDemand NO -nagoRegion de -nagoPeek br
+  # 맨 위에서 아래로 당긴 모습: 지도·머리줄은 제자리, 패널만 내려온다
+  shoot "$label" "$udid" vpn-pulled -nagoTab 0 -nagoDemo idle -nagoScrollEnd NO -nagoRegion br -nagoPull 90
   shoot "$label" "$udid" vpn-connected-end -nagoTab 0 -nagoDemo connected -nagoScrollEnd YES
   shoot "$label" "$udid" vpn-idle-end -nagoTab 0 -nagoDemo idle -nagoScrollEnd YES
   shoot "$label" "$udid" dash -nagoTab 1 -nagoDemo connected

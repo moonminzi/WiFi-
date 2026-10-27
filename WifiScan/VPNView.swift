@@ -66,6 +66,10 @@ struct VPNView: View {
             ScrollViewReader { reader in
                 ScrollView {
                     VStack(spacing: 0) {
+                        // 스크린샷용: 맨 위에서 아래로 당긴 모습(Debug + `-nagoPull 90`)
+                        if Demo.pull > 0 {
+                            Color.clear.frame(height: Demo.pull)
+                        }
                         hero(top: top, height: heroHeight(geo.size.height + top))
                         console
                             .padding(.horizontal, 16)
@@ -78,6 +82,8 @@ struct VPNView: View {
                     }
                 }
                 .scrollDismissesKeyboard(.interactively)
+                // 지도 위로 스크롤 막대가 지나가면 지저분하다
+                .scrollIndicators(.hidden)
                 .ignoresSafeArea(edges: .top)
                 .task {
                     guard Demo.scrollToEnd else { return }
@@ -197,12 +203,10 @@ struct VPNView: View {
                      flowDown: traffic.current?.down ?? 0,
                      flowUp: traffic.current?.up ?? 0,
                      scanning: scan.running)
-                // 위로 밀면 지도는 천천히 따라가고(패럴랙스), 아래로 당기면 늘어나서 빈 곳이 안 보인다
+                // 위로 밀면 지도는 천천히 따라간다(패럴랙스). 아래로 당길 때는 아래 hero 전체가 제자리에 선다
                 .visualEffect { content, proxy in
                     let y = proxy.frame(in: .scrollView).minY
-                    return content
-                        .scaleEffect(y > 0 ? 1 + y / max(proxy.size.height, 1) : 1, anchor: .bottom)
-                        .offset(y: y < 0 ? -y * 0.45 : 0)
+                    return content.offset(y: y < 0 ? -y * 0.45 : 0)
                 }
 
             // 상태 빛: 머리줄 쪽에서 상태 색이 은은하게 번진다
@@ -226,8 +230,15 @@ struct VPNView: View {
             .termColumn()
         }
         .frame(height: height)
-        // 패럴랙스로 내려간 지도가 아래 콘솔 옆으로 비어져 나오지 않게 아래만 자른다(위는 당겨서 늘어날 몫)
+        // 패럴랙스로 내려간 지도가 아래 콘솔 옆으로 비어져 나오지 않게 아래만 자른다
         .mask(alignment: .bottom) { Rectangle().frame(height: height + 2000) }
+        // 맨 위에서 아래로 당기면 지도·머리줄(~/vpn $ · 스캔 · 상태)은 화면 위에 그대로 두고 패널만 내려온다.
+        // 예전엔 지도를 키워 빈 곳을 메웠는데, 그러면 머리줄이 나라 점 위로 내려오고 지도 글자(좌표·거리)까지
+        // 커져 양옆이 잘렸다. 지도 아래 끝은 배경색으로 흐려지니 패널 위로 벌어지는 틈도 이어져 보인다
+        .visualEffect { content, proxy in
+            let y = proxy.frame(in: .scrollView).minY
+            return content.offset(y: y > 0 ? -y : 0)
+        }
     }
 
     private var routeStage: RouteMap.Stage {

@@ -22,9 +22,12 @@ enum Demo {
     static let peek = UserDefaults.standard.string(forKey: "nagoPeek").flatMap(VPNRegion.init(rawValue:))
     /// 스크린샷: 데모에서 고를 나라(없으면 jp, `-nagoRegion de`)
     static let region = UserDefaults.standard.string(forKey: "nagoRegion").flatMap(VPNRegion.init(rawValue:))
+    /// 스크린샷: 맨 위에서 이만큼(pt) 아래로 당긴 모습(`-nagoPull 90`)
+    static let pull = CGFloat(UserDefaults.standard.double(forKey: "nagoPull"))
     #else
     static let peek: VPNRegion? = nil
     static let region: VPNRegion? = nil
+    static let pull: CGFloat = 0
     #endif
     static var connected: Bool { state == "connected" }
     /// 데모 연결이 붙은 시각(12분 34초 전)
