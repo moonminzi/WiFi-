@@ -14,11 +14,50 @@
 - iOS 내장 Personal VPN(`NEVPNManager`)으로 **IKEv2 + EAP-MSCHAPv2** 연결 — 별도 확장/라이브러리 없음
 - 서버는 AWS EC2의 **strongSwan**. 구축·재현 방법과 접속 안내는 [`server/README.md`](server/README.md) 참고
 - **국가 선택**: 🇰🇷 서울 · 🇯🇵 도쿄 · 🇺🇸 오리건 · 🇬🇧 런던. 연결을 누르면 API(`VPNRegion.swift`)가 그 나라 서버를 켜고(꺼져 있으면 1~2분) 지금 IP를 받아 접속한다. 서버는 거의 안 쓰면 알아서 꺼진다(서울 3시간, 해외 30분)
+- **임시 서버 나라**(2.0.7, 유저용에도 2.1.0): 싱가포르 · 독일 · 프랑스 · 아일랜드 · 스웨덴 · 캐나다 · 브라질 · 호주 · 인도. 카드 아래 `// on demand` 줄(누르면 펴짐, 작은 칸)에서 고르면 국가 API가 그 리전에 서버를 **새로 만들고**(WireGuard 1분쯤, TCP 가속은 30초쯤 뒤) 30분 동안 안 쓰면 서버가 **스스로 지워진다**. 작은 칸엔 왕복 시간을 숫자 대신 막대 3칸(신호 세기처럼, 잰 값은 색)으로 두고, 칸을 **누르고 있으면** 키보드 글쇠처럼 위에 말풍선으로 도시·ms가 뜬다(떼면 고름, 밀어서 벗어나면 취소). 고른 임시 나라의 ms는 칸들 아래 줄에 숫자로(2.1.2). 안 쓰는 동안 드는 돈이 0원이고, 쓰는 동안 시간당 $0.03~0.06 + 데이터. 동시에 2대까지. 광고 차단 DNS는 없다(1.1.1.1). 자세한 건 `server/README.md`
 - **route 지도**(1.9): 점으로 찍은 세계 지도 위에 `you → 나갈 국가` 경로. 국가를 고르면 카메라가 그쪽으로 날아가고,
   연결 중에는 진행 단계(`checking server` → `booting` → `wg register` …)가 바뀔 때마다 웨이포인트가 찍히며 블록 커서가 경로를 따라간다.
   연결되면 그 나라로 확대되고 나라 점이 초록으로 켜진다. 실패하면 커서가 빨갛게 멈췄다가 사라진다
-  - `you`는 위치 권한 없이 기기 시간대의 도시로 어림한다(모르는 시간대면 서울). 서울에서 kr처럼 같은 도시면 경로 대신 고리
+  - `you`는 위치 권한 없이 기기 시간대의 도시로 어림한다(모르는 시간대면 서울). 서울에서 kr처럼 같은 도시면 경로 대신 고리(반지름 34pt, 이름표는 고리 아래 `you ⇄ kr · seoul` 하나, 연결되면 웨이포인트 번호는 흐려짐)
   - 지도는 Natural Earth 1:50m(퍼블릭 도메인)를 메르카토르 0.5° 격자로 찍은 `WifiScan/WorldDotsData.swift`. 다시 만들려면 `tools/worldgrid.py`
+- **지도 중심 화면**(2.0): 지도가 화면 위쪽 절반을 꽉 채우고, 머리줄(`~/vpn $▌` + `● secured / exposed` 알약)은 지도 위에 뜬다.
+  위로 밀면 지도는 천천히 따라가고, 맨 위에서 아래로 당기면 지도·머리줄은 제자리에 있고 콘솔만 내려온다(2.1.3).
+  그 아래로 시트처럼 겹쳐 올라오는 콘솔에
+  - 세션: 지금 나라(🇯🇵 tokyo)를 크게, 연결되면 오른쪽에 접속 시간 타이머. 연결 중에는 `api › boot › tunnel › up` 진행 막대,
+    연결되면 wg 터널이 알려 주는 `hs · rx · tx`(5초마다). 설정은 `wg/nagotun` `adblock` 칩으로
+  - 큰 연결 버튼(`nago up jp`): 연결 중에는 지금 단계를 쓰고 빛이 훑고 지나간다
+  - 나갈 국가 카드 네 장: 깃발·코드·도시·어림 왕복 시간(거리 ÷ 100 × 1.3 + 6ms, 실제 측정 아님). **지도에서 나라 점을 눌러도 고를 수 있다**(이름은 고른 나라에만, 나머지는 점만)
+    (서울에서 kr처럼 you 밑에 가려진 나라는 you를 누름). 대기 중에는 고르지 않은 나라로 가는 길도 옅게 그어 둔다
+  - 진행 단계(`jp: booting…`)는 연결 버튼과 단계 막대에만 보이고, 기록은 settings → logs에 쌓인다(최근 몇 줄은 logs 칸에 바로 보임). 실패하면 버튼 아래 ✗ 이유 한 줄 — 누르면 기록 전체(2.0.9, 예전 `// boot log` 패널은 뺐다)
+  - 연결되면 성공 햅틱, 나라를 바꾸면 선택 햅틱
+  - **연결 중 취소**: 해외 서버가 켜지는 동안 버튼이 `jp: booting · cancel ✕`가 된다. 이미 시작한 연결은 내린다
+- **실측 지연**: 끊겨 있을 때 나라마다 그 AWS 리전의 `dynamodb.<리전>.amazonaws.com/ping`에 세 번 묻고(첫 번째는 TLS가 섞여 버림)
+  가장 빠른 값을 카드에 쓴다(80ms 미만 초록 · 180ms 미만 노랑 · 그 위 빨강). 못 재면 거리 어림(`~`)
+- **출구 확인**: 연결되면 `1.1.1.1/cdn-cgi/trace`로 밖에서 보이는 IP·나라를 읽어 `exit 54.199.12.4 · JP NRT ✓ matches`.
+  고른 나라와 다르면 `! not JP — leak?`. 끊겨 있으면 지금 회선 IP(`isp … · sites see this`). 줄을 누르면 다시 확인
+- **net scan(와이파이 검사)**: 머리줄의 레이더 단추(앱을 열 때도 한 번). 검사하는 동안 지도에서 you 둘레를 레이더가 돌고,
+  콘솔에 한 줄씩 쌓인 뒤 A~F 등급(✗ −35 · ! −12)이 나온다
+  - `link` 회선 종류·IPv4/IPv6·데이터 절약 / `portal` captive.apple.com을 평문 http로 받아 로그인 창·바꿔치기 확인(이 주소만 ATS 예외)
+  - `dns` one.one.one.one이 1.1.1.1로 오는지 / `nxdomain` 없는 이름(…example.com)에 주소를 주는 광고·포털 DNS
+  - `doh` 1.1.1.1 DoH가 열려 있는지 / `tls` apple.com 인증서가 시스템 루트로 이어지는지(사용자가 넣어 믿게 한 루트면 엿볼 수 있음 → !)
+  - `ipv6` VPN이 켜져 있을 때 IPv6로 새는지 / `exit` 밖에서 보이는 IP·나라 / `quality` 가장 가까운 서버까지 왕복·흔들림·손실(6회)
+- **실시간 흐름**: wg로 연결돼 있으면 1초마다 터널 바이트 수를 받아 `↓ 2.4 MB/s ↑ 120 KB/s` + 최근 1분 그래프.
+  지도에서는 그만큼 경로 위로 점이 흐른다(받는 건 초록 ←, 보내는 건 하늘색 →, 빠를수록 많고 빠르게). 가만있으면 지도가 멈춰 배터리를 아낀다
+- 카드에 가장 빠른 나라는 `fast`
+- **갈아타기(hop)**: 연결된 채로 다른 나라 점·카드를 누르면 `hop → us · oregon` 확인 뒤 끊고 그 나라로 다시 붙는다
+- 화면 스크린샷: `.github/workflows/ui-shots.yml`(PR에서 `WifiScan/`이 바뀌면, 또는 수동 실행)이 화면 코드만 시뮬레이터용으로 빌드해
+  아이폰·아이폰 SE·아이패드에서 vpn(idle/connecting/connected/failed)·dash·settings를 찍어 `ui-shots` 아티팩트로 올린다.
+  서버 없이 그리려고 Debug 빌드에서만 `-nagoDemo connected`, `-nagoTab 1` 실행 인자를 읽는다(`WifiScan/Demo.swift`)
+- **appearance**(settings 맨 위): `system`(기본, 기기 설정을 따름) · `dark` · `light`. 색은 모두 두 벌(`Term` in `WifiScan/Theme.swift`) —
+  라이트는 초록빛 종이색 바탕에 글자색을 한 단계씩 진하게(밝은 바탕에서 대비 4.5:1 넘게). 지도·서버 지도·탭 막대도 같이 바뀐다. NAGO DL은 다크 고정
+- **움직임 마감**: 숫자(접속 시간·속도·왕복 시간·속도 측정·검사 점수)는 굴러가듯 바뀌고, 나라 이름은 부드럽게 바뀐다.
+  지도 위 머리줄 쪽에 상태 빛(secured 초록 · linking 노랑이 숨 쉼 · failed 빨강)이 번진다.
+  버튼·카드는 누르면 살짝 눌렸다 튕기고, net scan·흐름 패널은 접히듯 나타난다. 검사·속도 측정이 끝나면 햅틱
+- **dash 탭 요약**(2.0): `~/dash $▌` 머리줄(마지막으로 받은 때) 아래
+  - 서버 지도: 태평양을 가운데 둔 점 세계 지도에 서버 네 대(켜짐 초록·숨 쉬는 고리, 켜지는 중 노랑 깜빡, 꺼짐 빈 칸),
+    이번 달 송신량만큼 옅은 원, 지금 붙은 서버까지 you에서 경로와 흐르는 점
+  - 서버 카드(상태 불빛·IP·가동 시간·ike, 지금 붙은 서버엔 `you`, 켜져 있으면 `auto-stop in 2h48m` 유휴 막대)
+  - 이번 달 송신량 게이지·비용·시간별 막대, 그 아래 터미널 창
 - 자체 서명 CA라서 최초 1회 `server/WifiScanVPN.mobileconfig` 설치 + 인증서 신뢰가 필요
   (설정 → 일반 → 정보 → 인증서 신뢰 설정)
 - 비밀번호는 기기 **키체인**에만 저장(소스/저장소에 없음)
@@ -32,8 +71,23 @@
 - **auto**: IKEv2를 12초 기다려 안 붙으면 WireGuard로
 - **unicorn**(iOS): 서버로 안 나간다. SNI 차단만 우회한다 — 아래 참고
 - WireGuard 키는 폰에서 처음 한 번 만들고 공개키만 피어 목록(SSM 파라미터 `/nago/wg/peers`)에 등록. 서버 4대 모두 같은 목록으로 맞춰짐(`server/wireguard/setup-wg.sh`, `nago-peer sync`)
-- **wg engine**(iOS): `neptun`(기본) — NordVPN이 쓰는 Rust 엔진 NepTUN(BSD-3)을 `NagoTun/`(C 인터페이스)으로 감쌈. utun fd를 엔진 스레드가 직접 읽고 씀 / `go` — WireGuardKit(공식 WireGuard 앱과 같은 wireguard-go)
+- **wg engine**(iOS): `nagotun`(기본, 설정 값은 예전 이름 `neptun` 그대로) — NordVPN의 Rust 엔진 NepTUN(BSD-3)을 `NagoTun/engine/`에 가져와 고친 우리 엔진(2.1.1). `NagoTun/`(C 인터페이스)으로 감싸고 utun fd를 엔진 스레드가 직접 읽고 씀. 이벤트 루프 기본 1개(벤치: 2개와 같은 속도에 1GB당 CPU 25~32% 덜). 무엇을 왜 바꿨는지·벤치 숫자는 `NagoTun/engine/README.md`, 벤치 도구는 `tools/nagotun-bench/` / `go` — WireGuardKit(공식 WireGuard 앱과 같은 wireguard-go)
   - 리눅스 검증(서울→도쿄): NepTUN 다운 약 250~290Mbps, 커널 WireGuard 약 270Mbps로 같은 급. `NagoTun/examples/linux_tun.rs`로 서버에서 재현 가능
+  - **애플에서 NepTUN이 도는 방식**(고정한 rev `ce18515`의 소스 기준): 작업 스레드·스레드 사이 대기열(`packet_workers`)은 애플 밖에서만 만든다.
+    아이폰에선 이벤트 루프가 패킷을 그 자리에서 처리한다(utun 읽기→암호화→`send_to` / `recv_from`→복호화→utun 쓰기, 묶음 없이 한 개씩)
+    - 그래서 예전 설정 `queue`(8·16·64)는 **iOS에선 아무 영향이 없었다** → 빼고 `loops`로 바꿈
+    - **loops**(이벤트 루프 수, 기본 2): utun 읽기와 UDP 받기는 kqueue `EV_DISPATCH`라 한 번에 한 스레드만 잡는다.
+      1개면 내려받기와 그동안의 ACK 올리기가 한 코어를 나눠 쓰고, 2개면 다른 코어에서 겹친다.
+      피어 잠금은 암·복호화하는 동안만 잡고 `send_to`/utun 쓰기는 잠금 밖이다. 3개 이상은 잡을 일이 없어 1·2만 둠
+    - **UDP 소켓 버퍼**: NepTUN은 애플에서 소켓 버퍼를 건드리지 않아(기본 크기) 받는 쪽이 잠깐 밀리면 커널이 패킷을 버린다.
+      wireguard-go처럼 7MB로 키운다(안 되면 반씩 줄여 가며). 엔진 소켓을 바깥에서 받을 길이 없어 utun 찾을 때처럼 fd를 훑어
+      IPv4/IPv6 UDP 소켓에 건다. 실제로 잡힌 크기는 settings → logs의 터널 로그에 `udp buffers (start): fd7 rcv 7168K …`로 남는다
+    - 안드로이드·리눅스는 NepTUN의 `skt_buffer_size`로 같은 7MB(시스템 상한에서 잘림). `queue`는 거기서만 쓰이고 8 그대로(작아야 다운로드 중 핑이 낮다)
+    - MTU 1420은 그대로(IPv6로 나가는 망·PPPoE에서도 조각나지 않는 WireGuard 기본값)
+- **speed test**(vpn 탭 아래, 머리줄을 누르면 접고 편다 — net scan도 같음): Cloudflare 속도 측정 서버에 연결 4개(세션을 따로 둬 HTTP/2 한 연결에 몰리지 않게)로 7초씩 받기·올리기,
+  처음 1.5초는 빼고 잰다. 쉬는 동안 핑(5번 중간값)과 받는 동안 핑(0.4초마다)도 같이 — 둘의 차이가 대기열이 쌓이는 정도.
+  결과는 설정(`wg/nagotun ×1 · jp`, `wg/go · jp`, `direct` …)과 함께 최근 8개까지 남아서, loops·engine을 바꿔 가며 같은 나라로 재면 바로 비교된다.
+  한 번에 최대 약 300MB를 쓴다
   - iOS 빌드 때 `NagoTunRust` 타깃이 `NagoTun/build-ios.sh`로 `cargo build --target aarch64-apple-ios`(Rust 필요)
 - iOS 빌드: `Vendor/WireGuardKit`(wireguard-apple 1.0.16-27, MIT, Xcode 16용 두 줄 수정) + Go 1.24로 libwg-go.a를 만드는 `WireGuardGoBridgeiOS` 타깃
 - 재서명할 때 확장(`.tunnel`)도 같이 서명돼야 하고, 두 App ID 모두 Network Extensions(packet tunnel) 권한이 필요
@@ -91,7 +145,7 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
   - 터널 확장은 핸드셰이크가 170초 넘게 없으면(서버 유휴 종료, 재부팅으로 IP 변경) 국가 API로 서버를 켜고 주소가 바뀌었으면 피어를 바꾼다. 확장 자신의 통신은 킬 스위치에도 막히지 않는다
 - **custom dns** (wg만): `1.1.1.1, 8.8.8.8`처럼. --adblock이 켜져 있으면 광고 차단 DNS가 우선. IKEv2 DNS는 서버가 준다
 - **안드로이드**: `--allow-lan`(IKEv2 `setLocalRoutesExcluded`, wg는 사설망·멀티캐스트 대역을 AllowedIPs에서 뺌), 항상 켜기·킬 스위치는 시스템 VPN 설정(`system ›`)에서
-- **안드로이드 wg engine**: `neptun`(기본) — iOS와 같은 NepTUN을 `NagoTun/build-android.sh`(NDK)로 libnago_tun.so로 빌드해 JNI(`NagoTun/src/android.rs`, `NeptunNative.kt`)로 부른다. `NeptunVpnService`가 TUN을 만들고 엔진에 넘김. NordVPN과 같게 이벤트 루프 4개 + 서버마다 connect한 UDP 소켓. 앱 자신은 VPN에서 빼서(`addDisallowedApplication`) 엔진 소켓과 국가 API 요청이 터널 밖으로 나간다. 핸드셰이크가 끊기면 iOS처럼 서버를 깨우고 새 주소로 바꾼다 / `go` — wireguard-android GoBackend
+- **안드로이드 wg engine**: `nagotun`(기본) — iOS와 같은 NagoTun 엔진을 `NagoTun/build-android.sh`(NDK)로 libnago_tun.so로 빌드해 JNI(`NagoTun/src/android.rs`, `NeptunNative.kt`)로 부른다. `NeptunVpnService`가 TUN을 만들고 엔진에 넘김. 2.0.5부터 이벤트 루프 1개 + 패킷을 루프에서 바로 처리(NepTUN은 루프 4개 + 작업 스레드 — 같은 속도에 1GB당 CPU 40~50% 덜) + 서버마다 connect한 UDP 소켓. 앱 자신은 VPN에서 빼서(`addDisallowedApplication`) 엔진 소켓과 국가 API 요청이 터널 밖으로 나간다. 핸드셰이크가 끊기면 iOS처럼 서버를 깨우고 새 주소로 바꾼다 / `go` — wireguard-android GoBackend
   - 빌드에 Rust와 Android NDK가 필요(Gradle `preBuild` 앞에 `buildNagoTun`이 돈다. NDK는 `ANDROID_NDK_HOME` 또는 `<SDK>/ndk/<버전>`)
 - **logs**: 진행 단계·오류·VPN 상태 변화(끊긴 이유 포함). iOS는 터널 확장이 켜져 있으면 확장의 로그와 상태(wg는 핸드셰이크·주고받은 양, unicorn은 쪼갠 횟수·DNS 질의 수)도 같이 보여 준다
 - **server**: 가속(TCP 분할)은 4대 모두 IKEv2·WireGuard TCP에 켜져 있음
@@ -123,7 +177,18 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
 
 ## 안드로이드 앱 (`android/`)
 
-친구용 안드로이드 버전. 화면은 iOS VPN 탭과 같은 터미널 스타일이고 국가 선택(kr/jp/us/uk)도 같다.
+친구용 안드로이드 버전. 화면은 iOS VPN 탭과 같은 지도 중심 터미널 스타일이고 국가 선택(kr/jp/us/uk)도 같다.
+
+- **화면(2.0)**: iOS와 같은 route 지도가 위쪽을 채운다(`RouteMap.kt`, Compose Canvas). 점 세계 지도는 iOS 데이터를 `tools/worlddots-android.py`로 `assets/worlddots.txt`에 옮겨 쓴다. 단계마다 웨이포인트, 연결되면 그 나라로 날아가 확대·신호 고리. 나라 점이나 카드를 눌러 고르고, 연결 중에 고르면 갈아타기(hop)를 묻는다
+  - 콘솔 판: 상태 꼬리표 · 도시 · 연결 시간 · 단계 막대(api → boot → tunnel → up) · 출구 줄(연결 전 isp IP, 연결 후엔 출구 나라가 맞는지 확인. neptun은 앱이 터널 밖이라 서버 주소. 줄을 누르면 IP 뒷부분을 `210.182.•••.•••`처럼 가리고 다시 누르면 보임, 길게 누르면 다시 잼 — iOS도 같음, net scan exit 줄도 같이 가려짐) · 지역 카드(DynamoDB `/ping`으로 잰 실제 왕복 시간, 가장 빠른 곳에 `fast`) · 진행 기록
+  - wg로 연결돼 있으면 엔진에 1초마다 바이트 수·핸드셰이크를 물어 속도 그래프와 "handshake 00:14 ago"를 보여 준다(3분 넘게 없으면 노랗게 — 엔진 문제를 바로 알아챌 수 있게). 묻는 건 화면이 아니라 프로세스(`LinkMonitor`, 엔진이 켜질 때 시작)라서 탭을 오가도 그래프가 이어진다. iOS는 터널 확장이 최근 1분을 쌓아 두고 앱이 받아 간다(앱을 닫았다 열어도 이어짐)
+  - 경로 위 흐름 점(받기 초록 · 보내기 하늘색, iOS와 같음): 속도는 1초마다 바뀌지만 점마다 자리를 이어 가고(`FlowLane`), 양·속도는 부드럽게 따라가며, 트래픽이 0이 되면 계속 흐르면서 1.5초쯤에 걸쳐 사라진다. 점 개수는 1초에 4개씩만 바뀐다
+  - settings → appearance: system / dark / light. 글꼴은 JetBrains Mono(OFL, `assets/OFL-JetBrainsMono.txt`)
+  - 국기는 이모지 대신 지도와 같은 점(LED) 15×9 그림(`DotFlag` — iOS Console.swift와 안드로이드 Console.kt가 같은 그림·색). 기기·글꼴마다 이모지 모양이 달라지지 않는다
+  - 햅틱: 나라 고를 때 틱, 단계마다 톡, 연결되면 확인, 실패하면 거절 진동(시스템 "터치 진동" 설정을 따름)
+  - 연결 작업은 화면 밖(Activity)에서 돌아서 설정 탭에 다녀와도 끊기지 않는다. 연결 중 버튼이 cancel이 된다
+- **neptun 강제 종료 고침(2.0.0)**: 엔진이 뜬 직후 망 전환 감시(`registerDefaultNetworkCallback`)가 `ACCESS_NETWORK_STATE` 권한이 없어 `SecurityException`으로 앱 프로세스째 죽었다(서비스가 START_STICKY라 다시 떠서 또 죽음). 권한을 넣고, 서비스 시작 중 예외는 앱을 죽이지 않고 연결 실패로 돌린다
+  - 진단: 앱이 예외로 죽으면 그 이유(예외·위치)를, 엔진 네이티브 크래시·응답 없음이면 다음 실행 때 한 줄을 settings → logs에 남긴다
 
 - 안드로이드 **내장 IKEv2**(VpnManager + `Ikev2VpnProfile`)를 쓴다. 별도 VPN 엔진이나 라이브러리 없음
 - 서버 CA를 앱에 넣어서(`res/raw/nago_ca.pem`) 기기에 인증서를 설치할 필요가 없다
@@ -131,7 +196,15 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
 - 데이터 암호: AES-256-GCM(재키 때 서버 사정에 따라 AES-CBC+SHA256), MTU 1400
 - 빌드: `gradle -p android assembleDebug` (CI: `.github/workflows/build-apk.yml`, 비밀번호 없는 디버그 APK)
 - 전달용 APK는 `app/src/main/assets/preset.txt`(커밋 안 함)에 비밀번호를 넣고 `NAGO_KEYSTORE`/`NAGO_KEYSTORE_PASS` 환경변수로 서명해서 만든다
+- CI 서명: 저장소 secrets에 `NAGO_KEYSTORE_B64`(nago-release.jks를 base64 한 줄로)와 `NAGO_KEYSTORE_PASS`를 넣으면 `build-apk.yml`이 서명된 release APK(`NagoVPN-release-apk`, com.nago.vpn — 기존 앱 위에 덮어 깔림)도 만든다. 공개 레포라 artifact는 누구나 받을 수 있어서 비밀번호는 넣지 않는다(앱에서 입력, 내장판은 로컬에서)
 - 설치: APK 파일을 열고 "출처를 알 수 없는 앱" 허용 → 설치 → 처음 연결할 때 "VPN 연결 요청" 허용
+
+## 릴리스
+
+- **iOS**: `build-ipa.yml`(main에 push하거나 직접 실행)이 IPA를 만들어 버전마다 릴리스 하나에 올린다 — 태그 `ios-<버전>`(예: `ios-2.0.5`), 파일 `NAGO-VPN-<버전>.ipa`(유저용)와 `NAGO-VPN-<버전>-admin.ipa`(관리자용).
+  - 유저용은 컴파일 조건 `USER_EDITION`으로 따로 빌드한다(재서명 도구가 Info.plist를 바꿔도 판이 유지되게, `NAGOEdition = user`도 같이 넣음). 홈 화면 이름은 유저용 NAGO VPN · 관리자용 NAGO Admin, settings → about에 판 표시. 유저용(`Edition.isUser`): vpn · settings 탭만, 속도 측정·설정 꼬리표·링크 상세 없음, settings는 화면 모양·비밀번호·자동 연결/킬 스위치·광고 차단·로그·버전만. 프로토콜·엔진은 기본값(auto · nagotun). 친구용은 유저용 IPA에 `NAGOPresetPassword`를 넣어 재서명한다
+  - 스크린샷(`ui-shots`)에 `user-*` 장면(`-nagoEdition user`) 버전은 `project.yml`의 `MARKETING_VERSION`(빌드 번호는 `CURRENT_PROJECT_VERSION`). 같은 버전을 다시 빌드하면 그 릴리스의 IPA·설명만 바뀐다. 설명은 `release-notes/ios-<버전>.md`
+- **안드로이드**: 태그 `android-<버전>`, 파일 `NAGO-VPN-<버전>.apk`(nago-release 키로 서명)
 
 ## 빌드 방법 A: XcodeGen (추천)
 

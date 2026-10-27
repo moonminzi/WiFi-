@@ -1,22 +1,46 @@
 import SwiftUI
 import UIKit
 
-/// 터미널 느낌의 다크 테마. 색과 글꼴(JetBrains Mono)은 대시보드 사이트와 같다.
+/// 터미널 느낌의 테마. 색과 글꼴(JetBrains Mono)은 대시보드 사이트와 같다.
+/// 색은 모두 다크·라이트 두 벌이고 화면의 색 모드(settings → appearance)를 따라 바뀐다.
+/// 라이트는 같은 초록 계열의 종이색 바탕에, 글자색은 밝은 바탕에서 읽히게(대비 4.5:1 넘게) 한 단계씩 진하게.
+/// 이 파일은 NAGO DL도 같이 쓴다(그쪽은 다크로 고정).
 enum Term {
-    static let bg = Color(hex: 0x0A0D0A)
-    static let surface = Color(hex: 0x0D110D)   // 창 안쪽
-    static let chrome = Color(hex: 0x141A14)    // 창 제목 줄
-    static let border = Color(hex: 0x1F2A1F)
-    static let text = Color(hex: 0xC9D4C5)
-    static let muted = Color(hex: 0x5F6F5F)
-    static let green = Color(hex: 0x4ADE80)
-    static let amber = Color(hex: 0xFBBF24)
-    static let red = Color(hex: 0xF87171)
-    static let key = Color(hex: 0x67E8F9)       // 이름/키
-    static let path = Color(hex: 0x93C5FD)      // 프롬프트 경로
-    static let num = Color(hex: 0xE7ECE5)       // 숫자
-    static let track = Color(hex: 0x1C261C)     // 막대 빈 칸
-    static let dot = Color(hex: 0x3A463A)       // 창 제목 줄 점
+    /// UIKit(탭 막대)에 바로 넘기는 색
+    enum UI {
+        static let bg = Term.dynamic(dark: 0x0A0D0A, light: 0xF4F6F1)
+        static let border = Term.dynamic(dark: 0x1F2A1F, light: 0xD3DCCF)
+        static let muted = Term.dynamic(dark: 0x5F6F5F, light: 0x667566)
+        static let green = Term.dynamic(dark: 0x4ADE80, light: 0x15803D)
+    }
+
+    static let bg = Color(uiColor: UI.bg)
+    static let surface = adaptive(dark: 0x0D110D, light: 0xFFFFFF)   // 창 안쪽
+    static let chrome = adaptive(dark: 0x141A14, light: 0xE9EEE6)    // 창 제목 줄
+    static let border = Color(uiColor: UI.border)
+    static let text = adaptive(dark: 0xC9D4C5, light: 0x1F2B1F)
+    static let muted = Color(uiColor: UI.muted)
+    static let green = Color(uiColor: UI.green)
+    static let amber = adaptive(dark: 0xFBBF24, light: 0xB45309)
+    static let red = adaptive(dark: 0xF87171, light: 0xDC2626)
+    static let key = adaptive(dark: 0x67E8F9, light: 0x0E7490)       // 이름/키
+    static let path = adaptive(dark: 0x93C5FD, light: 0x1D4ED8)      // 프롬프트 경로
+    static let num = adaptive(dark: 0xE7ECE5, light: 0x0F1A0F)       // 숫자
+    static let track = adaptive(dark: 0x1C261C, light: 0xE3E9E0)     // 막대 빈 칸
+    static let dot = adaptive(dark: 0x3A463A, light: 0xC2CCBE)       // 창 제목 줄 점 · 지도 땅 점
+    /// 떠 있는 판(시트)의 그림자: 다크는 짙게, 라이트는 옅게
+    static let shadow = Color(uiColor: UIColor {
+        UIColor(white: 0, alpha: $0.userInterfaceStyle == .light ? 0.10 : 0.5)
+    })
+
+    static func adaptive(dark: UInt32, light: UInt32) -> Color {
+        Color(uiColor: dynamic(dark: dark, light: light))
+    }
+
+    /// 라이트일 때만 light, 나머지(다크·정해지지 않음)는 dark
+    static func dynamic(dark: UInt32, light: UInt32) -> UIColor {
+        UIColor { $0.userInterfaceStyle == .light ? UIColor(hex: light) : UIColor(hex: dark) }
+    }
 
     /// 앱에 넣은 JetBrains Mono가 등록됐는지. 안 됐으면 시스템 고정폭 글꼴로 대신한다.
     static let hasJetBrains = UIFont(name: "JetBrainsMono-Regular", size: 12) != nil
@@ -44,6 +68,32 @@ extension Color {
             red: Double((hex >> 16) & 0xFF) / 255,
             green: Double((hex >> 8) & 0xFF) / 255,
             blue: Double(hex & 0xFF) / 255)
+    }
+}
+
+extension UIColor {
+    convenience init(hex: UInt32) {
+        self.init(
+            red: CGFloat((hex >> 16) & 0xFF) / 255,
+            green: CGFloat((hex >> 8) & 0xFF) / 255,
+            blue: CGFloat(hex & 0xFF) / 255,
+            alpha: 1)
+    }
+}
+
+/// 화면 색 모드(settings → appearance)
+enum Appearance: String, CaseIterable, Identifiable {
+    case system, dark, light
+
+    var id: String { rawValue }
+
+    /// nil이면 기기 설정을 따른다
+    var scheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .dark: return .dark
+        case .light: return .light
+        }
     }
 }
 
@@ -79,25 +129,79 @@ struct TermPage<Content: View>: View {
             .termColumn()
         }
         .scrollDismissesKeyboard(.interactively)
+        .statusBarScrim()
         .background(Term.bg.ignoresSafeArea())
         .foregroundStyle(Term.text)
         .tint(Term.green)
     }
 }
 
+extension View {
+    /// 스크롤한 내용이 상태 막대(시간·배터리) 밑으로 비쳐 보이지 않게 덮는다. 탭 화면 맨 바깥에 단다.
+    /// overlay + ignoresSafeArea로는 띠가 상태 막대까지 늘어나지 않아서, 안전 영역 높이를 재서 그만큼 위로 올려 그린다.
+    func statusBarScrim() -> some View {
+        GeometryReader { geo in
+            ZStack(alignment: .top) {
+                self
+                StatusBarScrim(height: geo.safeAreaInsets.top)
+            }
+        }
+    }
+}
+
+struct StatusBarScrim: View {
+    /// 상태 막대(아이패드는 위 탭 막대까지) 높이
+    let height: CGFloat
+
+    var body: some View {
+        LinearGradient(stops: [.init(color: Term.bg, location: 0),
+                               .init(color: Term.bg, location: height / (height + 10)),
+                               .init(color: Term.bg.opacity(0), location: 1)],
+                       startPoint: .top, endPoint: .bottom)
+            .frame(height: height + 10)
+            .offset(y: -height)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+/// 시계로 도는 반복 움직임. `phase`가 0 → 1 → 0을 `period`초마다 부드럽게 오간다.
+/// repeatForever 애니메이션은 탭을 오가며 onAppear가 다시 불리거나 상태가 바뀌면 겹치고 멈춰서,
+/// 상태 없이 지금 시각으로 그린다(언제 다시 나타나도 같은 자리에서 이어진다).
+struct Pulse<Content: View>: View {
+    var period: Double
+    var active = true
+    @ViewBuilder var content: (_ phase: Double) -> Content
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let running = active && !reduceMotion
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !running)) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            content(running ? 0.5 - 0.5 * cos(2 * .pi * t / period) : 0)
+        }
+    }
+}
+
 struct BlinkingCursor: View {
     var width: CGFloat = 11
     var height: CGFloat = 22
-    @State private var visible = true
 
     var body: some View {
-        Rectangle()
-            .fill(Term.green)
-            .frame(width: width, height: height)
-            .opacity(visible ? 1 : 0)
-            .onAppear {
-                withAnimation(.easeInOut(duration: 0.55).repeatForever()) { visible = false }
-            }
+        Pulse(period: 1.1) { phase in
+            Rectangle()
+                .fill(Term.green)
+                .frame(width: width, height: height)
+                // 터미널 커서처럼 대부분은 켜져 있다가 짧게 꺼진다
+                // (이 파일은 NAGO DL도 같이 쓴다 — VPN 앱에만 있는 RouteMath 등은 쓰지 않는다)
+                .opacity(1 - Self.smooth(0.55, 0.9, phase))
+        }
+    }
+
+    private static func smooth(_ a: Double, _ b: Double, _ x: Double) -> Double {
+        let t = min(1, max(0, (x - a) / (b - a)))
+        return t * t * (3 - 2 * t)
     }
 }
 
@@ -193,7 +297,10 @@ struct TermButtonStyle: ButtonStyle {
                 .foregroundStyle(foreground)
                 .background(background, in: RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(stroke, lineWidth: 1))
-                .opacity(isEnabled ? (configuration.isPressed ? 0.6 : 1) : 0.35)
+                .opacity(isEnabled ? (configuration.isPressed ? 0.75 : 1) : 0.35)
+                // 누르면 살짝 눌렸다가 튕겨 돌아온다
+                .scaleEffect(configuration.isPressed ? 0.97 : 1)
+                .animation(.spring(response: 0.25, dampingFraction: 0.65), value: configuration.isPressed)
                 .contentShape(RoundedRectangle(cornerRadius: 6))
         }
 

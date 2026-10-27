@@ -51,15 +51,12 @@ enum WorldDots {
         return out
     }
 
+    /// 나라 글자. `VPNRegion.allCases` 순서(tools/worldgrid.py의 LETTERS와 같아야 함)
+    private static let letters = Array("kjugsdfewcbai".utf8)
+
     private static func code(_ byte: UInt8) -> UInt8 {
-        switch byte {
-        case UInt8(ascii: "#"): return 1
-        case UInt8(ascii: "k"): return 2
-        case UInt8(ascii: "j"): return 3
-        case UInt8(ascii: "u"): return 4
-        case UInt8(ascii: "g"): return 5
-        default: return 0
-        }
+        if byte == UInt8(ascii: "#") { return 1 }
+        return letters.firstIndex(of: byte).map { UInt8(2 + $0) } ?? 0
     }
 
     /// s×s 칸을 점 하나로. 30% 넘게 땅이면 점을 찍고, 그중 한 나라가 20% 넘게 차지하면 그 나라 점.
@@ -67,7 +64,7 @@ enum WorldDots {
         let lc = cols / s, lr = rows / s
         guard s > 1 else { return Level(stride: 1, cols: lc, rows: lr, cell: step, cells: fine) }
         var cells = [UInt8](repeating: 0, count: lc * lr)
-        var counts = [Int](repeating: 0, count: 6)
+        var counts = [Int](repeating: 0, count: 2 + letters.count)
         let area = s * s
         for row in 0..<lr {
             for col in 0..<lc {

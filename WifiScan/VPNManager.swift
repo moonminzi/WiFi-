@@ -59,6 +59,7 @@ final class VPNManager {
 
     /// 현재 연결 상태. 뷰는 이 값으로 버튼/문구를 바꾼다.
     var status: NEVPNStatus {
+        if Demo.connected { return .connected }
         if wgStatus.isActive || wgStatus == .disconnecting { return wgStatus }
         if ikeStatus == .invalid, wgStatus != .invalid { return wgStatus }
         return ikeStatus
@@ -66,8 +67,17 @@ final class VPNManager {
 
     /// 지금 켜져 있는 프로토콜(꺼져 있으면 nil)
     var activeProto: VPNProto? {
+        if Demo.connected { return .wireguard }
         if wgStatus.isActive { return tunnelProto }
         if ikeStatus.isActive { return .ikev2 }
+        return nil
+    }
+
+    /// 지금 연결이 붙은 시각(세션 타이머). 상태가 바뀔 때 화면이 다시 읽는다.
+    var connectedSince: Date? {
+        if Demo.connected { return Demo.since }
+        if wgStatus == .connected { return tunnel?.connection.connectedDate }
+        if ikeStatus == .connected { return manager.connection.connectedDate }
         return nil
     }
 
@@ -109,7 +119,7 @@ final class VPNManager {
     func waitForIKE(seconds: Double) async -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         var started = false
-        while Date() < deadline {
+        while Date() < deadline, !Task.isCancelled {
             refreshStatus()
             switch ikeStatus {
             case .connected: return true
@@ -120,6 +130,17 @@ final class VPNManager {
             try? await Task.sleep(for: .milliseconds(400))
         }
         return false
+    }
+
+    /// 연결을 시작한 직후, 시스템이 상태를 '연결 중'으로 바꿀 때까지(보통 1초 안) 기다린다.
+    /// 그 틈에 화면이 잠깐 '끊김'으로 돌아갔다가 다시 연결 중이 되면 지도 경로가 처음부터 다시 그어진다.
+    func waitUntilStarted(seconds: Double) async {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline, !Task.isCancelled {
+            refreshStatus()
+            if status.isActive { return }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
     }
 
     /// 서버/사용자/비밀번호로 VPN 설정을 저장한다.
@@ -226,13 +247,13 @@ final class VPNManager {
 
     /// WireGuard 설정을 저장한다. 처음 한 번은 "VPN 구성 추가" 허용 창이 뜬다.
     /// - engine: "neptun"(Rust, NordVPN 엔진) 또는 "go"(wireguard-go, 공식 앱과 같은 엔진)
-    /// - queue: NepTUN 스레드 사이 대기열 묶음 수(작을수록 다운로드 중 핑이 낮음)
+    /// - loops: NepTUN 이벤트 루프 수(1~2). 2면 내려받기와 올리기가 다른 코어에서 돈다
     /// - region, apiKey: 터널 확장이 핸드셰이크가 끊기면 국가 API로 서버를 깨우고 새 주소로 바꿀 때 쓴다.
     /// - killSwitch: 터널이 끊긴 동안 다른 트래픽을 막는다(includeAllNetworks). 확장 자신의 통신은 막히지 않는다.
     /// - allowLAN: 킬 스위치를 켠 상태에서 프린터·AirPlay 같은 같은 망 기기는 터널 밖으로 보낸다.
     ///   킬 스위치가 꺼져 있으면 iOS가 원래 같은 망 트래픽을 터널에 넣지 않는다.
     func saveWireGuard(privateKey: String, address: String, serverPub: String, endpoint: String,
-                       dns: [String], engine: String, queue: Int, region: String, apiKey: String,
+                       dns: [String], engine: String, loops: Int, region: String, apiKey: String,
                        autoConnect: VPNAutoConnect, killSwitch: Bool, allowLAN: Bool) async throws {
         let tunnel = try await NETunnelProviderManager.loadAllFromPreferences().first ?? NETunnelProviderManager()
         let proto = NETunnelProviderProtocol()
@@ -247,7 +268,7 @@ final class VPNManager {
             "dns": dns,
             "mtu": 1420,
             "engine": engine,
-            "queue": queue,
+            "loops": loops,
             "region": region,
             "apiKey": apiKey,
         ]
@@ -309,6 +330,11 @@ final class VPNManager {
     struct TunnelReport: Decodable {
         let lines: [String]
         let stats: String?
+        /// 터널로 받은·보낸 바이트(wg만, 예전 확장이면 없음)
+        let rx: UInt64?
+        let tx: UInt64?
+        /// 터널이 쌓아 둔 최근 1분 속도 [받기, 보내기](바이트/초, 오래된 것부터). 예전 확장이면 없음
+        let history: [[Double]]?
     }
 
     /// 켜져 있는 터널 확장의 로그와 상태(핸드셰이크, 주고받은 양). wg가 켜져 있을 때만 온다.
@@ -351,6 +377,24 @@ extension NEVPNStatus {
 }
 
 // MARK: - 내장 비밀번호
+
+/// 앱 판. 기본은 관리자용(dash 탭, 속도 측정, 프로토콜·엔진 설정)이고, 친구에게 주는 유저용은
+/// 컴파일 조건 `USER_EDITION`으로 따로 빌드한다(CI가 IPA를 둘 만든다). 재서명 도구가 Info.plist를 바꿔도 판이 안 바뀌게.
+/// 유저용: vpn·settings 탭만, 속도 측정·설정 꼬리표·링크 상세 없음, 설정은 화면 모양·비밀번호·연결·광고 차단·로그만.
+/// Info.plist `NAGOEdition = user`도 유저용으로 친다. 스크린샷·디버그에선 실행 인자 `-nagoEdition user`로 고른다.
+enum Edition {
+    static let isUser: Bool = {
+        if let forced = UserDefaults.standard.string(forKey: "nagoEdition") { return forced == "user" }
+        #if USER_EDITION
+        return true
+        #else
+        return (Bundle.main.object(forInfoDictionaryKey: "NAGOEdition") as? String) == "user"
+        #endif
+    }()
+
+    /// settings → about에 붙는 이름
+    static var label: String { isUser ? "user" : "admin" }
+}
 
 /// 전달용 IPA에만 들어가는 비밀번호. 레포가 공개라서 소스에는 두지 않고,
 /// 빌드한 뒤 Info.plist에 `NAGOPresetPassword`를 넣는다. 없으면 직접 입력/키체인을 쓴다.

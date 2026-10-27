@@ -71,7 +71,7 @@ final class BrowserModel: NSObject, ObservableObject {
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
         webView.isOpaque = false
-        webView.backgroundColor = UIColor(Term.bg)
+        webView.backgroundColor = Term.UI.bg
         applyDesktopMode()
 
         observations = [

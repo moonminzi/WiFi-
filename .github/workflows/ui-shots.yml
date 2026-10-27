@@ -1,0 +1,35 @@
+name: UI screenshots
+
+# 화면을 고칠 때 시뮬레이터 스크린샷을 찍어 아티팩트로 올린다(서버 없이 데모 상태로).
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "WifiScan/**"
+      - "tools/uishots/**"
+      - ".github/workflows/ui-shots.yml"
+
+jobs:
+  shots:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          cd tools/uishots && xcodegen
+
+      - name: Build for simulator (Debug)
+        run: |
+          xcodebuild -project tools/uishots/UIShots.xcodeproj -scheme UIShots -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO build
+
+      - name: Screenshots
+        run: tools/uishots/shoot.sh build/Build/Products/Debug-iphonesimulator/UIShots.app shots
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-shots
+          path: shots

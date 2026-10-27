@@ -5,6 +5,7 @@ GET /?format=json  + 헤더 x-nago-key: <VPN 비밀번호>  → JSON (앱)
 POST / {op, ...}   + 헤더 x-nago-key                 → 서울 WireGuard 피어 관리 (nago-peer.py)
                                                        op: add|kick|reset|remove|rename|flags(adblock)
 POST / {op: start|stop|reboot|wake, node}             → 서버 켜기/끄기/재부팅/유휴 카운터 0으로
+POST / {op: drop, node}                               → 임시 서버 나라(sg de …)의 떠 있는 서버를 바로 지운다
 
 WireGuard 피어 목록의 기준은 SSM 파라미터 /nago/wg/peers({"peers":[{pub, ip, name, adblock}]}).
 추가/삭제하면 켜져 있는 서버에 nago-peer sync를 보내고, 꺼진 서버는 국가 API로 켤 때 맞춘다.
@@ -12,6 +13,10 @@ WireGuard 피어 목록의 기준은 SSM 파라미터 /nago/wg/peers({"peers":[{
 
 보여 주는 것: 서버별 상태/IP/가동 시간/유휴 카운터/IKEv2 접속, 서울 WireGuard 피어,
 시간별 송신량(전체 합), 이번 달 송신량과 비용 추정.
+
+임시 서버 나라(ONDEMAND, 국가 API가 만들고 30분 안 쓰면 스스로 지워지는 서버)는 지금 떠 있거나 이번 달에 쓴
+나라만 nodes에 `onDemand: true`로 붙는다. 지워진 서버는 목록에서 사라지므로 이번 달 사용량은 CloudTrail의
+RunInstances 기록(국가 API가 만든 것)으로 인스턴스를 찾아 CloudWatch(CPU 데이터 개수 = 켜져 있던 분, NetworkOut)로 센다.
 """
 import base64
 import concurrent.futures as cf
@@ -37,7 +42,19 @@ WG_PEERS = "/nago/wg/peers"
 WG_SERVERS = "/nago/wg/servers"
 WG_NET = "10.9.0."
 KEY_RE = __import__("re").compile(r"^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$")
-NODE_OPS = ("start", "stop", "reboot", "wake")
+NODE_OPS = ("start", "stop", "reboot", "wake", "drop")
+
+# 임시 서버 나라: {"sg": {"region": "ap-southeast-1", "city": "singapore"}, ...}
+ONDEMAND = json.loads(os.environ.get("ONDEMAND", "{}"))
+OD_TAG = "nago:ondemand"
+OD_IDLE_MIN = 30
+# c7g.medium 리눅스 온디맨드(USD/시간). 디스크 8GB는 시간으로 나눈 대략값
+OD_HOURLY = {"ap-southeast-1": 0.0417, "eu-central-1": 0.0412, "eu-west-3": 0.0429, "eu-west-1": 0.0388,
+             "eu-north-1": 0.0387, "ca-central-1": 0.0395, "sa-east-1": 0.0555, "ap-southeast-2": 0.0472,
+             "ap-south-1": 0.0245}
+OD_DISK_H = 8 * 0.1 / 730
+# 이번 달 임시 서버 사용량(CloudTrail 조회가 느리다)은 10분 동안 다시 쓴다
+OD_MONTH_TTL = 600
 
 # 비용 추정용 단가(USD). 리눅스 온디맨드 / 디스크 8GB / 공인 IPv4 / 무료 100GB 초과 송신.
 HOURLY = {
@@ -176,6 +193,129 @@ def metrics(node, now):
     }
 
 
+# ---------------------------------------------------------------- 임시 서버 나라
+
+def od_regions():
+    return sorted({c["region"] for c in ONDEMAND.values()})
+
+
+def od_code(inst):
+    return next((t["Value"] for t in inst.get("Tags", []) if t["Key"] == OD_TAG), None)
+
+
+def od_live():
+    """지금 떠 있는 임시 서버 {code: {iid, state, ip, launched, type, region}}"""
+    regions = od_regions()
+    ec2s = [client("ec2", r) for r in regions]
+
+    def one(ec2):
+        r = ec2.describe_instances(Filters=[
+            {"Name": "tag-key", "Values": [OD_TAG]},
+            {"Name": "instance-state-name", "Values": ["pending", "running", "shutting-down", "stopping"]}])
+        return [i for x in r["Reservations"] for i in x["Instances"]]
+
+    out = {}
+    with cf.ThreadPoolExecutor(max(1, len(ec2s))) as ex:
+        for region, insts in zip(regions, ex.map(one, ec2s)):
+            for i in insts:
+                code = od_code(i)
+                if code in ONDEMAND and (code not in out or i["LaunchTime"] > out[code]["launched"]):
+                    out[code] = {"iid": i["InstanceId"], "state": i["State"]["Name"], "region": region,
+                                 "ip": i.get("PublicIpAddress"), "launched": i["LaunchTime"], "type": i["InstanceType"]}
+    return out
+
+
+def od_launched(region, since):
+    """이번 달 그 리전에서 국가 API가 만든 임시 서버 [(iid, code)] — CloudTrail 이벤트 기록(90일)"""
+    trail = client("cloudtrail", region)
+    out, token = [], None
+    while True:
+        kw = {"LookupAttributes": [{"AttributeKey": "EventName", "AttributeValue": "RunInstances"}],
+              "StartTime": since, "MaxResults": 50}
+        if token:
+            kw["NextToken"] = token
+        r = trail.lookup_events(**kw)
+        for e in r.get("Events", []):
+            try:
+                ev = json.loads(e["CloudTrailEvent"])
+            except ValueError:
+                continue
+            tags = {t.get("key"): t.get("value")
+                    for spec in ((ev.get("requestParameters") or {}).get("tagSpecificationSet") or {}).get("items", [])
+                    for t in spec.get("tags", [])}
+            code = tags.get(OD_TAG)
+            if code not in ONDEMAND:
+                continue
+            for item in ((ev.get("responseElements") or {}).get("instancesSet") or {}).get("items", []):
+                if item.get("instanceId"):
+                    out.append((item["instanceId"], code))
+        token = r.get("NextToken")
+        if not token:
+            return out
+
+
+def od_month(now):
+    """이번 달 임시 서버 사용량 {code: {minutes, bytes, hourly: {ts: bytes}, servers}}"""
+    mstart = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    regions = od_regions()
+
+    def one(region):
+        launched = od_launched(region, mstart)
+        usage = {}
+        cw = client("cloudwatch", region)
+        for start in range(0, len(launched), 150):   # GetMetricData 한 번에 질의 500개까지(서버당 3개)
+            batch = launched[start:start + 150]
+            queries = []
+            for k, (iid, _) in enumerate(batch):
+                dim = [{"Name": "InstanceId", "Value": iid}]
+                for qid, name, period, stat in (("c", "CPUUtilization", 300, "Average"),
+                                                ("h", "NetworkOut", 3600, "Sum"),
+                                                ("m", "NetworkOut", 86400, "Sum")):
+                    queries.append({"Id": "%s%d" % (qid, k), "ReturnData": True, "MetricStat": {
+                        "Metric": {"Namespace": "AWS/EC2", "MetricName": name, "Dimensions": dim},
+                        "Period": period, "Stat": stat}})
+            token = None
+            while True:
+                kw = {"MetricDataQueries": queries, "StartTime": mstart, "EndTime": now,
+                      "ScanBy": "TimestampAscending"}
+                if token:
+                    kw["NextToken"] = token
+                res = cw.get_metric_data(**kw)
+                for m in res["MetricDataResults"]:
+                    code = batch[int(m["Id"][1:])][1]
+                    u = usage.setdefault(code, {"minutes": 0, "bytes": 0.0, "hourly": {}, "servers": set()})
+                    u["servers"].add(batch[int(m["Id"][1:])][0])
+                    if m["Id"][0] == "c":
+                        u["minutes"] += len(m["Values"]) * 5
+                    elif m["Id"][0] == "m":
+                        u["bytes"] += sum(m["Values"])
+                    else:
+                        for ts, v in zip(m["Timestamps"], m["Values"]):
+                            hour = ts.replace(minute=0, second=0, microsecond=0)
+                            u["hourly"][hour] = u["hourly"].get(hour, 0.0) + v
+                token = res.get("NextToken")
+                if not token:
+                    break
+        return usage
+
+    out = {}
+    with cf.ThreadPoolExecutor(max(1, len(regions))) as ex:
+        for usage in ex.map(one, regions):
+            for code, u in usage.items():
+                u["servers"] = len(u["servers"])
+                out[code] = u
+    return out
+
+
+def safe(fn):
+    """임시 서버 집계가 실패해도(권한·제한) 대시보드 나머지는 보여 준다"""
+    try:
+        return fn()
+    except Exception as e:
+        print("ondemand: %s" % e)
+        return {}
+
+
 def collect():
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -190,14 +330,28 @@ def collect():
         with cf.ThreadPoolExecutor(max_workers=4) as ex:
             return dict(zip([n["code"] for n in NODES], ex.map(lambda n: metrics(n, now), NODES)))
 
-    descs, stats = cached("live", LIVE_TTL, live)
-    mets = cached("metrics", METRIC_TTL, all_metrics)
-    return build(now, descs, stats, mets)
+    jobs = {"live": (LIVE_TTL, live), "metrics": (METRIC_TTL, all_metrics)}
+    if ONDEMAND:
+        jobs["od_live"] = (LIVE_TTL, lambda: safe(od_live))
+        jobs["od_month"] = (OD_MONTH_TTL, lambda: safe(lambda: od_month(now)))
+    # 리전이 많아서(고정 4 + 임시 9) 하나씩 하면 처음 부를 때 20초 가까이 걸린다 — 묶음끼리 동시에.
+    # 클라이언트는 스레드 밖에서 먼저 만든다(boto3 세션은 스레드에 안전하지 않다)
+    for n in NODES:
+        for service in ("ec2", "ssm", "cloudwatch"):
+            client(service, n["region"])
+    for region in od_regions():
+        for service in ("ec2", "cloudtrail", "cloudwatch"):
+            client(service, region)
+    with cf.ThreadPoolExecutor(len(jobs)) as ex:
+        futures = {name: ex.submit(cached, name, ttl, fn) for name, (ttl, fn) in jobs.items()}
+        got = {name: f.result() for name, f in futures.items()}
+    descs, stats = got["live"]
+    return build(now, descs, stats, got["metrics"], got.get("od_live"), got.get("od_month"))
 
 
 # ---------------------------------------------------------------- 정리(JSON 모양)
 
-def build(now, descs, stats, mets):
+def build(now, descs, stats, mets, od=None, odm=None):
     mstart = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     next_month = (mstart + datetime.timedelta(days=32)).replace(day=1)
 
@@ -224,6 +378,30 @@ def build(now, descs, stats, mets):
             "ike": s["ike"] if s else 0, "leases": s["leases"] if s else [], "load": s["load"] if s else None,
             "hours": round(hours, 2), "egressGB": round(egress, 3),
             "usd": round(hours * price + ipv4 + disk, 2),
+        })
+
+    # 임시 서버 나라: 지금 떠 있거나 이번 달에 쓴 나라만
+    od, odm = od or {}, odm or {}
+    for code, cfg in ONDEMAND.items():
+        live, m = od.get(code), odm.get(code)
+        if not live and not m:
+            continue
+        m = m or {"minutes": 0, "bytes": 0.0, "hourly": {}, "servers": 0}
+        hours = m["minutes"] / 60
+        egress = m["bytes"] / 1e9
+        egress_total += egress
+        for ts, v in m["hourly"].items():
+            hourly_total[ts] = hourly_total.get(ts, 0.0) + v
+        state = {"shutting-down": "stopping"}.get(live["state"], live["state"]) if live else "stopped"
+        nodes.append({
+            "code": code, "city": cfg.get("city", code), "region": cfg["region"],
+            "type": live["type"] if live else "c7g.medium", "state": state,
+            "ip": live["ip"] if live else None,
+            "up": int((now - live["launched"]).total_seconds()) if live and live["state"] == "running" else None,
+            "idle": None, "idleLimit": OD_IDLE_MIN, "ike": 0, "leases": [], "load": None,
+            "hours": round(hours, 2), "egressGB": round(egress, 3),
+            "usd": round(hours * (OD_HOURLY.get(cfg["region"], 0.05) + IPV4_H + OD_DISK_H), 2),
+            "onDemand": True, "servers": m["servers"],
         })
 
     now_s = int(now.timestamp())
@@ -307,8 +485,15 @@ def bar(value, maximum, width):
 def node_lines(x):
     tag = {"running": ("ok", "[ OK ]"), "pending": ("warn", "[ .. ]"), "stopping": ("warn", "[ .. ]"),
            "stopped": ("dim", "[ -- ]")}.get(x["state"], ("err", "[FAIL]"))
+    od = x.get("onDemand")
     head = "%s %s  %s %s" % (span("k", x["code"]), span("dim", x["city"].ljust(7)), span(tag[0], tag[1]),
-                             span("num", x["ip"] or x["state"]))
+                             span("num", x["ip"] or ("no server" if od and x["state"] == "stopped" else x["state"])))
+    if od:
+        if x["state"] == "running":
+            bits = [x["type"], "up " + dur(x["up"])] if x["up"] is not None else [x["type"]]
+            return head + "\n   " + span("dim", " · ".join(bits + ["on demand · deletes after %dm idle" % x["idleLimit"]]))
+        return head + "\n   " + span("dim", "on demand · %d server%s this month · made on connect"
+                                     % (x.get("servers", 0), "" if x.get("servers") == 1 else "s"))
     if x["state"] == "running":
         bits = [x["type"]]
         if x["up"] is not None:
@@ -504,9 +689,25 @@ def ssm_run(node, script, comment):
     raise ApiError(504, "server did not answer in time")
 
 
+def ondemand_admin(req):
+    """임시 서버 나라: drop만 된다(떠 있는 서버를 바로 지움). 만드는 건 vpn 탭에서 연결할 때 국가 API가 한다."""
+    code = req.get("node")
+    if req.get("op") != "drop":
+        raise ApiError(400, "%s is on demand - connect from the vpn tab to make a server" % code)
+    live = od_live().get(code)
+    if not live:
+        return {"ok": True, "node": code, "state": "none"}
+    if live["state"] in ("pending", "running", "stopping"):
+        client("ec2", live["region"]).terminate_instances(InstanceIds=[live["iid"]])
+    _cache.pop("od_live", None)
+    return {"ok": True, "node": code, "state": "stopping"}
+
+
 def node_admin(req):
-    """서버 켜기/끄기/재부팅, 유휴 카운터 0으로(wake)."""
+    """서버 켜기/끄기/재부팅, 유휴 카운터 0으로(wake). 임시 서버 나라는 지우기(drop)만."""
     op = req.get("op")
+    if req.get("node") in ONDEMAND:
+        return ondemand_admin(req)
     node = next((n for n in NODES if n["code"] == req.get("node")), None)
     if not node:
         raise ApiError(400, "unknown node")

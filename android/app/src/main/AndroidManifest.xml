@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- neptun: 와이파이↔모바일 데이터 전환을 따라가려고 기본 망 콜백을 건다(없으면 SecurityException으로 앱이 죽음) -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:allowBackup="false"
@@ -14,6 +16,7 @@
             android:name=".MainActivity"
             android:exported="true"
             android:screenOrientation="portrait"
+            android:configChanges="uiMode|screenSize|smallestScreenSize|screenLayout|keyboardHidden|density"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

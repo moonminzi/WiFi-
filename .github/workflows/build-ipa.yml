@@ -29,36 +29,76 @@ jobs:
           brew install xcodegen
           xcodegen
 
+      # 판마다 따로 컴파일한다: 관리자용(그대로)과 유저용(USER_EDITION — Edition.isUser가 컴파일 때 true로 고정돼 Info.plist와 상관없이 dash·속도 측정·엔진 설정이 숨는다).
+      # 같은 derivedData를 써서 두 번째는 Swift만 다시 컴파일한다(Rust·Go 라이브러리는 그대로).
       - name: Build (no signing)
         run: |
-          xcodebuild -project WifiScan.xcodeproj -scheme WifiScan -configuration Release \
-            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            build
-
-      - name: Package IPA
-        run: |
-          mkdir -p Payload
-          cp -R build/Build/Products/Release-iphoneos/WifiScan.app Payload/
-          # 재서명 도구가 권한을 그대로 가져가도록 entitlements를 바이너리에 박아 둔다(ad-hoc 서명).
-          # 확장(PlugIns)을 먼저 서명해야 앱 서명이 깨지지 않는다.
-          codesign --force --sign - --entitlements WifiScanTunnel/WifiScanTunnel.entitlements \
-            Payload/WifiScan.app/PlugIns/WifiScanTunnel.appex
-          codesign --force --sign - --entitlements WifiScan/WifiScan.entitlements Payload/WifiScan.app
-          codesign -d --entitlements - Payload/WifiScan.app/PlugIns/WifiScanTunnel.appex
-          codesign -d --entitlements - Payload/WifiScan.app
-          zip -qry WifiScan.ipa Payload
+          build() {  # 추가 컴파일 조건
+            xcodebuild -project WifiScan.xcodeproj -scheme WifiScan -configuration Release \
+              -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+              SWIFT_ACTIVE_COMPILATION_CONDITIONS="\$(inherited) $1" \
+              build
+          }
+          package() {  # 폴더, 판(admin|user)
+            mkdir -p "$1/Payload"
+            cp -R build/Build/Products/Release-iphoneos/WifiScan.app "$1/Payload/"
+            plist="$1/Payload/WifiScan.app/Info.plist"
+            if [ "$2" = user ]; then
+              /usr/libexec/PlistBuddy -c "Add :NAGOEdition string user" "$plist"
+            else
+              # 홈 화면에서 둘을 구분한다(유저용은 NAGO VPN 그대로)
+              /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName NAGO Admin" "$plist"
+            fi
+            # 재서명 도구가 권한을 그대로 가져가도록 entitlements를 바이너리에 박아 둔다(ad-hoc 서명).
+            # 확장(PlugIns)을 먼저 서명해야 앱 서명이 깨지지 않는다. Info.plist를 고친 뒤에 서명한다.
+            codesign --force --sign - --entitlements WifiScanTunnel/WifiScanTunnel.entitlements \
+              "$1/Payload/WifiScan.app/PlugIns/WifiScanTunnel.appex"
+            codesign --force --sign - --entitlements WifiScan/WifiScan.entitlements "$1/Payload/WifiScan.app"
+            codesign -d --entitlements - "$1/Payload/WifiScan.app"
+          }
+          build ""
+          package admin admin
+          build USER_EDITION
+          package user user
+          (cd admin && zip -qry ../WifiScan.ipa Payload)
+          (cd user && zip -qry ../WifiScan-user.ipa Payload)
 
       - uses: actions/upload-artifact@v4
         with:
           name: WifiScan-ipa
-          path: WifiScan.ipa
+          path: |
+            WifiScan.ipa
+            WifiScan-user.ipa
 
+      # 버전마다 릴리스 하나(ios-2.0.3 같은 태그). 같은 버전을 다시 빌드하면 그 릴리스의 IPA·설명만 바꾼다.
+      # 설명은 release-notes/ios-<버전>.md가 있으면 그것 + 설치 안내.
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="build-${GITHUB_RUN_NUMBER}"
-          gh release create "$tag" WifiScan.ipa \
-            --title "WifiScan ${tag}" \
-            --notes "서명 안 된 IPA입니다(entitlements 포함 ad-hoc 서명). 본인 인증서로 재서명 후 설치하세요."
+          plist=admin/Payload/WifiScan.app/Info.plist
+          version=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$plist")
+          build=$(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" "$plist")
+          tag="ios-${version}"
+          user_asset="NAGO-VPN-${version}.ipa"
+          admin_asset="NAGO-VPN-${version}-admin.ipa"
+          cp WifiScan-user.ipa "$user_asset"
+          cp WifiScan.ipa "$admin_asset"
+          {
+            if [ -f "release-notes/ios-${version}.md" ]; then cat "release-notes/ios-${version}.md"; echo; fi
+            echo "---"
+            echo "- \`${user_asset}\` — 유저용(친구에게 주는 것): vpn · settings만"
+            echo "- \`${admin_asset}\` — 관리자용: dash 탭 · 속도 측정 · 프로토콜·엔진 설정"
+            echo
+            echo "NAGO VPN iOS ${version} (${build}) · \`${GITHUB_SHA::7}\`"
+            echo
+            echo "서명 안 된 IPA입니다(entitlements 포함 ad-hoc 서명). 본인 인증서로 재서명 후 설치하세요."
+          } > notes.md
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$user_asset" "$admin_asset" --clobber
+            gh release edit "$tag" --title "NAGO VPN iOS ${version}" --notes-file notes.md
+          else
+            gh release create "$tag" "$user_asset" "$admin_asset" --target "$GITHUB_SHA" \
+              --title "NAGO VPN iOS ${version}" --notes-file notes.md
+          fi

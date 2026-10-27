@@ -9,6 +9,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # 저장소 secrets에 서명 키가 있으면 release APK도 만든다(Settings → Secrets and variables → Actions)
+      HAS_KEY: ${{ secrets.NAGO_KEYSTORE_B64 != '' && secrets.NAGO_KEYSTORE_PASS != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -35,3 +38,25 @@ jobs:
         with:
           name: NagoVPN-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      # 친구 폰에 깔린 앱 위에 덮어 깔리는 release APK(nago-release 키, com.nago.vpn).
+      # 비밀번호(preset.txt)는 넣지 않는다 — 공개 레포라 artifact는 GitHub 계정이 있으면 누구나 받을 수 있다.
+      # 비밀번호를 넣은 전달용 APK는 로컬에서 만든다(README 안드로이드 앱).
+      - name: Build signed release APK
+        if: env.HAS_KEY == 'true'
+        env:
+          NAGO_KEYSTORE_B64: ${{ secrets.NAGO_KEYSTORE_B64 }}
+          NAGO_KEYSTORE_PASS: ${{ secrets.NAGO_KEYSTORE_PASS }}
+        run: |
+          echo "$NAGO_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/nago-release.jks"
+          NAGO_KEYSTORE="$RUNNER_TEMP/nago-release.jks" NAGO_KEY_ALIAS=nago gradle -p android assembleRelease
+          rm -f "$RUNNER_TEMP/nago-release.jks"
+          # 서명 확인: 인증서 SHA-256이 39:B6:BC:E6…이어야 기존 앱 위에 깔린다
+          "$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner" verify --print-certs \
+            android/app/build/outputs/apk/release/app-release.apk | grep -E "DN|SHA-256"
+
+      - uses: actions/upload-artifact@v4
+        if: env.HAS_KEY == 'true'
+        with:
+          name: NagoVPN-release-apk
+          path: android/app/build/outputs/apk/release/app-release.apk

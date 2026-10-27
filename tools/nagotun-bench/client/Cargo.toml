@@ -1,0 +1,13 @@
+[package]
+name = "nagotun-bench-client"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "NagoTun 벤치: 리눅스 TUN 하나에 엔진(nago_tun_start)을 띄워 두는 클라이언트(안드로이드와 같은 경로)"
+
+[dependencies]
+nago_tun = { path = "../../../NagoTun" }
+libc = "=0.2.186"
+
+[profile.release]
+debug = 1

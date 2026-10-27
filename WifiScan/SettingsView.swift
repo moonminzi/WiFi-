@@ -6,10 +6,12 @@ struct SettingsView: View {
     @State private var vpn = VPNManager()
 
     @AppStorage("vpnUsername") private var username = "wifiscan"
+    @AppStorage("appearance") private var appearance: Appearance = .system
     @AppStorage("vpnProtocol") private var proto: VPNProto = .auto
     @AppStorage("wgEngine") private var wgEngine = "neptun"
-    /// NepTUN 스레드 사이 대기열 묶음 수. 작을수록 다운로드 중 핑이 낮고, 클수록 몰릴 때 덜 버린다
-    @AppStorage("wgQueue") private var wgQueue = 8
+    /// NepTUN 이벤트 루프 수. 2면 내려받기와 올리기(ACK 포함)가 다른 코어에서 돈다.
+    /// (예전 queue 설정은 iOS에서 NepTUN이 쓰지 않아 뺐다 — README)
+    @AppStorage("wgLoops") private var wgLoops = 1
     @AppStorage("vpnFastMode") private var fastMode = true
     @AppStorage("vpnAdblock") private var adblock = false
     @AppStorage("vpnAutoConnect") private var autoConnect: VPNAutoConnect = .off
@@ -46,16 +48,28 @@ struct SettingsView: View {
             if locked {
                 StatusLine(kind: .warn, text: "locked while connected")
             }
-            accountBlock
-            protocolBlock
-            if proto == .unicorn {
-                unicornBlock
+            appearanceBlock
+            if Edition.isUser {
+                // 유저용: 고를 것만. 프로토콜·엔진은 기본값(auto · neptun)을 그대로 쓴다
+                if preset == nil {
+                    accountBlock
+                }
+                connectionBlock
+                dnsBlock
+                logsBlock
+                aboutBlock
+            } else {
+                accountBlock
+                protocolBlock
+                if proto == .unicorn {
+                    unicornBlock
+                }
+                connectionBlock
+                dnsBlock
+                serverBlock
+                logsBlock
+                aboutBlock
             }
-            connectionBlock
-            dnsBlock
-            serverBlock
-            logsBlock
-            aboutBlock
         }
         .task {
             await vpn.reload()
@@ -80,8 +94,11 @@ struct SettingsView: View {
 
     private var accountBlock: some View {
         TermBlock(label: "account") {
-            TermField(key: "user", text: $username, placeholder: "wifiscan")
-            TermDivider()
+            // 유저용은 이름을 기본값(wifiscan) 그대로 쓰고 비밀번호만 받는다
+            if !Edition.isUser {
+                TermField(key: "user", text: $username, placeholder: "wifiscan")
+                TermDivider()
+            }
             if preset != nil || savedPassword {
                 HStack(spacing: 10) {
                     Text("pw")
@@ -116,13 +133,13 @@ struct SettingsView: View {
             if proto == .auto || proto == .wireguard {
                 TermDivider()
                 row("engine") {
-                    TermChoice(options: [(label: "neptun", value: "neptun"), (label: "go", value: "go")],
+                    TermChoice(options: [(label: "nagotun", value: "neptun"), (label: "go", value: "go")],
                                selection: $wgEngine)
                 }
                 if wgEngine == "neptun" {
                     TermDivider()
-                    row("queue") {
-                        TermChoice(options: [8, 16, 64].map { (label: "\($0)", value: $0) }, selection: $wgQueue)
+                    row("loops") {
+                        TermChoice(options: [1, 2].map { (label: "\($0)", value: $0) }, selection: $wgLoops)
                     }
                 }
             }
@@ -195,17 +212,23 @@ struct SettingsView: View {
     private var dnsBlock: some View {
         TermBlock(label: "dns") {
             toggle("--adblock", isOn: $adblock)
-            TermDivider()
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                TermField(key: "custom", text: $customDNS, placeholder: "1.1.1.1", keyboard: .numbersAndPunctuation)
-                Text(dnsValid ? "wg" : "invalid")
-                    .font(Term.mono(12))
-                    .foregroundStyle(dnsValid ? Term.muted : Term.red)
+            if !Edition.isUser {
+                TermDivider()
+                customDNSRow
             }
-            .disabled(adblock)
-            .opacity(adblock ? 0.4 : 1)
         }
         .locked(locked)
+    }
+
+    private var customDNSRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            TermField(key: "custom", text: $customDNS, placeholder: "1.1.1.1", keyboard: .numbersAndPunctuation)
+            Text(dnsValid ? "wg" : "invalid")
+                .font(Term.mono(12))
+                .foregroundStyle(dnsValid ? Term.muted : Term.red)
+        }
+        .disabled(adblock)
+        .opacity(adblock ? 0.4 : 1)
     }
 
     private var serverBlock: some View {
@@ -217,8 +240,22 @@ struct SettingsView: View {
         }
     }
 
+    /// 마지막 몇 줄(연결 단계 · 실패 이유 — 예전 vpn 탭의 boot log)을 바로 보여 주고, 전체는 view로
     private var logsBlock: some View {
         TermBlock(label: "logs") {
+            let recent = Array(log.lines.suffix(6))
+            if !recent.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(recent.enumerated()), id: \.offset) { _, line in
+                        // "MM-dd HH:mm:ss 내용"에서 날짜는 떼고 시각부터
+                        Text(String(line.dropFirst(6)))
+                            .foregroundStyle(line.contains("✗") ? Term.red : Term.muted)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+                .font(Term.mono(10.5))
+            }
             Button {
                 showLogs = true
             } label: {
@@ -234,14 +271,24 @@ struct SettingsView: View {
 
     private var aboutBlock: some View {
         TermBlock(label: "about") {
-            Text("nago vpn \(Self.version)")
-            Text("neptun ce18515 · wireguard-go 1.0.16")
-                .foregroundStyle(Term.muted)
+            Text("nago vpn \(Self.version) · \(Edition.label)")
+            if !Edition.isUser {
+                Text("nagotun 2.2.3-nago.1 (neptun ce18515) · wireguard-go 1.0.16")
+                    .foregroundStyle(Term.muted)
+            }
         }
         .font(Term.mono(13))
     }
 
     // MARK: - 조각
+
+    /// 색 모드: 기기 설정을 따르거나 다크·라이트로 고정. 연결 중에도 바꿀 수 있다(잠그지 않음)
+    private var appearanceBlock: some View {
+        TermBlock(label: "appearance") {
+            TermChoice(options: Appearance.allCases.map { (label: $0.rawValue, value: $0) }, selection: $appearance)
+        }
+        .animation(.easeInOut(duration: 0.3), value: appearance)
+    }
 
     private func key(_ text: String) -> some View {
         Text(text)

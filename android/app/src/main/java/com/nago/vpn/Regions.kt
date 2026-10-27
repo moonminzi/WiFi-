@@ -1,5 +1,6 @@
 package com.nago.vpn
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -89,6 +90,8 @@ object RegionApi {
                 )
             } catch (e: ApiError.Forbidden) {
                 throw e
+            } catch (e: CancellationException) {
+                throw e    // 취소는 재시도하지 않는다
             } catch (e: ApiError.Bad) {
                 if (e.code in 400..499 && e.code != 429) throw e
                 if (region.fallback != null) throw e

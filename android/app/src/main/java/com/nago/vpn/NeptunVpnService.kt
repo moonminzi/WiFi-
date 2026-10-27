@@ -38,12 +38,20 @@ class NeptunVpnService : VpnService() {
 
     companion object {
         private const val ACTION_STOP = "com.nago.vpn.NEPTUN_STOP"
-        /** NordVPN(libtelio)과 같게 안드로이드는 이벤트 루프 4개 */
-        private const val THREADS = 4
+        /**
+         * NagoTun 이벤트 루프 1개. 패킷은 루프에서 바로 처리한다(작업 스레드 없음).
+         * NepTUN 방식(루프 4개 + 작업 스레드)보다 같은 속도에 1GB당 CPU가 절반 안팎(tools/nagotun-bench)
+         */
+        private const val THREADS = 1
 
         val up = MutableStateFlow(false)
         val failure = MutableStateFlow<String?>(null)
         @Volatile private var pending: Session? = null
+        /** 지금 엔진을 돌리는 서비스(통계 읽기용) */
+        @Volatile private var running: NeptunVpnService? = null
+
+        /** 받은·보낸 바이트와 마지막 핸드셰이크. 꺼져 있으면 null. 엔진 잠금을 잡으니 메인 스레드에서 부르지 않는다. */
+        fun stats(): LinkStats? = running?.readStats()
 
         fun start(context: Context, session: Session) {
             pending = session
@@ -64,7 +72,7 @@ class NeptunVpnService : VpnService() {
                 failure.value?.let { throw IllegalStateException(it) }
                 delay(200)
             }
-            throw IllegalStateException("neptun: start timeout")
+            throw IllegalStateException("nagotun: start timeout")
         }
 
         private fun prefs(context: Context) = context.getSharedPreferences("nago", Context.MODE_PRIVATE)
@@ -112,7 +120,7 @@ class NeptunVpnService : VpnService() {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        NagoLog.init(this)
+        NagoLog.catchCrashes(this)
         if (intent?.action == ACTION_STOP) {
             teardown("stop")
             stopSelf()
@@ -122,11 +130,18 @@ class NeptunVpnService : VpnService() {
         val s = pending ?: restore(this)
         pending = null
         if (s == null) {
-            fail("neptun: no saved config")
+            fail("nagotun: no saved config")
             return START_NOT_STICKY
         }
-        bringUp(s)
-        return START_STICKY
+        // 여기서 예외가 나면 앱 프로세스째 죽고, START_STICKY라 시스템이 다시 띄우며 또 죽는다 → 실패로 돌린다
+        return try {
+            bringUp(s)
+            START_STICKY
+        } catch (e: Exception) {
+            teardown(null)
+            fail("nagotun: ${e.javaClass.simpleName}: ${e.message}")
+            START_NOT_STICKY
+        }
     }
 
     override fun onRevoke() {
@@ -157,7 +172,7 @@ class NeptunVpnService : VpnService() {
         }
         val tun = runCatching { builder.establish() }.getOrNull()
         if (tun == null) {
-            fail("neptun: vpn permission missing")
+            fail("nagotun: vpn permission missing")
             return
         }
         val fd = tun.detachFd()
@@ -168,13 +183,15 @@ class NeptunVpnService : VpnService() {
             if (error.startsWith("tun fd") || error.startsWith("uapi is not")) {
                 runCatching { ParcelFileDescriptor.adoptFd(fd).close() }
             }
-            fail("neptun: $error")
+            fail("nagotun: $error")
             return
         }
         synchronized(lock) { handle = h }
         session = s
+        running = this
         up.value = true
-        NagoLog.add("neptun: up → ${s.endpoint}")
+        NagoLog.add("nagotun: up → ${s.endpoint}")
+        LinkMonitor.start { stats() }
         watchNetwork()
         startWatchdog()
     }
@@ -199,9 +216,31 @@ class NeptunVpnService : VpnService() {
             if (h != 0L) NeptunNative.stop(h)
             h != 0L
         }
-        if (stopped && reason != null) NagoLog.add("neptun: $reason")
+        if (stopped && reason != null) NagoLog.add("nagotun: $reason")
         session = null
+        if (running === this) {
+            running = null
+            LinkMonitor.stop()
+        }
         up.value = false
+    }
+
+    private fun readStats(): LinkStats? {
+        val text = synchronized(lock) { if (handle != 0L) NeptunNative.get(handle) else null } ?: return null
+        var rx = 0L
+        var tx = 0L
+        var sec = 0L
+        var nsec = 0L
+        text.lineSequence().forEach { line ->
+            val value = line.substringAfter('=').toLongOrNull() ?: return@forEach
+            when (line.substringBefore('=')) {
+                "rx_bytes" -> rx += value
+                "tx_bytes" -> tx += value
+                "last_handshake_time_sec" -> sec = maxOf(sec, value)
+                "last_handshake_time_nsec" -> nsec = value
+            }
+        }
+        return LinkStats(rx, tx, if (sec > 0) sec * 1000 + nsec / 1_000_000 else 0L)
     }
 
     /** 와이파이↔모바일 데이터가 바뀌면 엔진이 서버에 맞춰 연결해 둔 소켓을 새로 만든다. */
@@ -213,12 +252,14 @@ class NeptunVpnService : VpnService() {
                 current = network
                 if (previous == null || previous == network) return
                 synchronized(lock) { if (handle != 0L) NeptunNative.networkChanged(handle) }
-                NagoLog.add("neptun: network changed")
+                NagoLog.add("nagotun: network changed")
             }
         }
-        // 앱은 VPN에서 빠져 있어서 앱 기준 기본 망 = 실제 와이파이/모바일 데이터
-        getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(cb)
-        networkCallback = cb
+        // 앱은 VPN에서 빠져 있어서 앱 기준 기본 망 = 실제 와이파이/모바일 데이터.
+        // 못 걸어도(권한 등) 터널은 그대로 두고 로그만 남긴다 — 망이 바뀌면 watchdog이 핸드셰이크로 알아챈다
+        runCatching { getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(cb) }
+            .onSuccess { networkCallback = cb }
+            .onFailure { NagoLog.add("! neptun: network watch off (${it.message})") }
     }
 
     /**

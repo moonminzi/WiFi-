@@ -21,6 +21,12 @@ struct DashData: Decodable {
         let hours: Double
         let egressGB: Double
         let usd: Double
+        /// 임시 서버 나라(만들고 지우는 서버). 지금 떠 있거나 이번 달에 쓴 나라만 온다
+        let onDemand: Bool?
+        /// 이번 달에 만든 서버 수(임시 서버 나라)
+        let servers: Int?
+
+        var isOnDemand: Bool { onDemand == true }
     }
 
     struct Peer: Decodable {
@@ -77,6 +83,7 @@ struct DashView: View {
     @State private var data: DashData?
     @State private var errorText: String?
     @State private var loading = false
+    @State private var fetchedAt: Date?
 
     @AppStorage("vpnUsername") private var username = "wifiscan"
     @AppStorage("vpnSavedRegion") private var savedRegion: VPNRegion = .kr
@@ -97,13 +104,20 @@ struct DashView: View {
 
     var body: some View {
         ScrollView {
-            TermWindow(title: "nago@vpn: ~") {
-                terminal
+            VStack(alignment: .leading, spacing: 14) {
+                header
+                if let data {
+                    FleetPanel(data: data, liveCode: vpn.status == .connected ? savedRegion.rawValue : nil)
+                }
+                TermWindow(title: "nago@vpn: ~") {
+                    terminal
+                }
             }
             .padding(16)
             .termColumn()
         }
         .refreshable { await load() }
+        .statusBarScrim()
         .task {
             // 이 탭이 보이는 동안만 돈다(다른 탭으로 가면 취소됨).
             while !Task.isCancelled {
@@ -133,6 +147,28 @@ struct DashView: View {
         .sheet(item: $newPeer) { PeerConfigSheet(peer: $0) }
     }
 
+    /// `~/dash $▌` + 마지막으로 받은 때
+    private var header: some View {
+        HStack(alignment: .center, spacing: 0) {
+            Text("~/").foregroundStyle(Term.muted)
+            Text("dash").foregroundStyle(Term.green)
+            Text(" $ ").foregroundStyle(Term.muted)
+            BlinkingCursor()
+            Spacer(minLength: 8)
+            Group {
+                if loading {
+                    Text("fetching…")
+                } else if let fetchedAt {
+                    Text(fetchedAt, style: .relative) + Text(" ago")
+                }
+            }
+            .font(Term.mono(11))
+            .foregroundStyle(Term.muted)
+        }
+        .font(Term.mono(22, .bold))
+        .padding(.top, 8)
+    }
+
     private func peerTitle(_ peer: DashData.Peer) -> String {
         var title = "peer \(peer.n) · \(peer.ip)"
         if let name = peer.name, !name.isEmpty { title += " · " + name }
@@ -156,7 +192,12 @@ struct DashView: View {
 
     @ViewBuilder
     private func nodeActions(_ node: DashData.Node) -> some View {
-        if node.state == "stopped" {
+        if node.isOnDemand {
+            // 만드는 건 vpn 탭에서 연결할 때. 여기서는 떠 있는 서버를 바로 지우기만
+            if node.state == "running" || node.state == "pending" {
+                Button("delete now", role: .destructive) { nodeOp("drop", node) }
+            }
+        } else if node.state == "stopped" {
             Button("start") { nodeOp("start", node) }
         } else if node.state == "running" {
             Button("reset idle (\(node.idle ?? 0)m)") { nodeOp("wake", node) }
@@ -200,6 +241,7 @@ struct DashView: View {
         case "start": done = "\(node.code) booting · ~1 min"
         case "stop": done = "\(node.code) stopping"
         case "reboot": done = "\(node.code) rebooting · ~1 min"
+        case "drop": done = "\(node.code) deleting"
         default: done = "\(node.code) idle timer reset"
         }
         // 켜고 끄는 건 상태가 바뀌는 데 시간이 걸려서 몇 번 더 새로 받는다.
@@ -254,6 +296,11 @@ struct DashView: View {
     }
 
     private func load() async {
+        if Demo.on {
+            data = Demo.dash
+            fetchedAt = Date().addingTimeInterval(-12)
+            return
+        }
         guard let key = VPNPreset.key(username: username) else {
             errorText = "password required → save it in the vpn tab"
             return
@@ -262,6 +309,7 @@ struct DashView: View {
         defer { loading = false }
         do {
             data = try await DashAPI.fetch(key: key)
+            fetchedAt = Date()
             errorText = nil
         } catch is CancellationError {
             return
@@ -416,12 +464,30 @@ struct DashView: View {
             Text(node.code).foregroundStyle(Term.key)
                 + Text(" " + pad(node.city, 7) + " ").foregroundStyle(Term.muted)
                 + Text(tag.0).foregroundStyle(tag.1)
-                + Text(" " + (node.ip ?? node.state)).foregroundStyle(Term.num)
+                + Text(" " + (node.ip ?? Self.noAddress(node))).foregroundStyle(Term.num)
         )
         line(Text("   " + nodeDetail(node)).foregroundStyle(Term.muted))
     }
 
+    /// IP가 없을 때: 임시 서버 나라는 서버 자체가 없다
+    static func noAddress(_ node: DashData.Node) -> String {
+        node.isOnDemand && node.state == "stopped" ? "no server" : node.state
+    }
+
+    /// 임시 서버 나라 한 줄: 떠 있으면 가동 시간, 아니면 이번 달에 만든 수
+    static func onDemandDetail(_ node: DashData.Node, withType: Bool) -> String {
+        if node.state == "running" {
+            var bits = withType ? [node.type] : []
+            if let up = node.up { bits.append("up " + duration(up)) }
+            bits.append("on demand · deletes after \(node.idleLimit ?? 30)m idle")
+            return bits.joined(separator: " · ")
+        }
+        let made = node.servers ?? 0
+        return "on demand · \(made) server\(made == 1 ? "" : "s") this month"
+    }
+
     private func nodeDetail(_ node: DashData.Node) -> String {
+        if node.isOnDemand { return Self.onDemandDetail(node, withType: true) }
         guard node.state == "running" else { return "\(node.type) · boots on connect" }
         var bits = [node.type]
         if let up = node.up { bits.append("up " + Self.duration(up)) }
@@ -536,6 +602,162 @@ struct DashView: View {
         if v >= 1e6 { return String(format: "%.1f MB", v / 1e6) }
         if v >= 1e3 { return String(format: "%.0f KB", v / 1e3) }
         return "\(n) B"
+    }
+}
+
+// MARK: - 한눈에 보기
+
+/// 터미널 창 위의 요약: 서버 카드(불빛·가동 시간·접속 수)와 이번 달 송신량 게이지 + 시간별 막대.
+struct FleetPanel: View {
+    let data: DashData
+    /// 지금 이 폰이 붙어 있는 서버
+    let liveCode: String?
+
+    var body: some View {
+        VStack(spacing: 8) {
+            FleetMap(nodes: data.nodes, liveCode: liveCode)
+                .aspectRatio(FleetMap.aspect, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .background(Term.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Term.border, lineWidth: 1))
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], spacing: 8) {
+                ForEach(data.nodes, id: \.code) { node in
+                    NodeCard(node: node, live: node.code == liveCode)
+                }
+            }
+            MonthCard(month: data.month, hourly: data.hourly)
+        }
+    }
+}
+
+private struct NodeCard: View {
+    let node: DashData.Node
+    let live: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Circle().fill(color).frame(width: 7, height: 7)
+                    .shadow(color: node.state == "stopped" ? .clear : color, radius: 3)
+                Text(node.code).font(Term.mono(15, .bold)).foregroundStyle(Term.key)
+                Text(node.city).font(Term.mono(11)).foregroundStyle(Term.muted).lineLimit(1)
+                Spacer(minLength: 0)
+                if live {
+                    Text("you").font(Term.mono(10, .semibold)).foregroundStyle(Term.bg)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Term.green, in: RoundedRectangle(cornerRadius: 3))
+                }
+            }
+            Text(node.ip ?? DashView.noAddress(node))
+                .font(Term.mono(12))
+                .foregroundStyle(node.ip == nil ? Term.muted : Term.num)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(detail)
+                .font(Term.mono(11))
+                .foregroundStyle(Term.muted)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+            // 안 쓰면 알아서 꺼지기까지(유휴 타이머)
+            if node.state == "running", let idle = node.idle, let limit = node.idleLimit, limit > 0 {
+                VStack(alignment: .leading, spacing: 3) {
+                    GeometryReader { geo in
+                        let left = 1 - min(Double(idle) / Double(limit), 1)
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Term.track)
+                            Capsule().fill(left < 0.2 ? Term.amber : Term.green.opacity(0.7))
+                                .frame(width: max(3, geo.size.width * left))
+                        }
+                    }
+                    .frame(height: 3)
+                    Text("auto-stop in \(DashView.duration(max(limit - idle, 0) * 60))")
+                        .font(Term.mono(9.5))
+                        .foregroundStyle(Term.muted)
+                }
+                .padding(.top, 2)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Term.surface, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(live ? Term.green.opacity(0.6) : Term.border, lineWidth: 1))
+        .accessibilityElement(children: .combine)
+    }
+
+    private var color: Color {
+        switch node.state {
+        case "running": Term.green
+        case "pending", "stopping": Term.amber
+        case "stopped": Term.muted
+        default: Term.red
+        }
+    }
+
+    private var detail: String {
+        if node.isOnDemand { return DashView.onDemandDetail(node, withType: false) }
+        guard node.state == "running" else { return "boots on connect" }
+        var bits: [String] = []
+        if let up = node.up { bits.append("up " + DashView.duration(up)) }
+        bits.append("ike \(node.ike)")
+        return bits.joined(separator: " · ")
+    }
+}
+
+private struct MonthCard: View {
+    let month: DashData.Month
+    let hourly: [DashData.Hour]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("// this month").font(Term.mono(11)).foregroundStyle(Term.muted)
+                Spacer()
+                Text(String(format: "$%.2f", month.usd)).font(Term.mono(18, .bold)).foregroundStyle(Term.green)
+                Text("est.").font(Term.mono(10)).foregroundStyle(Term.muted)
+            }
+            GeometryReader { geo in
+                let used = min(month.egressGB / max(month.freeGB, 0.001), 1)
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Term.track)
+                    Capsule().fill(used > 0.85 ? Term.amber : Term.green)
+                        .frame(width: max(4, geo.size.width * used))
+                }
+            }
+            .frame(height: 6)
+            HStack {
+                Text(String(format: "egress %.1f / %.0f GB", month.egressGB, month.freeGB))
+                Spacer()
+                Text(String(format: "%.0f%%", min(month.egressGB / max(month.freeGB, 0.001) * 100, 100)))
+            }
+            .font(Term.mono(11))
+            .foregroundStyle(Term.muted)
+
+            if !hourly.isEmpty {
+                let peak = max(hourly.map(\.gb).max() ?? 0, 0.000_001)
+                HStack(alignment: .bottom, spacing: 2) {
+                    ForEach(hourly, id: \.h) { hour in
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(hour.gb > 0 ? Term.green.opacity(0.35 + 0.65 * hour.gb / peak) : Term.track)
+                            .frame(height: max(2, 28 * hour.gb / peak))
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .frame(height: 28, alignment: .bottom)
+                HStack {
+                    Text("\(hourly.first?.h ?? ""):00")
+                    Spacer()
+                    Text("netout / hour")
+                    Spacer()
+                    Text("\(hourly.last?.h ?? ""):00")
+                }
+                .font(Term.mono(9.5))
+                .foregroundStyle(Term.muted)
+            }
+        }
+        .padding(12)
+        .background(Term.surface, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Term.border, lineWidth: 1))
     }
 }
 
