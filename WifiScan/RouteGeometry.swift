@@ -67,10 +67,19 @@ extension VPNRegion {
     /// 그 나라 AWS 리전이 있는 곳
     var geo: GeoPoint {
         switch self {
-        case .kr: return GeoPoint(lat: 37.5665, lon: 126.978, city: "seoul")
-        case .jp: return GeoPoint(lat: 35.6762, lon: 139.6503, city: "tokyo")
-        case .us: return GeoPoint(lat: 45.84, lon: -119.70, city: "oregon")
-        case .uk: return GeoPoint(lat: 51.5074, lon: -0.1278, city: "london")
+        case .kr: return GeoPoint(lat: 37.5665, lon: 126.978, city: cityName)
+        case .jp: return GeoPoint(lat: 35.6762, lon: 139.6503, city: cityName)
+        case .us: return GeoPoint(lat: 45.84, lon: -119.70, city: cityName)
+        case .uk: return GeoPoint(lat: 51.5074, lon: -0.1278, city: cityName)
+        case .sg: return GeoPoint(lat: 1.3521, lon: 103.8198, city: cityName)
+        case .de: return GeoPoint(lat: 50.1109, lon: 8.6821, city: cityName)
+        case .fr: return GeoPoint(lat: 48.8566, lon: 2.3522, city: cityName)
+        case .ie: return GeoPoint(lat: 53.3498, lon: -6.2603, city: cityName)
+        case .se: return GeoPoint(lat: 59.3293, lon: 18.0686, city: cityName)
+        case .ca: return GeoPoint(lat: 45.5017, lon: -73.5673, city: cityName)
+        case .br: return GeoPoint(lat: -23.5505, lon: -46.6333, city: cityName)
+        case .au: return GeoPoint(lat: -33.8688, lon: 151.2093, city: cityName)
+        case .in: return GeoPoint(lat: 19.0760, lon: 72.8777, city: cityName)
         }
     }
 

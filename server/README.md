@@ -55,6 +55,41 @@ iOS 내장 Personal VPN(NEVPNManager)이 그대로 쓸 수 있도록 **strongSwa
   원거리용 TCP 버퍼, haproxy TCP 분할 가속까지 한 번에 설정합니다. 번들에는 미리 서명한
   `server-cert.pem`/`server-key.pem`, `ca-cert.pem`, `ipsec.secrets`, `id`가 들어갑니다(레포에 넣지 않음).
 
+## 임시 서버 나라 (만들고 지우기)
+
+가끔만 필요한 나라는 서버를 미리 두지 않고, 고를 때 만들어서 안 쓰면 지운다. 안 쓰는 동안 드는 돈이 없다.
+
+| 코드 | 나라 | 리전 |
+|---|---|---|
+| `sg` | 싱가포르 | `ap-southeast-1` |
+| `de` | 독일 | `eu-central-1` |
+| `fr` | 프랑스 | `eu-west-3` |
+| `ie` | 아일랜드 | `eu-west-1` |
+| `se` | 스웨덴 | `eu-north-1` |
+| `ca` | 캐나다 | `ca-central-1` |
+| `br` | 브라질 | `sa-east-1` |
+| `au` | 호주 | `ap-southeast-2` |
+| `in` | 인도 | `ap-south-1` |
+
+- 국가 API(`region-api/index.py`, Lambda `nago-region`)가 `GET /region?r=sg`에 떠 있는 서버가 없으면 새로 만든다.
+  Ubuntu 24.04 arm64(`c7g.medium`), 기본 VPC, 보안 그룹 `nago-ondemand`(udp 443/51820만), 태그 `nago:ondemand=<코드>`.
+  만들 때 `state: "creating"`, WireGuard가 올라오면 `ready: true`(서버가 콘솔에 남기는 `NAGO_WG_READY`로 판단).
+- **WireGuard만** 올린다. 패키지를 깔지 않는다(커널 wireguard + systemd-networkd, user-data 한 번). 서버 키는 Lambda가 만들어
+  user-data로 넘기고 공개키는 태그 `nago:wgpub`로 돌려준다. 피어는 만들 때의 `/nago/wg/peers`(만든 뒤 새로 등록한 기기는 다음 서버부터).
+  IKEv2·광고 차단 DNS·TCP 분할 가속은 없다.
+- **지우기**: 서버 안의 유휴 검사(분당 송신 300KB 미만이 30분)가 `poweroff` → 종료 동작이 `terminate`라 서버가 그대로 지워진다.
+  24시간이 지나도 꺼진다. AWS 쪽 안전장치로 CloudWatch 경보(`nago-ondemand-<인스턴스>`, 5분 송신 1MB 미만이 1시간이면 terminate)도
+  건다 — 서버가 멎어서 스스로 못 끄는 경우용. 지난 경보는 다음에 그 리전에 서버를 만들 때 치운다.
+- **동시에 2대까지**(`ONDEMAND_MAX`). 넘으면 409. 연결해 둔 채로 두면 터널이 핸드셰이크가 끊길 때 API를 다시 불러 새 서버를 만든다
+  (늘 있는 서버를 다시 켜는 것과 같은 동작).
+- 비용: 서버 시간당 $0.03~0.06(공인 IPv4 포함, 초 단위) + 송신 GB당 $0.09~0.15(전 리전 합쳐 매달 100GB 무료). 안 쓰면 0원.
+- 나라 추가: Lambda 환경 변수 `ONDEMAND`(`{"sg":{"region":"ap-southeast-1"},...}`)와 IAM 인라인 정책 `nago-ondemand`의
+  `aws:RequestedRegion` 목록, 앱 `VPNRegion`에 넣는다. 2019년 이후 생긴 리전(홍콩·대만·태국 등)은 계정에서 리전을 먼저 켜야 한다.
+- 관리·점검: Lambda를 직접 부르면(IAM 권한 필요) 비밀번호 없이 된다 — `{"nago_internal": "region", "r": "sg"}`.
+  API Gateway로 들어온 요청은 이 길로 올 수 없다.
+- Lambda 반영: `cd server/region-api && zip -X /tmp/region.zip index.py && aws lambda update-function-code --region ap-northeast-2 --function-name nago-region --zip-file fileb:///tmp/region.zip`
+  (제한 시간 25초 — 처음 만드는 요청이 10초 가까이 걸린다)
+
 ## 포함된 파일
 
 | 파일 | 설명 |

@@ -13,7 +13,8 @@ final class LatencyProbe {
     /// 20초 안에 잰 적이 있으면 건너뛴다(탭을 오가며 여러 번 부르지 않게)
     func measure(force: Bool = false) async {
         if Demo.on {
-            rtt = [.kr: 4, .jp: 31, .us: 128, .uk: 247]
+            rtt = [.kr: 4, .jp: 31, .us: 128, .uk: 247, .sg: 71, .de: 238, .fr: 251, .ie: 262, .se: 254,
+                   .ca: 178, .br: 296, .au: 132, .in: 132]
             return
         }
         guard !measuring, force || Date().timeIntervalSince(lastRun) > 20 else { return }
@@ -23,7 +24,7 @@ final class LatencyProbe {
             lastRun = Date()
         }
         await withTaskGroup(of: (VPNRegion, Int?).self) { group in
-            for region in VPNRegion.allCases {
+            for region in VPNRegion.shown {
                 group.addTask { (region, await Self.ping(region)) }
             }
             for await (region, ms) in group {
@@ -104,23 +105,11 @@ struct ExitInfo: Equatable {
 }
 
 extension VPNRegion {
-    /// 그 나라 서버가 있는 AWS 리전
-    var awsRegion: String {
-        switch self {
-        case .kr: return "ap-northeast-2"
-        case .jp: return "ap-northeast-1"
-        case .us: return "us-west-2"
-        case .uk: return "eu-west-2"
-        }
-    }
-
     /// 출구 IP가 이 나라로 보여야 하는 국가 코드
     var countryCode: String {
-        switch self {
-        case .kr: return "KR"
-        case .jp: return "JP"
-        case .us: return "US"
-        case .uk: return "GB"
-        }
+        self == .uk ? "GB" : rawValue.uppercased()
     }
+
+    /// 이 판에서 고를 수 있는 나라. 임시 서버 나라는 관리자용에서만.
+    static var shown: [VPNRegion] { Edition.isUser ? fixed : allCases }
 }

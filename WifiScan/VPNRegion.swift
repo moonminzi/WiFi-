@@ -1,22 +1,25 @@
 import Foundation
 
-/// VPN 탭에서 고르는 국가. 국가마다 그 나라 AWS 리전에 IKEv2 서버가 하나씩 있다.
+/// VPN 탭에서 고르는 국가. kr jp us uk는 그 나라 AWS 리전에 서버가 하나씩 늘 있다(꺼 두었다가 켬).
 /// 한국 서버는 공인 IP가 고정이고(인증서 ID도 IP), 해외 서버는 켤 때마다 IP가 바뀌어서
 /// 인증서 ID를 FQDN(예: jp.nago.vpn)으로 두고 주소는 API로 받아 온다.
+/// 그 뒤 나라들은 임시 서버(`onDemand`): 고르면 API가 그 리전에 서버를 새로 만들고(WireGuard만, 1분쯤),
+/// 30분 안 쓰면 서버가 스스로 지워진다. 관리자용에서만 보인다.
 enum VPNRegion: String, CaseIterable, Identifiable {
     case kr, jp, us, uk
+    case sg, de, fr, ie, se, ca, br, au
+    case `in`
 
     var id: String { rawValue }
 
+    /// 늘 있는 서버(유저용에서 고를 수 있는 나라)
+    static let fixed: [VPNRegion] = [.kr, .jp, .us, .uk]
+
+    /// 고를 때 서버를 새로 만드는 나라
+    var onDemand: Bool { !Self.fixed.contains(self) }
+
     /// `🇯🇵 tokyo · ap-northeast-1` 처럼 보여 줄 한 줄
-    var detail: String {
-        switch self {
-        case .kr: return "🇰🇷 seoul · ap-northeast-2"
-        case .jp: return "🇯🇵 tokyo · ap-northeast-1"
-        case .us: return "🇺🇸 oregon · us-west-2"
-        case .uk: return "🇬🇧 london · eu-west-2"
-        }
-    }
+    var detail: String { "\(flag) \(cityName) · \(awsRegion)" + (onDemand ? " · on demand" : "") }
 
     var flag: String {
         switch self {
@@ -24,6 +27,53 @@ enum VPNRegion: String, CaseIterable, Identifiable {
         case .jp: return "🇯🇵"
         case .us: return "🇺🇸"
         case .uk: return "🇬🇧"
+        case .sg: return "🇸🇬"
+        case .de: return "🇩🇪"
+        case .fr: return "🇫🇷"
+        case .ie: return "🇮🇪"
+        case .se: return "🇸🇪"
+        case .ca: return "🇨🇦"
+        case .br: return "🇧🇷"
+        case .au: return "🇦🇺"
+        case .in: return "🇮🇳"
+        }
+    }
+
+    /// 서버가 있는 도시
+    var cityName: String {
+        switch self {
+        case .kr: return "seoul"
+        case .jp: return "tokyo"
+        case .us: return "oregon"
+        case .uk: return "london"
+        case .sg: return "singapore"
+        case .de: return "frankfurt"
+        case .fr: return "paris"
+        case .ie: return "dublin"
+        case .se: return "stockholm"
+        case .ca: return "montreal"
+        case .br: return "são paulo"
+        case .au: return "sydney"
+        case .in: return "mumbai"
+        }
+    }
+
+    /// 그 나라 서버가 있는 AWS 리전
+    var awsRegion: String {
+        switch self {
+        case .kr: return "ap-northeast-2"
+        case .jp: return "ap-northeast-1"
+        case .us: return "us-west-2"
+        case .uk: return "eu-west-2"
+        case .sg: return "ap-southeast-1"
+        case .de: return "eu-central-1"
+        case .fr: return "eu-west-3"
+        case .ie: return "eu-west-1"
+        case .se: return "eu-north-1"
+        case .ca: return "ca-central-1"
+        case .br: return "sa-east-1"
+        case .au: return "ap-southeast-2"
+        case .in: return "ap-south-1"
         }
     }
 
@@ -53,12 +103,15 @@ enum RegionAPI {
         case forbidden
         case badResponse(Int)
         case timeout
+        /// 임시 서버가 이미 최대 개수만큼 떠 있다
+        case tooManyServers
 
         var errorDescription: String? {
             switch self {
             case .forbidden: return "403 forbidden: wrong password"
             case .badResponse(let code): return "api error: http \(code)"
             case .timeout: return "timeout: server not up after 4m, retry"
+            case .tooManyServers: return "409: 2 temp servers already up · they delete after 30m idle"
             }
         }
     }
@@ -75,11 +128,13 @@ enum RegionAPI {
     private static func status(_ region: VPNRegion, key: String) async throws -> Status {
         var comps = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)!
         comps.queryItems = [URLQueryItem(name: "r", value: region.rawValue)]
-        var req = URLRequest(url: comps.url!, timeoutInterval: 15)
+        // 임시 서버를 처음 만드는 요청은 10초 가까이 걸린다
+        var req = URLRequest(url: comps.url!, timeoutInterval: region.onDemand ? 28 : 15)
         req.setValue(key, forHTTPHeaderField: "x-nago-key")
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if code == 403 { throw APIError.forbidden }
+        if code == 409 { throw APIError.tooManyServers }
         guard code == 200 else { throw APIError.badResponse(code) }
         return try JSONDecoder().decode(Status.self, from: data)
     }
@@ -101,11 +156,15 @@ enum RegionAPI {
                                   wgPub: s.wgPub, wgPort: s.wgPort ?? 443)
                 }
                 lastError = nil
-                progress(s.state == "stopping"
-                         ? "\(region.rawValue): stopping → restart…"
-                         : "\(region.rawValue): booting…")
+                switch s.state {
+                case "stopping": progress("\(region.rawValue): stopping → restart…")
+                case "creating": progress("\(region.rawValue): new server · ~1m")
+                default: progress("\(region.rawValue): booting…")
+                }
             } catch APIError.forbidden {
                 throw APIError.forbidden
+            } catch APIError.tooManyServers {
+                throw APIError.tooManyServers
             } catch APIError.badResponse(let code) where (400..<500).contains(code) && code != 429 {
                 throw APIError.badResponse(code)
             } catch {

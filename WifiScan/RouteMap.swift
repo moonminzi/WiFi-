@@ -139,7 +139,7 @@ final class RouteMapModel {
     private let origin = GeoPoint.here
     /// 나라마다 you에서 가는 길(대기 중에 고르지 않은 나라도 옅게 긋는다)
     private let arcs: [VPNRegion: RouteArc] = Dictionary(
-        uniqueKeysWithValues: VPNRegion.allCases.map { ($0, RouteArc(from: GeoPoint.here, to: $0.geo)) })
+        uniqueKeysWithValues: VPNRegion.shown.map { ($0, RouteArc(from: GeoPoint.here, to: $0.geo)) })
     private var started = false
     private var stage: RouteMap.Stage = .idle
     private var stageAt = Date.distantPast
@@ -529,7 +529,8 @@ final class RouteMapModel {
 
         // 고를 수 있는 다른 나라로 가는 길(아주 옅게)
         if stage == .idle || stage == .failed {
-            for region in VPNRegion.allCases where region != destination {
+            // 임시 서버 나라까지 그으면 지도가 실선 뭉치가 된다 — 늘 있는 서버로 가는 길만
+            for region in VPNRegion.fixed where region != destination {
                 guard let other = arcs[region], !other.local else { continue }
                 var path = Path()
                 for i in 0...48 {
@@ -689,7 +690,7 @@ final class RouteMapModel {
 
     /// 다른 나라 노드(you 바로 밑에 있는 건 가려서 뺀다)
     private func drawNodes(_ ctx: inout GraphicsContext, view: Viewport, highlighted: VPNRegion?) {
-        for region in VPNRegion.allCases where region != highlighted && origin.km(to: region.geo) > 150 {
+        for region in VPNRegion.shown where region != highlighted && origin.km(to: region.geo) > 150 {
             drawNode(&ctx, view: view, region: region, on: false)
         }
     }
@@ -701,6 +702,13 @@ final class RouteMapModel {
             let x = view.sx(base + offset), y = view.sy(RouteMath.mercY(geo.lat))
             guard x > -40, x < view.w + 40, y > -20, y < view.h + 20 else { continue }
             hits.append((region, CGPoint(x: x, y: y)))
+            // 임시 서버 나라는 고르기 전엔 작은 점만(유럽에 이름이 겹쳐 쌓이지 않게)
+            if region.onDemand && !on {
+                let dot = CGRect(x: x - 2.5, y: y - 2.5, width: 5, height: 5)
+                ctx.fill(Path(dot), with: .color(paper))
+                ctx.stroke(Path(dot), with: .color(Term.muted.opacity(0.7)), lineWidth: 1)
+                continue
+            }
             let rect = CGRect(x: x - 3.5, y: y - 3.5, width: 7, height: 7)
             ctx.fill(Path(rect), with: .color(on ? Term.green : paper))
             ctx.stroke(Path(rect), with: .color(on ? Term.green : Term.muted), lineWidth: 1.2)
@@ -714,7 +722,7 @@ final class RouteMapModel {
     private func drawYou(_ ctx: inout GraphicsContext, view: Viewport) {
         let p = view.point(origin.world)
         // you 바로 밑에 가려진 나라(서울에서 kr)는 you를 눌러 고른다
-        for region in VPNRegion.allCases where origin.km(to: region.geo) <= 150 {
+        for region in VPNRegion.shown where origin.km(to: region.geo) <= 150 {
             hits.append((region, p))
         }
         ctx.fill(Path(ellipseIn: CGRect(x: p.x - 3.2, y: p.y - 3.2, width: 6.4, height: 6.4)), with: .color(Term.text))

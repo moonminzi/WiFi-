@@ -145,7 +145,7 @@ struct PhasePipeline: View {
 }
 
 /// 나라 국기를 지도와 같은 점(LED)으로 찍는다. 이모지 국기는 기기·글꼴마다 모양이 달라서 터미널 화면에서 튄다.
-/// 15×9 점 그림은 안드로이드(DotFlag.kt)와 같다. 라이트에선 판을 조금 어둡게 해서 흰 점이 보이게.
+/// 15×9 점 그림. kr jp us uk는 안드로이드(DotFlag.kt)와 같다. 라이트에선 판을 조금 어둡게 해서 흰 점이 보이게.
 struct DotFlag: View {
     let region: VPNRegion
     /// 판 너비(pt). 높이는 15:9 비율에 여백을 더한 만큼
@@ -156,6 +156,7 @@ struct DotFlag: View {
     static let rows = 9
 
     /// W 흰 · R 빨강 · B 파랑(태극) · N 남색(성조기) · U 파랑(유니언 잭) · K 검정(괘)
+    /// G 초록 · Y 노랑 · O 주황 · S 하늘색(스웨덴)
     static let art: [VPNRegion: [String]] = [
         .kr: ["WWKWWWWWWWWWKWW", "WKKKWWWWWWWKKKW", "WKKWWWRRRWWWKKW", "WWWWWRRRBBWWWWW", "WWWWWRRRBBWWWWW",
               "WWWWWRRBBBWWWWW", "WKKWWWBBBWWWKKW", "WKKKWWWWWWWKKKW", "WWKWWWWWWWWWKWW"],
@@ -165,6 +166,24 @@ struct DotFlag: View {
               "WWWWWWWWWWWWWWW", "RRRRRRRRRRRRRRR", "WWWWWWWWWWWWWWW", "RRRRRRRRRRRRRRR"],
         .uk: ["RRWUUUWRWUUUWRR", "WWRWWUWRWUWWRWW", "UUWRRWWRWWRRWUU", "WWWWWWWRWWWWWWW", "RRRRRRRRRRRRRRR",
               "WWWWWWWRWWWWWWW", "UUWRRWWRWWRRWUU", "WWRWWUWRWUWWRWW", "RRWUUUWRWUUUWRR"],
+        .sg: ["RRWWRRWRRRRRRRR", "RWRRRWRWRRRRRRR", "RWRRRRRRRRRRRRR", "RRWWRWRWRRRRRRR", "RRRRRRRRRRRRRRR",
+              "WWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWW"],
+        .de: ["KKKKKKKKKKKKKKK", "KKKKKKKKKKKKKKK", "KKKKKKKKKKKKKKK", "RRRRRRRRRRRRRRR", "RRRRRRRRRRRRRRR",
+              "RRRRRRRRRRRRRRR", "YYYYYYYYYYYYYYY", "YYYYYYYYYYYYYYY", "YYYYYYYYYYYYYYY"],
+        .fr: ["BBBBBWWWWWRRRRR", "BBBBBWWWWWRRRRR", "BBBBBWWWWWRRRRR", "BBBBBWWWWWRRRRR", "BBBBBWWWWWRRRRR",
+              "BBBBBWWWWWRRRRR", "BBBBBWWWWWRRRRR", "BBBBBWWWWWRRRRR", "BBBBBWWWWWRRRRR"],
+        .ie: ["GGGGGWWWWWOOOOO", "GGGGGWWWWWOOOOO", "GGGGGWWWWWOOOOO", "GGGGGWWWWWOOOOO", "GGGGGWWWWWOOOOO",
+              "GGGGGWWWWWOOOOO", "GGGGGWWWWWOOOOO", "GGGGGWWWWWOOOOO", "GGGGGWWWWWOOOOO"],
+        .se: ["SSSSSYSSSSSSSSS", "SSSSSYSSSSSSSSS", "SSSSSYSSSSSSSSS", "SSSSSYSSSSSSSSS", "YYYYYYYYYYYYYYY",
+              "SSSSSYSSSSSSSSS", "SSSSSYSSSSSSSSS", "SSSSSYSSSSSSSSS", "SSSSSYSSSSSSSSS"],
+        .ca: ["RRRRWWWWWWWRRRR", "RRRRWWWRWWWRRRR", "RRRRWRWRWRWRRRR", "RRRRWRRRRRWRRRR", "RRRRWRRRRRWRRRR",
+              "RRRRWWRRRWWRRRR", "RRRRWWWRWWWRRRR", "RRRRWWWRWWWRRRR", "RRRRWWWWWWWRRRR"],
+        .br: ["GGGGGGGYGGGGGGG", "GGGGGYYYYYGGGGG", "GGGYYYNNNYYYGGG", "GGYYYNNNNNYYYGG", "GYYYYNWWWNYYYYG",
+              "GGYYYNNNNNYYYGG", "GGGYYYNNNYYYGGG", "GGGGGYYYYYGGGGG", "GGGGGGGYGGGGGGG"],
+        .au: ["WNNRNNWNNNNWNNN", "NWNRNWNNNNNNNNN", "RRRRRRRNNNNNNWN", "NWNRNWNNNWNNNNN", "WNNRNNWNNNNNWNN",
+              "NNNNNNNNNNNNNNN", "NNNWNNNNNNNWNNN", "NNWWWNNNNNNNNNN", "NNNWNNNNNNNNNNN"],
+        .in: ["OOOOOOOOOOOOOOO", "OOOOOOOOOOOOOOO", "OOOOOOOOOOOOOOO", "WWWWWWWNWWWWWWW", "WWWWWWNWNWWWWWW",
+              "WWWWWWWNWWWWWWW", "GGGGGGGGGGGGGGG", "GGGGGGGGGGGGGGG", "GGGGGGGGGGGGGGG"],
     ]
 
     static func height(for width: CGFloat) -> CGFloat {
@@ -202,6 +221,10 @@ struct DotFlag: View {
         case "N": return rgb(0x2C3878)
         case "U": return rgb(0x243E8C)
         case "K": return rgb(dark ? 0x3A403A : 0x1C1E1C)
+        case "G": return rgb(0x1E9A50)
+        case "Y": return rgb(0xF2C230)
+        case "O": return rgb(0xF08A3C)
+        case "S": return rgb(0x2B6CB0)
         default: return rgb(dark ? 0xE8ECE5 : 0xFFFFFF)
         }
     }

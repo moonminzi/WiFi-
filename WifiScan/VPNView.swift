@@ -98,7 +98,11 @@ struct VPNView: View {
         }
         .task(id: vpn.status == .connected) { await pollLink() }
         .task(id: vpn.status) { await statusSettled() }
-        .onAppear(perform: applyDemo)
+        .onAppear {
+            // 관리자용에서 고른 임시 서버 나라가 남아 있으면(같은 폰에 유저용을 덮어 깐 경우) 한국으로
+            if Edition.isUser, region.onDemand { region = .kr }
+            applyDemo()
+        }
     }
 
     /// 스크린샷용 데모 상태(Debug 빌드 + `-nagoDemo`)
@@ -139,9 +143,11 @@ struct VPNView: View {
 
     /// 킬 스위치는 우리 터널(wg)로만 한다. 자동 연결은 ikev2로 못 하니 wg로 민다.
     /// 유니콘 HTTPS도 우리 터널이라 자동 연결은 그대로 된다.
+    /// 임시 서버는 WireGuard만 있다.
     private var effectiveProto: VPNProto {
         if killSwitch { return .wireguard }
         if proto == .unicorn { return .unicorn }
+        if region.onDemand { return .wireguard }
         return autoConnect != .off ? .wireguard : proto
     }
 
@@ -161,7 +167,7 @@ struct VPNView: View {
         if effectiveProto == .wireguard, wgEngine == "neptun" { parts[0] += " ×\(wgLoops)" }
         if fastMode, effectiveProto != .wireguard { parts.append("gcm") }
         if adblock {
-            parts.append("adblock")
+            parts.append(region.onDemand ? "adblock n/a · temp server" : "adblock")
         } else if effectiveProto != .ikev2, let dns = DNSList.parse(customDNS) {
             parts.append("dns " + dns.joined(separator: ","))
         }
@@ -565,28 +571,54 @@ struct VPNView: View {
             .font(Term.mono(11))
 
             HStack(spacing: 8) {
-                ForEach(VPNRegion.allCases) { option in
-                    RegionCard(region: option,
-                               selected: option == shownRegion,
-                               live: option == savedRegion && vpn.status == .connected,
-                               measured: probe.rtt[option],
-                               fastest: option == fastestRegion) {
-                        select(option)
-                    }
+                ForEach(VPNRegion.fixed) { option in
+                    regionCard(option)
                 }
             }
             .disabled(locked)
             .opacity(locked ? 0.55 : 1)
             .accessibilityHint(shownRegion.detail)
-            .confirmationDialog("hop to \(hopTarget?.geo.city ?? "")?", isPresented: hopping,
-                                titleVisibility: .visible, presenting: hopTarget) { target in
-                Button("hop → \(target.rawValue) · \(target.geo.city)") {
-                    connectTask = Task { await hop(to: target) }
+            // 임시 서버 나라(관리자용): 고르면 그 나라에 서버를 새로 만든다
+            if !Edition.isUser {
+                Text("// on demand · new server ~1m · deletes itself after 30m idle")
+                    .font(Term.mono(11))
+                    .foregroundStyle(Term.muted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .padding(.top, 4)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(VPNRegion.allCases.filter(\.onDemand)) { option in
+                            regionCard(option)
+                                .frame(width: 80)
+                        }
+                    }
                 }
-                Button("stay on \(savedRegion.rawValue)", role: .cancel) {}
-            } message: { target in
-                Text("disconnects \(savedRegion.rawValue), then connects \(target.rawValue)")
+                .scrollClipDisabled()
+                .disabled(locked)
+                .opacity(locked ? 0.55 : 1)
             }
+        }
+        .confirmationDialog("hop to \(hopTarget?.geo.city ?? "")?", isPresented: hopping,
+                            titleVisibility: .visible, presenting: hopTarget) { target in
+            Button("hop → \(target.rawValue) · \(target.geo.city)") {
+                connectTask = Task { await hop(to: target) }
+            }
+            Button("stay on \(savedRegion.rawValue)", role: .cancel) {}
+        } message: { target in
+            Text(target.onDemand
+                 ? "disconnects \(savedRegion.rawValue), then makes a new server in \(target.geo.city) (~1m)"
+                 : "disconnects \(savedRegion.rawValue), then connects \(target.rawValue)")
+        }
+    }
+
+    private func regionCard(_ option: VPNRegion) -> some View {
+        RegionCard(region: option,
+                   selected: option == shownRegion,
+                   live: option == savedRegion && vpn.status == .connected,
+                   measured: probe.rtt[option],
+                   fastest: option == fastestRegion) {
+            select(option)
         }
     }
 
@@ -862,9 +894,9 @@ struct VPNView: View {
         try vpn.connectTunnel()
     }
 
-    /// 광고 차단 DNS → 직접 넣은 DNS → 1.1.1.1
+    /// 광고 차단 DNS → 직접 넣은 DNS → 1.1.1.1. 임시 서버엔 차단 DNS가 없다.
     private var wgDNS: [String] {
-        if adblock { return ["10.53.53.53"] }
+        if adblock, !region.onDemand { return ["10.53.53.53"] }
         return DNSList.parse(customDNS) ?? ["1.1.1.1"]
     }
 
