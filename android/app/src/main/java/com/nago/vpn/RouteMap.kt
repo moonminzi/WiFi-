@@ -42,6 +42,7 @@ import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.ln
+import kotlin.math.log10
 import kotlin.math.log2
 import kotlin.math.max
 import kotlin.math.min
@@ -302,6 +303,9 @@ fun RouteMap(
     top: Dp,
     bottom: Dp,
     onSelect: ((VpnRegion) -> Unit)?,
+    /** 지금 받는·보내는 속도(바이트/초). 연결돼 있을 때 경로 위 흐름의 양 */
+    flowDown: Double = 0.0,
+    flowUp: Double = 0.0,
 ) {
     val context = LocalContext.current
     remember { WorldDots.load(context) }
@@ -309,13 +313,15 @@ fun RouteMap(
     val measurer = rememberTextMeasurer()
     var now by remember { mutableDoubleStateOf(nowSeconds()) }
     val select by rememberUpdatedState(onSelect)
+    val flowing = stage == RouteStage.Connected && maxOf(flowDown, flowUp) > FlowLane.FLOOR
 
     // 움직일 게 있을 때만 프레임마다 다시 그린다(연결 중엔 계속, 바뀐 뒤엔 잠깐, 연결된 뒤엔 신호가 퍼지는 동안)
-    LaunchedEffect(stage, destination, hop) {
-        val wake = when (stage) {
-            RouteStage.Connected -> 10.0
-            RouteStage.Idle, RouteStage.Failed -> 3.5
-            RouteStage.Connecting -> Double.MAX_VALUE
+    // 흐름이 있으면 계속, 멈추면 흐르던 점이 서서히 사라지는 동안(2.5초) 더 그린다
+    LaunchedEffect(stage, destination, hop, flowing) {
+        val wake = when {
+            stage == RouteStage.Connecting || flowing -> Double.MAX_VALUE
+            stage == RouteStage.Connected -> 10.0
+            else -> 3.5
         }
         val end = nowSeconds() + wake
         while (nowSeconds() < end) {
@@ -333,7 +339,61 @@ fun RouteMap(
             },
     ) {
         model.sync(stage, destination, hop, now)
+        model.flow(flowDown, flowUp, now)
         model.draw(this, measurer, now, top.toPx(), bottom.toPx())
+    }
+}
+
+/**
+ * 경로 위 흐름 한 줄(받기 또는 보내기). 속도가 1초마다 바뀌어도 점이 튀지 않게 상태를 이어 간다(iOS FlowLane과 같음):
+ * 자리(phase)는 매 프레임 속도만큼 더해 가고, 양·속도는 목표값을 부드럽게 따라가며,
+ * 주고받는 게 멈추면 점이 계속 흐르면서 1.5초쯤에 걸쳐 사라진다.
+ */
+class FlowLane {
+    /** 로그 눈금 속도: 400 B/s → 0, 4 MB/s → 4 */
+    var level = 0.0
+        private set
+    /** 보이는 정도 0…1 */
+    var amount = 0.0
+        private set
+    /** 지금까지 흐른 거리(경로 한 번 = 1) */
+    var phase = 0.0
+        private set
+
+    /** 속도에 맞는 점 개수 */
+    val count get() = minOf(SLOTS.toDouble(), maxOf(2.0, 2 + level * 3.5))
+    /** 지금 보이는 점 개수. [count]를 1초에 4개씩만 따라가서 점 하나가 0.25초에 걸쳐 나타나고 사라진다 */
+    var shown = 2.0
+        private set
+
+    fun step(rate: Double, active: Boolean, dt: Double) {
+        val on = active && rate > FLOOR
+        if (on) {
+            val target = minOf(4.0, log10(rate / FLOOR))
+            level += (target - level) * (1 - exp(-dt / 0.8))
+        }
+        amount += ((if (on) 1.0 else 0.0) - amount) * (1 - exp(-dt / if (on) 0.35 else 0.5))
+        if (amount < 0.002 && !on) amount = 0.0
+        phase = (phase + (0.22 + 0.08 * level) * dt) % 1.0
+        shown += (count - shown).coerceIn(-4 * dt, 4 * dt)
+    }
+
+    companion object {
+        /** 이보다 느리면(바이트/초) 흐름이 없는 것으로 본다 */
+        const val FLOOR = 400.0
+        const val SLOTS = 18
+        /** 점이 늘거나 줄 때 앞에서부터 켜고 끄는 자리. 몇 개를 켜든 경로 위에 고르게 퍼진다(반전 비트 순서). */
+        val offsets = DoubleArray(SLOTS) { i ->
+            var x = 0.0
+            var f = 0.5
+            var n = i
+            while (n > 0) {
+                if (n and 1 == 1) x += f
+                f /= 2
+                n = n shr 1
+            }
+            x
+        }
     }
 }
 
@@ -352,6 +412,9 @@ class RouteMapModel {
     private var framing = Framing.Route
     private var flight: Flight? = null
     private var focusAt: Double? = null
+    private val down = FlowLane()
+    private val up = FlowLane()
+    private var flowAt: Double? = null
     private var w = 0.0
     private var h = 0.0
     private var top = 0.0
@@ -362,6 +425,15 @@ class RouteMapModel {
     private var dotLayers: List<Triple<Path, Path, Float>> = emptyList()
 
     // MARK: 상태 맞추기
+
+    fun flow(downRate: Double, upRate: Double, now: Double) {
+        // 멈춰 있던 뒤 첫 프레임에 한꺼번에 건너뛰지 않게
+        val dt = minOf(0.1, maxOf(0.0, flowAt?.let { now - it } ?: 0.0))
+        flowAt = now
+        val active = stage == RouteStage.Connected
+        down.step(downRate, active, dt)
+        up.step(upRate, active, dt)
+    }
 
     fun sync(newStage: RouteStage, newDestination: VpnRegion, hop: String?, now: Double) {
         if (!started) {
@@ -670,6 +742,11 @@ class RouteMapModel {
             }
         }
 
+        // 다 그은 경로 위로 실제 주고받는 만큼 점이 흐른다(끊기면 서서히 사라지고, 경로가 지워질 땐 같이 흐려진다)
+        if (r != null && r.finish != null && head > 0.98 && down.amount + up.amount > 0) {
+            drawFlow(this, ::at, fade)
+        }
+
         drawNodes(this, tm, view, destination)
         drawYou(this, tm, view)
 
@@ -699,6 +776,31 @@ class RouteMapModel {
                 Size(6 * density, 11 * density))
         }
     }
+
+    /** 받는 건 목적지 → you(초록), 보내는 건 you → 목적지(하늘색). 속도가 빠를수록 점이 많고 빠르다(로그 눈금). */
+    private fun drawFlow(s: DrawScope, at: (Double) -> Offset, fade: Double) = with(s) {
+        for ((lane, color, toward, dotDp) in listOf(
+            Lane(down, Term.green, false, 3.2f),
+            Lane(up, Term.key, true, 2.4f),
+        )) {
+            if (lane.amount <= 0) continue
+            val count = lane.shown
+            val size = dotDp * density
+            for ((i, offset) in FlowLane.offsets.withIndex()) {
+                // 마지막 하나는 늘고 주는 만큼만 보여서 개수가 바뀔 때도 툭 생기거나 사라지지 않는다
+                val weight = minOf(1.0, count - i)
+                if (weight <= 0) break
+                var f = (lane.phase + offset) % 1.0
+                if (!toward) f = 1 - f
+                val alpha = (0.25 + 0.75 * sin(PI * f)) * lane.amount * weight * fade   // 양 끝에선 흐려진다
+                if (alpha <= 0.01) continue
+                val p = at(f)
+                drawRect(color.copy(alpha = alpha.toFloat()), Offset(p.x - size / 2, p.y - size / 2), Size(size, size))
+            }
+        }
+    }
+
+    private data class Lane(val lane: FlowLane, val color: Color, val toward: Boolean, val size: Float)
 
     private fun drawNodes(s: DrawScope, tm: TextMeasurer, view: View, highlighted: VpnRegion?) {
         for (region in VpnRegion.entries) {

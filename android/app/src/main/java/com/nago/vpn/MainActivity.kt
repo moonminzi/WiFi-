@@ -580,6 +580,9 @@ class MainActivity : ComponentActivity() {
                             top = top + 56.dp,
                             bottom = overlap,
                             onSelect = if (locked) null else { r -> select(r, link) },
+                            // 앱 안 wg로 연결돼 있으면 엔진이 알려 준 속도만큼 경로 위로 점이 흐른다
+                            flowDown = if (connected) ui.meter.current?.down ?: 0.0 else 0.0,
+                            flowUp = if (connected) ui.meter.current?.up ?: 0.0 else 0.0,
                         )
                     }
                     Box(Modifier.matchParentSize().stateGlow(pill))

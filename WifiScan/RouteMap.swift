@@ -55,6 +55,8 @@ struct RouteMap: View {
             .onChange(of: hop) { _, _ in wake(for: 2) }
             // 레이더가 켜지고 꺼질 때 서서히(꺼지는 동안 그릴 시간)
             .onChange(of: scanning) { _, _ in wake(for: 1.2) }
+            // 주고받는 게 멈추면 흐르던 점이 서서히 사라지는 동안 더 그린다
+            .onChange(of: flowing) { _, now in if !now { wake(for: 2.5) } }
             .task(id: awakeUntil) { await sleepWhenIdle() }
     }
 
@@ -109,7 +111,11 @@ struct RouteMap: View {
     /// 계속 그려야 하는 움직임(흐름·레이더). 흐름은 주고받는 게 있을 때만 — 가만있으면 멈춰서 배터리를 아낀다
     private var moving: Bool {
         if reduceMotion { return false }
-        return scanning || (stage == .connected && flowDown + flowUp > 1500)
+        return scanning || flowing
+    }
+
+    private var flowing: Bool {
+        stage == .connected && max(flowDown, flowUp) > RouteMapModel.FlowLane.floor
     }
 
     private func wake(for seconds: Double) {
@@ -148,8 +154,9 @@ final class RouteMapModel {
     private var size = CGSize.zero
     private var reduceMotion = false
     private var chrome: RouteMap.Chrome = .boxed
-    private var flowDown = 0.0
-    private var flowUp = 0.0
+    private var down = FlowLane()
+    private var up = FlowLane()
+    private var flowAt: Date?
     private var scanning = false
     private var scanAt = Date.distantPast
     /// 검사가 끝난 시각(레이더가 서서히 사라진다)
@@ -206,9 +213,52 @@ final class RouteMapModel {
         }
     }
 
+    /// 경로 위 흐름 한 줄(받기 또는 보내기). 속도가 1초마다 바뀌어도 점이 튀지 않게 상태를 이어 간다:
+    /// 자리(phase)는 매 프레임 속도만큼 더해 가고, 양·속도는 목표값을 부드럽게 따라가며,
+    /// 주고받는 게 멈추면 점이 계속 흐르면서 1.5초쯤에 걸쳐 사라진다.
+    struct FlowLane {
+        /// 이보다 느리면(바이트/초) 흐름이 없는 것으로 본다
+        static let floor = 400.0
+        static let slots = 18
+        /// 점이 늘거나 줄 때 앞에서부터 켜고 끄는 자리. 몇 개를 켜든 경로 위에 고르게 퍼진다(반전 비트 순서).
+        static let offsets: [Double] = (0..<slots).map { i in
+            var x = 0.0, f = 0.5, n = i
+            while n > 0 { if n & 1 == 1 { x += f }; f /= 2; n >>= 1 }
+            return x
+        }
+
+        /// 로그 눈금 속도: 400 B/s → 0, 4 MB/s → 4
+        var level = 0.0
+        /// 보이는 정도 0…1
+        var amount = 0.0
+        /// 지금까지 흐른 거리(경로 한 번 = 1)
+        var phase = 0.0
+
+        /// 속도에 맞는 점 개수
+        var count: Double { min(Double(Self.slots), max(2, 2 + level * 3.5)) }
+        /// 지금 보이는 점 개수. count를 1초에 4개씩만 따라가서 점 하나가 0.25초에 걸쳐 나타나고 사라진다
+        var shown = 2.0
+
+        mutating func step(rate: Double, active: Bool, dt: Double) {
+            let on = active && rate > Self.floor
+            if on {
+                let target = min(4, log10(rate / Self.floor))
+                level += (target - level) * (1 - exp(-dt / 0.8))
+            }
+            amount += ((on ? 1 : 0) - amount) * (1 - exp(-dt / (on ? 0.35 : 0.5)))
+            if amount < 0.002, !on { amount = 0 }
+            phase = (phase + (0.22 + 0.08 * level) * dt).truncatingRemainder(dividingBy: 1)
+            shown += min(4 * dt, max(-4 * dt, count - shown))
+        }
+    }
+
     func flow(down: Double, up: Double, scanning newScanning: Bool, now: Date) {
-        flowDown = down
-        flowUp = up
+        // 멈춰 있던 뒤 첫 프레임에 한꺼번에 건너뛰지 않게
+        let dt = min(0.1, max(0, flowAt.map { now.timeIntervalSince($0) } ?? 0))
+        flowAt = now
+        let active = stage == .connected
+        self.down.step(rate: down, active: active, dt: dt)
+        self.up.step(rate: up, active: active, dt: dt)
         if newScanning, !scanning {
             // 사라지는 중에 다시 켜지면 각도가 튀지 않게 이어 간다
             let resuming = scanEndAt.map { now.timeIntervalSince($0) < 0.6 } ?? false
@@ -532,9 +582,9 @@ final class RouteMapModel {
             }
         }
 
-        // 다 그은 경로 위로 실제 주고받는 만큼 점이 흐른다
-        if stage == .connected, let run, run.finish != nil, head > 0.98, !reduceMotion {
-            drawFlow(&ctx, at: at, now: now)
+        // 다 그은 경로 위로 실제 주고받는 만큼 점이 흐른다(끊기면 서서히 사라지고, 경로가 지워질 땐 같이 흐려진다)
+        if let run, run.finish != nil, head > 0.98, !reduceMotion, down.amount + up.amount > 0 {
+            drawFlow(&ctx, at: at, fade: fade)
         }
 
         drawNodes(&ctx, view: view, highlighted: destination)
@@ -568,24 +618,24 @@ final class RouteMapModel {
     }
 
     /// 받는 건 목적지 → you(초록), 보내는 건 you → 목적지(하늘색). 속도가 빠를수록 점이 많고 빠르다(로그 눈금).
-    private func drawFlow(_ ctx: inout GraphicsContext, at: (Double) -> CGPoint, now: Date) {
-        let t = now.timeIntervalSinceReferenceDate
-        let lanes: [(rate: Double, color: Color, toward: Bool, size: Double)] = [
-            (flowDown, Term.green, false, 3.2),
-            (flowUp, Term.key, true, 2.4),
+    private func drawFlow(_ ctx: inout GraphicsContext, at: (Double) -> CGPoint, fade: Double) {
+        let lanes: [(lane: FlowLane, color: Color, toward: Bool, size: Double)] = [
+            (down, Term.green, false, 3.2),
+            (up, Term.key, true, 2.4),
         ]
-        for lane in lanes where lane.rate > 400 {
-            let level = log10(lane.rate / 400)           // 400 B/s → 0, 4 MB/s → 4
-            let count = Int(min(18, max(2, (2 + level * 3.5).rounded())))
-            let speed = 0.22 + 0.08 * min(level, 4)
-            for i in 0..<count {
-                var f = (t * speed + Double(i) / Double(count)).truncatingRemainder(dividingBy: 1)
-                if !lane.toward { f = 1 - f }
+        for (lane, color, toward, s) in lanes where lane.amount > 0 {
+            let count = lane.shown
+            for (i, offset) in FlowLane.offsets.enumerated() {
+                // 마지막 하나는 늘고 주는 만큼만 보여서 개수가 바뀔 때도 툭 생기거나 사라지지 않는다
+                let weight = min(1, count - Double(i))
+                guard weight > 0 else { break }
+                var f = (lane.phase + offset).truncatingRemainder(dividingBy: 1)
+                if !toward { f = 1 - f }
+                let alpha = (0.25 + 0.75 * sin(.pi * f)) * lane.amount * weight * fade   // 양 끝에선 흐려진다
+                guard alpha > 0.01 else { continue }
                 let p = at(f)
-                let alpha = 0.25 + 0.75 * sin(.pi * f)   // 양 끝에선 흐려진다
-                let s = lane.size
                 ctx.fill(Path(CGRect(x: p.x - s / 2, y: p.y - s / 2, width: s, height: s)),
-                         with: .color(lane.color.opacity(alpha)))
+                         with: .color(color.opacity(alpha)))
             }
         }
     }

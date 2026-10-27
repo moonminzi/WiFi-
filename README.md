@@ -180,6 +180,7 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
 - **화면(2.0)**: iOS와 같은 route 지도가 위쪽을 채운다(`RouteMap.kt`, Compose Canvas). 점 세계 지도는 iOS 데이터를 `tools/worlddots-android.py`로 `assets/worlddots.txt`에 옮겨 쓴다. 단계마다 웨이포인트, 연결되면 그 나라로 날아가 확대·신호 고리. 나라 점이나 카드를 눌러 고르고, 연결 중에 고르면 갈아타기(hop)를 묻는다
   - 콘솔 판: 상태 꼬리표 · 도시 · 연결 시간 · 단계 막대(api → boot → tunnel → up) · 출구 줄(연결 전 isp IP, 연결 후엔 출구 나라가 맞는지 확인. neptun은 앱이 터널 밖이라 서버 주소) · 지역 카드(DynamoDB `/ping`으로 잰 실제 왕복 시간, 가장 빠른 곳에 `fast`) · 진행 기록
   - wg로 연결돼 있으면 엔진에 1초마다 바이트 수·핸드셰이크를 물어 속도 그래프와 "handshake 00:14 ago"를 보여 준다(3분 넘게 없으면 노랗게 — 엔진 문제를 바로 알아챌 수 있게)
+  - 경로 위 흐름 점(받기 초록 · 보내기 하늘색, iOS와 같음): 속도는 1초마다 바뀌지만 점마다 자리를 이어 가고(`FlowLane`), 양·속도는 부드럽게 따라가며, 트래픽이 0이 되면 계속 흐르면서 1.5초쯤에 걸쳐 사라진다. 점 개수는 1초에 4개씩만 바뀐다
   - settings → appearance: system / dark / light. 글꼴은 JetBrains Mono(OFL, `assets/OFL-JetBrainsMono.txt`)
   - 국기는 이모지 대신 지도와 같은 점(LED) 15×9 그림(`DotFlag` — iOS Console.swift와 안드로이드 Console.kt가 같은 그림·색). 기기·글꼴마다 이모지 모양이 달라지지 않는다
   - 햅틱: 나라 고를 때 틱, 단계마다 톡, 연결되면 확인, 실패하면 거절 진동(시스템 "터치 진동" 설정을 따름)
