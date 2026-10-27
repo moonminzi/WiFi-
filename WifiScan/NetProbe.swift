@@ -85,6 +85,22 @@ struct ExitInfo: Equatable {
         guard let ip = fields["ip"] else { return nil }
         return ExitInfo(ip: ip, country: fields["loc"] ?? "??", colo: fields["colo"] ?? "")
     }
+
+    /// 화면에서 IP 뒷부분을 가린다(스크린샷을 남에게 보여 줄 때). `210.182.248.204` → `210.182.•••.•••`,
+    /// IPv6는 앞 두 묶음만 남긴다. 회선·지역 정도는 알아볼 수 있고 집 주소는 안 보인다.
+    static func masked(_ ip: String) -> String {
+        if ip.contains(":") {
+            return ip.split(separator: ":", omittingEmptySubsequences: false).prefix(2).joined(separator: ":") + ":••••"
+        }
+        let parts = ip.split(separator: ".")
+        guard parts.count == 4 else { return "•••" }
+        return "\(parts[0]).\(parts[1]).•••.•••"
+    }
+
+    /// 글 안의 IPv4를 모두 가린다(net scan 결과 줄)
+    static func maskIPs(in text: String) -> String {
+        text.replacing(#/(\d{1,3}\.\d{1,3})\.\d{1,3}\.\d{1,3}/#) { "\($0.output.1).•••.•••" }
+    }
 }
 
 extension VPNRegion {

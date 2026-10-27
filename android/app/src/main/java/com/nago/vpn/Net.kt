@@ -30,6 +30,16 @@ val VpnRegion.awsRegion: String get() = detail.substringAfterLast(' ')
  */
 data class ExitInfo(val ip: String, val country: String, val colo: String) {
     companion object {
+        /**
+         * 화면에서 IP 뒷부분을 가린다(스크린샷을 남에게 보여 줄 때, iOS와 같음). `210.182.248.204` → `210.182.•••.•••`,
+         * IPv6는 앞 두 묶음만 남긴다. 회선·지역 정도는 알아볼 수 있고 집 주소는 안 보인다.
+         */
+        fun masked(ip: String): String {
+            if (':' in ip) return ip.split(':').take(2).joinToString(":") + ":••••"
+            val parts = ip.split('.')
+            return if (parts.size == 4) "${parts[0]}.${parts[1]}.•••.•••" else "•••"
+        }
+
         suspend fun fetch(): ExitInfo? = withContext(Dispatchers.IO) {
             runCatching {
                 val conn = URL("https://1.1.1.1/cdn-cgi/trace").openConnection() as HttpURLConnection

@@ -414,6 +414,8 @@ struct ScanPanel: View {
     let scan: NetScan
     let vpnOn: Bool
     let rescan: () -> Void
+    /// vpn 탭 isp 줄과 같은 설정: 켜져 있으면 exit 줄의 IP도 가린다
+    @AppStorage("hideIP") private var hideIP = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -467,7 +469,8 @@ struct ScanPanel: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(scan.checks) { check in
-                    row(symbol(check.level), color(check.level), check.id, check.detail,
+                    row(symbol(check.level), color(check.level), check.id,
+                        hideIP && check.id == "exit" ? ExitInfo.maskIPs(in: check.detail) : check.detail,
                         detailColor: check.level == .warn || check.level == .fail ? color(check.level) : Term.text)
                 }
                 if scan.running {

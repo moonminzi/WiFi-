@@ -30,7 +30,9 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -319,6 +321,8 @@ class MainActivity : ComponentActivity() {
         val meter = TrafficMeter()
         var handshakeMs by mutableLongStateOf(0L)
         var hopTo by mutableStateOf<VpnRegion?>(null)
+        /** isp·exit 줄의 IP를 가린다(줄을 누르면 바뀜, 기억해 둠) */
+        var hideIP by mutableStateOf(prefs.getBoolean("hideIP", false))
         /** 사용자가 cancel을 눌렀다(앱이 닫혀서 멈춘 것과 구분 — 그때는 터널을 건드리지 않는다) */
         var cancelRequested = false
         var connectedAt by mutableLongStateOf(prefs.getLong("connectedAt", 0L))
@@ -785,30 +789,33 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * `isp 211.36.1.9 · KR ICN · sites see this` — 밖에서 보이는 IP. 연결되면 고른 나라인지 맞춰 본다.
+     * `isp 211.36.1.9 · KR ICN` — 밖에서 보이는 IP. 연결되면 고른 나라인지 맞춰 본다.
      * neptun은 앱 자신이 터널 밖이라 출구를 직접 못 재니 서버 주소를 보여 준다.
+     * 누르면 IP 뒷부분을 가리거나 다시 보여 주고(스크린샷용, 기억해 둠), 길게 누르면 다시 잰다.
      */
+    @OptIn(ExperimentalFoundationApi::class)
     @Composable
     private fun ExitLine(connected: Boolean, wgUp: Boolean) {
         val bypass = connected && wgUp && NeptunVpnService.up.value
         val muted = SpanStyle(color = Term.muted)
         val num = SpanStyle(color = Term.num)
+        fun shown(ip: String) = if (ui.hideIP) ExitInfo.masked(ip) else ip
         val line = buildAnnotatedString {
             val exit = ui.exit
             when {
                 bypass -> {
                     val endpoint = prefs.getString("wgEndpoint", null)?.substringBeforeLast(':')
                     withStyle(muted) { append("exit ") }
-                    withStyle(num) { append(endpoint ?: "—") }
+                    withStyle(num) { append(endpoint?.let(::shown) ?: "—") }
                     withStyle(muted) { append(" · ${ui.savedRegion.countryCode} server") }
                 }
                 exit == null -> withStyle(muted) { append(if (connected) "exit checking…" else "isp checking…") }
                 else -> {
                     withStyle(muted) { append(if (connected) "exit " else "isp ") }
-                    withStyle(num) { append(exit.ip) }
+                    withStyle(num) { append(shown(exit.ip)) }
                     withStyle(muted) { append(" · ${exit.country}" + if (exit.colo.isEmpty()) "" else " ${exit.colo}") }
                     when {
-                        !connected -> withStyle(SpanStyle(color = Term.muted.copy(alpha = 0.7f))) { append(" · sites see this") }
+                        !connected -> Unit
                         exit.country == ui.savedRegion.countryCode -> withStyle(SpanStyle(color = Term.green)) { append(" ✓ matches") }
                         else -> withStyle(SpanStyle(color = Term.red)) { append(" ✗ not ${ui.savedRegion.countryCode}") }
                     }
@@ -820,8 +827,14 @@ class MainActivity : ComponentActivity() {
             style = Term.mono(12.sp),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.clickable(enabled = !bypass) {
-                work.launch { ui.exit = ExitInfo.fetch() }
+            modifier = Modifier.combinedClickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onLongClick = if (bypass) null else { { work.launch { ui.exit = ExitInfo.fetch() } } },
+            ) {
+                ui.hideIP = !ui.hideIP
+                prefs.edit().putBoolean("hideIP", ui.hideIP).apply()
+                haptic(HapticFeedbackConstants.CLOCK_TICK)
             },
         )
     }

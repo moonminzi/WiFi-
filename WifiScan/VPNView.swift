@@ -17,6 +17,8 @@ struct VPNView: View {
     @AppStorage("wgLoops") private var wgLoops = 2
     @AppStorage("vpnAutoConnect") private var autoConnect: VPNAutoConnect = .off
     @AppStorage("vpnKillSwitch") private var killSwitch = false
+    /// isp·exit 줄의 IP를 가린다(줄을 누르면 바뀜)
+    @AppStorage("hideIP") private var hideIP = false
     @AppStorage("vpnAllowLAN") private var allowLAN = true
     @AppStorage("vpnCustomDNS") private var customDNS = ""
 
@@ -407,17 +409,18 @@ struct VPNView: View {
     }
 
     /// `exit 54.199.12.4 · JP ✓` — 밖에서 보이는 IP가 고른 나라인지. 연결 전엔 지금 회선(isp) IP.
+    /// 누르면 IP 뒷부분을 가리거나 다시 보여 주고(스크린샷용, 기억해 둠), 길게 누르면 다시 잰다.
     private var exitLine: some View {
         let connected = vpn.status == .connected
         let label = connected ? "exit" : "isp"
         let line: Text
         if let exitInfo {
             let head = Text("\(label) ").foregroundStyle(Term.muted)
-                + Text(exitInfo.ip).foregroundStyle(Term.num)
+                + Text(hideIP ? ExitInfo.masked(exitInfo.ip) : exitInfo.ip).foregroundStyle(Term.num)
                 + Text(" · \(exitInfo.country)").foregroundStyle(Term.muted)
                 + Text(exitInfo.colo.isEmpty ? "" : " \(exitInfo.colo)").foregroundStyle(Term.muted)
             if !connected {
-                line = head + Text(" · sites see this").foregroundStyle(Term.muted.opacity(0.7))
+                line = head
             } else if onDevice {
                 line = head + Text(" · same line, sni split").foregroundStyle(Term.muted.opacity(0.7))
             } else if exitInfo.country == savedRegion.countryCode {
@@ -432,8 +435,11 @@ struct VPNView: View {
             .font(Term.mono(12))
             .lineLimit(1)
             .minimumScaleFactor(0.7)
-            .onTapGesture { Task { exitInfo = await ExitInfo.fetch() } }
-            .accessibilityHint("tap to check again")
+            .contentShape(Rectangle())
+            .onTapGesture { hideIP.toggle() }
+            .onLongPressGesture { Task { exitInfo = await ExitInfo.fetch() } }
+            .sensoryFeedback(.selection, trigger: hideIP)
+            .accessibilityHint(hideIP ? "tap to show the ip, hold to check again" : "tap to hide the ip, hold to check again")
     }
 
     /// 상태가 자리를 잡으면 출구 IP를 다시 보고, 끊겼으면 나라별 지연도 다시 잰다.

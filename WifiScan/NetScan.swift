@@ -129,7 +129,7 @@ final class NetScan {
         Check(id: "doh", detail: "encrypted dns reachable", level: .pass),
         Check(id: "tls", detail: "chain ends at a system root", level: .pass),
         Check(id: "ipv6", detail: "ipv6 available · rescan with vpn on to test leaks", level: .info),
-        Check(id: "exit", detail: "211.36.1.9 · KR · sites see this", level: .info),
+        Check(id: "exit", detail: "211.36.1.9 · KR", level: .info),
         Check(id: "quality", detail: "kr 4ms · jitter 1ms · loss 0/6", level: .pass),
     ]
 }
@@ -245,7 +245,7 @@ private enum Probes {
             return Check(id: "exit", detail: "trace unreachable", level: .warn)
         }
         let head = "\(info.ip) · \(info.country)"
-        guard vpnOn, let expected else { return Check(id: "exit", detail: head + " · sites see this", level: .info) }
+        guard vpnOn, let expected else { return Check(id: "exit", detail: head, level: .info) }
         if info.country == expected.countryCode { return Check(id: "exit", detail: head + " ✓", level: .pass) }
         return Check(id: "exit", detail: head + " ≠ \(expected.countryCode)", level: .fail)
     }
