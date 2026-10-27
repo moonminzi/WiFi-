@@ -257,7 +257,7 @@ struct SettingsView: View {
 
     private var aboutBlock: some View {
         TermBlock(label: "about") {
-            Text("nago vpn \(Self.version)")
+            Text("nago vpn \(Self.version) · \(Edition.label)")
             if !Edition.isUser {
                 Text("neptun ce18515 · wireguard-go 1.0.16")
                     .foregroundStyle(Term.muted)

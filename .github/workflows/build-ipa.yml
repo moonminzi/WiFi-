@@ -29,21 +29,26 @@ jobs:
           brew install xcodegen
           xcodegen
 
+      # 판마다 따로 컴파일한다: 관리자용(그대로)과 유저용(USER_EDITION — Edition.isUser가 컴파일 때 true로 고정돼 Info.plist와 상관없이 dash·속도 측정·엔진 설정이 숨는다).
+      # 같은 derivedData를 써서 두 번째는 Swift만 다시 컴파일한다(Rust·Go 라이브러리는 그대로).
       - name: Build (no signing)
         run: |
-          xcodebuild -project WifiScan.xcodeproj -scheme WifiScan -configuration Release \
-            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            build
-
-      # 같은 빌드로 IPA 두 개: 관리자용(그대로)과 유저용(Info.plist NAGOEdition = user — dash·속도 측정·엔진 설정 없음)
-      - name: Package IPAs
-        run: |
-          package() {  # 폴더, IPA 파일, 판(admin|user)
+          build() {  # 추가 컴파일 조건
+            xcodebuild -project WifiScan.xcodeproj -scheme WifiScan -configuration Release \
+              -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+              SWIFT_ACTIVE_COMPILATION_CONDITIONS="\$(inherited) $1" \
+              build
+          }
+          package() {  # 폴더, 판(admin|user)
             mkdir -p "$1/Payload"
             cp -R build/Build/Products/Release-iphoneos/WifiScan.app "$1/Payload/"
-            if [ "$3" = user ]; then
-              /usr/libexec/PlistBuddy -c "Add :NAGOEdition string user" "$1/Payload/WifiScan.app/Info.plist"
+            plist="$1/Payload/WifiScan.app/Info.plist"
+            if [ "$2" = user ]; then
+              /usr/libexec/PlistBuddy -c "Add :NAGOEdition string user" "$plist"
+            else
+              # 홈 화면에서 둘을 구분한다(유저용은 NAGO VPN 그대로)
+              /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName NAGO Admin" "$plist"
             fi
             # 재서명 도구가 권한을 그대로 가져가도록 entitlements를 바이너리에 박아 둔다(ad-hoc 서명).
             # 확장(PlugIns)을 먼저 서명해야 앱 서명이 깨지지 않는다. Info.plist를 고친 뒤에 서명한다.
@@ -51,11 +56,13 @@ jobs:
               "$1/Payload/WifiScan.app/PlugIns/WifiScanTunnel.appex"
             codesign --force --sign - --entitlements WifiScan/WifiScan.entitlements "$1/Payload/WifiScan.app"
             codesign -d --entitlements - "$1/Payload/WifiScan.app"
-            (cd "$1" && zip -qry "../$2" Payload)
           }
-          package admin WifiScan.ipa admin
-          package user WifiScan-user.ipa user
-          /usr/libexec/PlistBuddy -c "Print :NAGOEdition" user/Payload/WifiScan.app/Info.plist
+          build ""
+          package admin admin
+          build USER_EDITION
+          package user user
+          (cd admin && zip -qry ../WifiScan.ipa Payload)
+          (cd user && zip -qry ../WifiScan-user.ipa Payload)
 
       - uses: actions/upload-artifact@v4
         with:
