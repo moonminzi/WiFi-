@@ -177,8 +177,9 @@ final class RouteMapModel {
 
     /// 상단 HUD·하단 줄과 가장자리 흐림 높이
     private static let edgeFade: CGFloat = 34
-    /// 같은 도시(서울에서 kr)일 때 목적지를 도는 고리 반지름
-    private static let orbit: Double = 22
+    /// 같은 도시(서울에서 kr)일 때 목적지를 도는 고리 반지름. 22였을 땐 고리·웨이포인트 번호·you·꼬리표·신호 고리가
+    /// 한 점에 몰려 답답했다 → 크게 잡고 지도 확대는 조금 줄였다
+    private static let orbit: Double = 34
 
     // MARK: - 상태 맞추기
 
@@ -360,7 +361,11 @@ final class RouteMapModel {
         case .focus:
             return at(arc.b, z: focusZ)
         case .route:
-            if arc.local { return at(arc.b, z: focusZ - 0.35) }
+            if arc.local {
+                // 고리 아래에 꼬리표(you ⇄ kr · seoul)가 붙으니 서울을 가운데보다 12pt 위로
+                let z = focusZ - 0.6
+                return Camera(x: arc.b.x, y: arc.b.y + (shift - 12) / pow(2, z), z: z)
+            }
             let apex = arc.point(at: 0.5)
             let xs = [arc.a.x, arc.b.x, apex.x], ys = [arc.a.y, arc.b.y, apex.y]
             let minX = xs.min() ?? 0, maxX = xs.max() ?? 0, minY = ys.min() ?? 0, maxY = ys.max() ?? 0
@@ -567,6 +572,10 @@ final class RouteMapModel {
                 c.opacity = fade * max(pop, 0.01)
                 c.fill(Path(rect), with: .color(paper))
                 c.stroke(Path(rect), with: .color(failed && i == run.stops.count - 1 ? Term.red : Term.green), lineWidth: 1.2)
+                // 서울 고리에선 번호가 좁은 데 몰리니, 연결되고 1.5~2.5초 사이에 번호만 흐려지고 칸은 남는다
+                if local, let finish = run.finish {
+                    c.opacity *= 1 - RouteMath.smooth(1.5, 2.5, now.timeIntervalSince(finish.time))
+                }
                 // 번호는 경로 바깥쪽(위)에
                 let normal: CGVector
                 if local {
@@ -723,11 +732,16 @@ final class RouteMapModel {
             ctx.fill(Path(rect), with: .color(Term.green))
             ctx.stroke(Path(rect), with: .color(Term.green), lineWidth: 1.2)
             let text = stage == .connected ? "\(region.rawValue) · \(geo.city)" : region.rawValue
-            // 연결되면 고리(반지름 14) 밖에서 시작한다 — 안에서 시작하면 고리가 글자를 긋는다
-            let dx = arc.local && stage != .onDevice ? Self.orbit + 7 : 22
             // 목적지 나라는 땅 점이 초록으로 켜져서 초록 글자가 묻힌다 → 배경색 판 + 초록 테두리(꼬리표)
-            label(&ctx, text, at: CGPoint(x: x + dx, y: y), anchor: .leading, weight: .semibold, color: Term.green,
-                  backed: true, outline: Term.green.opacity(0.45))
+            if arc.local && stage != .onDevice {
+                // 서울에서 kr: you와 서버가 같은 점이라 이름표를 하나로 합쳐 고리 아래 가운데에
+                label(&ctx, "you ⇄ \(text)", at: CGPoint(x: x, y: y + Self.orbit + 24), anchor: .center,
+                      weight: .semibold, color: Term.green, backed: true, outline: Term.green.opacity(0.45))
+            } else {
+                // 연결되면 고리(반지름 14) 밖에서 시작한다 — 안에서 시작하면 고리가 글자를 긋는다
+                label(&ctx, text, at: CGPoint(x: x + 22, y: y), anchor: .leading, weight: .semibold, color: Term.green,
+                      backed: true, outline: Term.green.opacity(0.45))
+            }
         }
     }
 
@@ -750,8 +764,7 @@ final class RouteMapModel {
         if stage == .onDevice {
             label(&ctx, "you", at: CGPoint(x: p.x, y: p.y + 16), anchor: .center, color: Term.text, backed: true)
         } else if arc.local {
-            // 고리는 꼭대기에서 출발한다
-            label(&ctx, "you", at: CGPoint(x: p.x, y: p.y - Self.orbit - 10), anchor: .center, color: Term.text, backed: true)
+            // 서울에서 kr: you는 고리 아래 목적지 꼬리표(you ⇄ kr · seoul)에 같이 쓴다
         } else if p.x < 44 {
             // 화면 왼쪽 끝이면 왼쪽에 쓰면 잘린다 → 점 아래에
             label(&ctx, "you", at: CGPoint(x: max(p.x, 18), y: p.y + 16), anchor: .center, color: Term.text, backed: true)

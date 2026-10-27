@@ -51,6 +51,8 @@ run_device() {  # 이름표, 찾을 이름
   shoot "$label" "$udid" vpn-pulled -nagoTab 0 -nagoDemo idle -nagoScrollEnd NO -nagoRegion de -nagoPull 90
   # 목적지 나라 땅 점이 초록으로 켜진 위에 이름표(us · oregon)가 읽히는지
   shoot "$label" "$udid" vpn-connected-us -nagoTab 0 -nagoDemo connected -nagoScrollEnd NO -nagoRegion us
+  # 서울에서 kr: 큰 고리 + 아래 꼬리표 하나(you ⇄ kr · seoul), 번호는 흐려짐
+  shoot "$label" "$udid" vpn-connected-kr -nagoTab 0 -nagoDemo connected -nagoScrollEnd NO -nagoRegion kr
   shoot "$label" "$udid" vpn-connected-end -nagoTab 0 -nagoDemo connected -nagoScrollEnd YES
   shoot "$label" "$udid" vpn-idle-end -nagoTab 0 -nagoDemo idle -nagoScrollEnd YES
   shoot "$label" "$udid" dash -nagoTab 1 -nagoDemo connected
