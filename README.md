@@ -197,6 +197,11 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
 - CI 서명: 저장소 secrets에 `NAGO_KEYSTORE_B64`(nago-release.jks를 base64 한 줄로)와 `NAGO_KEYSTORE_PASS`를 넣으면 `build-apk.yml`이 서명된 release APK(`NagoVPN-release-apk`, com.nago.vpn — 기존 앱 위에 덮어 깔림)도 만든다. 공개 레포라 artifact는 누구나 받을 수 있어서 비밀번호는 넣지 않는다(앱에서 입력, 내장판은 로컬에서)
 - 설치: APK 파일을 열고 "출처를 알 수 없는 앱" 허용 → 설치 → 처음 연결할 때 "VPN 연결 요청" 허용
 
+## 릴리스
+
+- **iOS**: `build-ipa.yml`(main에 push하거나 직접 실행)이 IPA를 만들어 버전마다 릴리스 하나에 올린다 — 태그 `ios-<버전>`(예: `ios-2.0.3`), 파일 `NAGO-VPN-<버전>.ipa`. 버전은 `project.yml`의 `MARKETING_VERSION`(빌드 번호는 `CURRENT_PROJECT_VERSION`). 같은 버전을 다시 빌드하면 그 릴리스의 IPA·설명만 바뀐다. 설명은 `release-notes/ios-<버전>.md`
+- **안드로이드**: 태그 `android-<버전>`, 파일 `NAGO-VPN-<버전>.apk`(nago-release 키로 서명)
+
 ## 빌드 방법 A: XcodeGen (추천)
 
 ```bash
