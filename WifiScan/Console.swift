@@ -439,10 +439,12 @@ private struct PeekPressBody<Content: View, Peek: View>: View {
             .animation(.spring(response: 0.25, dampingFraction: 0.6), value: pressed)
             .overlay(alignment: .top) {
                 if peeking || forced {
+                    // 칸 위 끝에 높이 0인 틀을 두고 말풍선 아래 끝을 거기 맞춘다 → 말풍선이 칸 위로 솟는다
+                    // (누르는 손가락에 가리지 않게. 앞 줄 칸들은 먼저 그려져서 말풍선이 그 위에 덮인다)
                     peek()
                         .fixedSize()
-                        // 말풍선 아래 끝을 칸 위 6pt에(앞 줄 칸들은 먼저 그려져서 말풍선이 그 위에 덮인다)
-                        .alignmentGuide(.top) { $0[.bottom] + 6 }
+                        .padding(.bottom, 6)
+                        .frame(height: 0, alignment: .bottom)
                         .transition(.scale(scale: 0.6, anchor: .bottom).combined(with: .opacity))
                         .allowsHitTesting(false)
                 }

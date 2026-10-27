@@ -132,7 +132,7 @@ struct VPNView: View {
             steps = Array(demoSteps.prefix(2)).map { Step(at: $0.at, text: $0.text.replacingOccurrences(of: "jp", with: "us")) }
             errorText = "timeout: server not up after 4m, retry"
         default:
-            region = .jp
+            region = Demo.region ?? .jp
         }
     }
 
