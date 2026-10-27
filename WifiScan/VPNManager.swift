@@ -378,6 +378,17 @@ extension NEVPNStatus {
 
 // MARK: - 내장 비밀번호
 
+/// 앱 판. 기본은 관리자용(dash 탭, 속도 측정, 프로토콜·엔진 설정)이고,
+/// 친구에게 주는 유저용은 같은 빌드에서 Info.plist에 `NAGOEdition = user`를 넣어 만든다(CI가 IPA를 둘 만든다).
+/// 유저용: vpn·settings 탭만, 속도 측정·설정 꼬리표·링크 상세 없음, 설정은 화면 모양·비밀번호·연결·광고 차단·로그만.
+/// 스크린샷·디버그에선 실행 인자 `-nagoEdition user`로 고른다.
+enum Edition {
+    static let isUser: Bool = {
+        if let forced = UserDefaults.standard.string(forKey: "nagoEdition") { return forced == "user" }
+        return (Bundle.main.object(forInfoDictionaryKey: "NAGOEdition") as? String) == "user"
+    }()
+}
+
 /// 전달용 IPA에만 들어가는 비밀번호. 레포가 공개라서 소스에는 두지 않고,
 /// 빌드한 뒤 Info.plist에 `NAGOPresetPassword`를 넣는다. 없으면 직접 입력/키체인을 쓴다.
 enum VPNPreset {

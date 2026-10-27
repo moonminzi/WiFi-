@@ -33,9 +33,12 @@ struct WifiScanApp: App {
                     .tabItem { Label("vpn", systemImage: "lock.shield") }
                     .tag(0)
 
-                DashView()
-                    .tabItem { Label("dash", systemImage: "chart.bar.xaxis") }
-                    .tag(1)
+                // 서버·피어·비용 관리는 관리자용에만
+                if !Edition.isUser {
+                    DashView()
+                        .tabItem { Label("dash", systemImage: "chart.bar.xaxis") }
+                        .tag(1)
+                }
 
                 SettingsView()
                     .tabItem { Label("settings", systemImage: "gearshape") }

@@ -199,7 +199,9 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
 
 ## 릴리스
 
-- **iOS**: `build-ipa.yml`(main에 push하거나 직접 실행)이 IPA를 만들어 버전마다 릴리스 하나에 올린다 — 태그 `ios-<버전>`(예: `ios-2.0.3`), 파일 `NAGO-VPN-<버전>.ipa`. 버전은 `project.yml`의 `MARKETING_VERSION`(빌드 번호는 `CURRENT_PROJECT_VERSION`). 같은 버전을 다시 빌드하면 그 릴리스의 IPA·설명만 바뀐다. 설명은 `release-notes/ios-<버전>.md`
+- **iOS**: `build-ipa.yml`(main에 push하거나 직접 실행)이 IPA를 만들어 버전마다 릴리스 하나에 올린다 — 태그 `ios-<버전>`(예: `ios-2.0.5`), 파일 `NAGO-VPN-<버전>.ipa`(유저용)와 `NAGO-VPN-<버전>-admin.ipa`(관리자용).
+  - 두 IPA는 같은 빌드다. 유저용은 패키징할 때 `Info.plist`에 `NAGOEdition = user`를 넣은 것(`Edition.isUser`): vpn · settings 탭만, 속도 측정·설정 꼬리표·링크 상세 없음, settings는 화면 모양·비밀번호·자동 연결/킬 스위치·광고 차단·로그·버전만. 프로토콜·엔진은 기본값(auto · neptun). 친구용은 유저용 IPA에 `NAGOPresetPassword`를 넣어 재서명한다
+  - 스크린샷(`ui-shots`)에 `user-*` 장면(`-nagoEdition user`) 버전은 `project.yml`의 `MARKETING_VERSION`(빌드 번호는 `CURRENT_PROJECT_VERSION`). 같은 버전을 다시 빌드하면 그 릴리스의 IPA·설명만 바뀐다. 설명은 `release-notes/ios-<버전>.md`
 - **안드로이드**: 태그 `android-<버전>`, 파일 `NAGO-VPN-<버전>.apk`(nago-release 키로 서명)
 
 ## 빌드 방법 A: XcodeGen (추천)

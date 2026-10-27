@@ -36,23 +36,33 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build
 
-      - name: Package IPA
+      # 같은 빌드로 IPA 두 개: 관리자용(그대로)과 유저용(Info.plist NAGOEdition = user — dash·속도 측정·엔진 설정 없음)
+      - name: Package IPAs
         run: |
-          mkdir -p Payload
-          cp -R build/Build/Products/Release-iphoneos/WifiScan.app Payload/
-          # 재서명 도구가 권한을 그대로 가져가도록 entitlements를 바이너리에 박아 둔다(ad-hoc 서명).
-          # 확장(PlugIns)을 먼저 서명해야 앱 서명이 깨지지 않는다.
-          codesign --force --sign - --entitlements WifiScanTunnel/WifiScanTunnel.entitlements \
-            Payload/WifiScan.app/PlugIns/WifiScanTunnel.appex
-          codesign --force --sign - --entitlements WifiScan/WifiScan.entitlements Payload/WifiScan.app
-          codesign -d --entitlements - Payload/WifiScan.app/PlugIns/WifiScanTunnel.appex
-          codesign -d --entitlements - Payload/WifiScan.app
-          zip -qry WifiScan.ipa Payload
+          package() {  # 폴더, IPA 파일, 판(admin|user)
+            mkdir -p "$1/Payload"
+            cp -R build/Build/Products/Release-iphoneos/WifiScan.app "$1/Payload/"
+            if [ "$3" = user ]; then
+              /usr/libexec/PlistBuddy -c "Add :NAGOEdition string user" "$1/Payload/WifiScan.app/Info.plist"
+            fi
+            # 재서명 도구가 권한을 그대로 가져가도록 entitlements를 바이너리에 박아 둔다(ad-hoc 서명).
+            # 확장(PlugIns)을 먼저 서명해야 앱 서명이 깨지지 않는다. Info.plist를 고친 뒤에 서명한다.
+            codesign --force --sign - --entitlements WifiScanTunnel/WifiScanTunnel.entitlements \
+              "$1/Payload/WifiScan.app/PlugIns/WifiScanTunnel.appex"
+            codesign --force --sign - --entitlements WifiScan/WifiScan.entitlements "$1/Payload/WifiScan.app"
+            codesign -d --entitlements - "$1/Payload/WifiScan.app"
+            (cd "$1" && zip -qry "../$2" Payload)
+          }
+          package admin WifiScan.ipa admin
+          package user WifiScan-user.ipa user
+          /usr/libexec/PlistBuddy -c "Print :NAGOEdition" user/Payload/WifiScan.app/Info.plist
 
       - uses: actions/upload-artifact@v4
         with:
           name: WifiScan-ipa
-          path: WifiScan.ipa
+          path: |
+            WifiScan.ipa
+            WifiScan-user.ipa
 
       # 버전마다 릴리스 하나(ios-2.0.3 같은 태그). 같은 버전을 다시 빌드하면 그 릴리스의 IPA·설명만 바꾼다.
       # 설명은 release-notes/ios-<버전>.md가 있으면 그것 + 설치 안내.
@@ -60,23 +70,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          plist=Payload/WifiScan.app/Info.plist
+          plist=admin/Payload/WifiScan.app/Info.plist
           version=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$plist")
           build=$(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" "$plist")
           tag="ios-${version}"
-          asset="NAGO-VPN-${version}.ipa"
-          cp WifiScan.ipa "$asset"
+          user_asset="NAGO-VPN-${version}.ipa"
+          admin_asset="NAGO-VPN-${version}-admin.ipa"
+          cp WifiScan-user.ipa "$user_asset"
+          cp WifiScan.ipa "$admin_asset"
           {
             if [ -f "release-notes/ios-${version}.md" ]; then cat "release-notes/ios-${version}.md"; echo; fi
             echo "---"
+            echo "- \`${user_asset}\` — 유저용(친구에게 주는 것): vpn · settings만"
+            echo "- \`${admin_asset}\` — 관리자용: dash 탭 · 속도 측정 · 프로토콜·엔진 설정"
+            echo
             echo "NAGO VPN iOS ${version} (${build}) · \`${GITHUB_SHA::7}\`"
             echo
             echo "서명 안 된 IPA입니다(entitlements 포함 ad-hoc 서명). 본인 인증서로 재서명 후 설치하세요."
           } > notes.md
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$asset" --clobber
+            gh release upload "$tag" "$user_asset" "$admin_asset" --clobber
             gh release edit "$tag" --title "NAGO VPN iOS ${version}" --notes-file notes.md
           else
-            gh release create "$tag" "$asset" --target "$GITHUB_SHA" \
+            gh release create "$tag" "$user_asset" "$admin_asset" --target "$GITHUB_SHA" \
               --title "NAGO VPN iOS ${version}" --notes-file notes.md
           fi

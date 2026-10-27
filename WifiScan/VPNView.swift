@@ -280,7 +280,10 @@ struct VPNView: View {
                 scanPanel
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
-            speedPanel
+            // 속도 측정(설정끼리 비교하는 도구)은 관리자용에만
+            if !Edition.isUser {
+                speedPanel
+            }
         }
         .padding(.top, 8)
         // 패널이 생기고 사라질 때 툭 끊기지 않게
@@ -394,7 +397,7 @@ struct VPNView: View {
             if !busy, vpn.status == .connected, traffic.hasData {
                 TrafficPanel(meter: traffic)
                     .transition(.move(edge: .top).combined(with: .opacity))
-            } else if !busy, vpn.status == .connected {
+            } else if !busy, vpn.status == .connected, !Edition.isUser {
                 Text(linkStats.map { "link · " + $0 } ?? (vpn.activeProto == .ikev2 ? "link · ikev2 system tunnel" : "link · waiting for stats…"))
                     .font(Term.mono(12))
                     .foregroundStyle(linkStats == nil ? Term.muted : Term.green)
@@ -402,7 +405,10 @@ struct VPNView: View {
                     .minimumScaleFactor(0.7)
             }
 
-            FlagRow(flags: flags)
+            // 지금 설정(wg/neptun ×2 · adblock …) 꼬리표는 관리자용에만
+            if !Edition.isUser {
+                FlagRow(flags: flags)
+            }
         }
         .animation(.snappy(duration: 0.35), value: busy)
         .animation(.snappy(duration: 0.35), value: vpn.status)
@@ -505,6 +511,7 @@ struct VPNView: View {
         switch vpn.status {
         case .connected:
             if vpn.activeProto == .unicorn { return "up → on-device · unicorn" }
+            if Edition.isUser { return "up → \(savedRegion.rawValue)" }
             return "up → \(savedRegion.rawValue)" + (vpn.activeProto.map { " · \($0.label)" } ?? "")
         case .connecting: return "connecting"
         case .reasserting: return "reconnecting"

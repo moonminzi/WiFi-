@@ -49,16 +49,27 @@ struct SettingsView: View {
                 StatusLine(kind: .warn, text: "locked while connected")
             }
             appearanceBlock
-            accountBlock
-            protocolBlock
-            if proto == .unicorn {
-                unicornBlock
+            if Edition.isUser {
+                // 유저용: 고를 것만. 프로토콜·엔진은 기본값(auto · neptun)을 그대로 쓴다
+                if preset == nil {
+                    accountBlock
+                }
+                connectionBlock
+                dnsBlock
+                logsBlock
+                aboutBlock
+            } else {
+                accountBlock
+                protocolBlock
+                if proto == .unicorn {
+                    unicornBlock
+                }
+                connectionBlock
+                dnsBlock
+                serverBlock
+                logsBlock
+                aboutBlock
             }
-            connectionBlock
-            dnsBlock
-            serverBlock
-            logsBlock
-            aboutBlock
         }
         .task {
             await vpn.reload()
@@ -83,8 +94,11 @@ struct SettingsView: View {
 
     private var accountBlock: some View {
         TermBlock(label: "account") {
-            TermField(key: "user", text: $username, placeholder: "wifiscan")
-            TermDivider()
+            // 유저용은 이름을 기본값(wifiscan) 그대로 쓰고 비밀번호만 받는다
+            if !Edition.isUser {
+                TermField(key: "user", text: $username, placeholder: "wifiscan")
+                TermDivider()
+            }
             if preset != nil || savedPassword {
                 HStack(spacing: 10) {
                     Text("pw")
@@ -198,17 +212,23 @@ struct SettingsView: View {
     private var dnsBlock: some View {
         TermBlock(label: "dns") {
             toggle("--adblock", isOn: $adblock)
-            TermDivider()
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                TermField(key: "custom", text: $customDNS, placeholder: "1.1.1.1", keyboard: .numbersAndPunctuation)
-                Text(dnsValid ? "wg" : "invalid")
-                    .font(Term.mono(12))
-                    .foregroundStyle(dnsValid ? Term.muted : Term.red)
+            if !Edition.isUser {
+                TermDivider()
+                customDNSRow
             }
-            .disabled(adblock)
-            .opacity(adblock ? 0.4 : 1)
         }
         .locked(locked)
+    }
+
+    private var customDNSRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            TermField(key: "custom", text: $customDNS, placeholder: "1.1.1.1", keyboard: .numbersAndPunctuation)
+            Text(dnsValid ? "wg" : "invalid")
+                .font(Term.mono(12))
+                .foregroundStyle(dnsValid ? Term.muted : Term.red)
+        }
+        .disabled(adblock)
+        .opacity(adblock ? 0.4 : 1)
     }
 
     private var serverBlock: some View {
@@ -238,8 +258,10 @@ struct SettingsView: View {
     private var aboutBlock: some View {
         TermBlock(label: "about") {
             Text("nago vpn \(Self.version)")
-            Text("neptun ce18515 · wireguard-go 1.0.16")
-                .foregroundStyle(Term.muted)
+            if !Edition.isUser {
+                Text("neptun ce18515 · wireguard-go 1.0.16")
+                    .foregroundStyle(Term.muted)
+            }
         }
         .font(Term.mono(13))
     }
