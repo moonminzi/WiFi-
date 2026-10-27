@@ -736,6 +736,9 @@ final class RouteMapModel {
         } else if arc.local {
             // 고리는 꼭대기에서 출발한다
             label(&ctx, "you", at: CGPoint(x: p.x, y: p.y - Self.orbit - 10), anchor: .center, color: Term.text, backed: true)
+        } else if p.x < 44 {
+            // 화면 왼쪽 끝이면 왼쪽에 쓰면 잘린다 → 점 아래에
+            label(&ctx, "you", at: CGPoint(x: max(p.x, 18), y: p.y + 16), anchor: .center, color: Term.text, backed: true)
         } else {
             label(&ctx, "you", at: CGPoint(x: p.x - 12, y: p.y), anchor: .trailing, color: Term.text, backed: true)
         }
