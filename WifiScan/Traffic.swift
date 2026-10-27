@@ -35,6 +35,16 @@ final class TrafficMeter {
         last = nil
     }
 
+    /// 터널이 쌓아 둔 최근 속도로 통째로 바꾼다. 앱이 안 보고 있던 동안(다른 탭, 앱 밖)도 이어져 있다.
+    func load(history rates: [[Double]], rx: UInt64, tx: UInt64, at now: Date = Date()) {
+        history = rates.suffix(Self.window).compactMap { $0.count == 2 ? Rate(down: $0[0], up: $0[1]) : nil }
+        current = history.last
+        totalDown = rx
+        totalUp = tx
+        peakDown = max(peakDown, history.map(\.down).max() ?? 0)
+        last = (now, rx, tx)
+    }
+
     func add(rx: UInt64, tx: UInt64, at now: Date = Date()) {
         totalDown = rx
         totalUp = tx

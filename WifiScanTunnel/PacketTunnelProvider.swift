@@ -23,6 +23,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var neptun: NeptunEngine?
     private var current: Settings?
     private var watchdog: Task<Void, Never>?
+    /// 켜져 있는 동안 1초마다 주고받은 양을 재서 최근 1분 속도([받기, 보내기] 바이트/초, 오래된 것부터)를 쌓는다.
+    /// 기록을 앱이 아니라 터널이 갖고 있어서 앱을 닫거나 탭을 오가도 그래프가 처음부터 다시 그려지지 않는다.
+    private var sampler: Task<Void, Never>?
+    private var traffic: [[Double]] = []
+    private var lastSample: (at: Date, rx: UInt64, tx: UInt64)?
     /// 유니콘 HTTPS로 떴을 때의 스택. 패킷은 아래 큐에서만 다룬다.
     private var unicorn: UnicornStack?
     private let unicornQueue = DispatchQueue(label: "nago.vpn.unicorn", qos: .userInitiated)
@@ -87,9 +92,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 report["stats"] = unicorn.summary
             } else if let stats = await self.stats() {
                 report["stats"] = stats.summary
-                // 앱이 1초마다 받아 속도(차이)를 낸다
                 report["rx"] = stats.rx
                 report["tx"] = stats.tx
+                // 최근 1분 속도. 앱은 이걸로 그래프를 그린다(예전 앱은 rx·tx 차이로 직접 냈다)
+                report["history"] = self.traffic
             } else {
                 report["stats"] = ""
             }
@@ -122,6 +128,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     self?.journal.add("✗ start: \(error.localizedDescription)")
                 } else {
                     self?.startWatchdog(quick: onDemand)
+                    self?.startSampler()
                 }
                 completionHandler(error)
             }
@@ -137,6 +144,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func stop(reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         watchdog?.cancel()
         watchdog = nil
+        sampler?.cancel()
+        sampler = nil
         journal.add("stop · reason \(reason.rawValue)")
         if let unicorn {
             self.unicorn = nil
@@ -340,6 +349,33 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         peer.persistentKeepAlive = 25
 
         return TunnelConfiguration(name: "nago", interface: interface, peers: [peer])
+    }
+
+    // MARK: 속도 기록
+
+    @MainActor
+    private func startSampler() {
+        sampler?.cancel()
+        traffic = []
+        lastSample = nil
+        sampler = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if let s = await self.stats() { self.sample(rx: s.rx, tx: s.tx, at: Date()) }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    /// 지난 번과의 차이로 속도 한 칸을 더한다. 엔진이 다시 떠서 숫자가 0부터 세면 그 한 번은 건너뛴다.
+    /// 기기가 잠들어 오래 비면 그동안의 평균 한 칸이 된다.
+    @MainActor
+    private func sample(rx: UInt64, tx: UInt64, at now: Date) {
+        defer { lastSample = (now, rx, tx) }
+        guard let last = lastSample, now > last.at, rx >= last.rx, tx >= last.tx else { return }
+        let dt = now.timeIntervalSince(last.at)
+        traffic.append([Double(rx - last.rx) / dt, Double(tx - last.tx) / dt])
+        if traffic.count > 60 { traffic.removeFirst(traffic.count - 60) }
     }
 
     // MARK: 서버 깨우기 / 주소 따라가기

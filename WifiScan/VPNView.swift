@@ -706,8 +706,8 @@ struct VPNView: View {
         return vpn.status.isActive ? .danger : .primary
     }
 
-    /// 연결돼 있는 동안 터널 확장에 상태를 묻는다(ikev2는 시스템 터널이라 답이 없다).
-    /// 속도를 내려고 1초마다 묻는다(이 탭이 보이는 동안만).
+    /// 연결돼 있는 동안 터널 확장에 상태를 묻는다(ikev2는 시스템 터널이라 답이 없다). 이 탭이 보이는 동안 1초마다.
+    /// 속도 그래프는 터널이 쌓아 둔 최근 1분을 그대로 받아서, 탭을 오가거나 앱을 나갔다 와도 이어진다.
     private func pollLink() async {
         guard vpn.status == .connected else {
             linkStats = nil
@@ -715,11 +715,16 @@ struct VPNView: View {
             return
         }
         guard !Demo.on else { return }
-        traffic.reset()
         while !Task.isCancelled {
             if let report = await vpn.tunnelReport() {
                 if let stats = report.stats, !stats.isEmpty { linkStats = stats }
-                if let rx = report.rx, let tx = report.tx { traffic.add(rx: rx, tx: tx) }
+                if let rx = report.rx, let tx = report.tx {
+                    if let history = report.history {
+                        traffic.load(history: history, rx: rx, tx: tx)
+                    } else {
+                        traffic.add(rx: rx, tx: tx)   // 예전 터널 확장(기록 없음)
+                    }
+                }
             }
             try? await Task.sleep(for: .seconds(1))
         }

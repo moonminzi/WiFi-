@@ -188,6 +188,7 @@ class NeptunVpnService : VpnService() {
         running = this
         up.value = true
         NagoLog.add("neptun: up → ${s.endpoint}")
+        LinkMonitor.start { stats() }
         watchNetwork()
         startWatchdog()
     }
@@ -214,7 +215,10 @@ class NeptunVpnService : VpnService() {
         }
         if (stopped && reason != null) NagoLog.add("neptun: $reason")
         session = null
-        if (running === this) running = null
+        if (running === this) {
+            running = null
+            LinkMonitor.stop()
+        }
         up.value = false
     }
 

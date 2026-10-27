@@ -318,8 +318,6 @@ class MainActivity : ComponentActivity() {
         var rtt by mutableStateOf<Map<VpnRegion, Int>>(emptyMap())
         var measuring by mutableStateOf(false)
         var probedAt = 0L
-        val meter = TrafficMeter()
-        var handshakeMs by mutableLongStateOf(0L)
         var hopTo by mutableStateOf<VpnRegion?>(null)
         /** isp·exit 줄의 IP를 가린다(줄을 누르면 바뀜, 기억해 둠) */
         var hideIP by mutableStateOf(prefs.getBoolean("hideIP", false))
@@ -547,22 +545,6 @@ class MainActivity : ComponentActivity() {
                 LinkState.Connecting -> Unit
             }
         }
-        // 앱 안 wg로 연결돼 있는 동안 1초마다 엔진에 바이트 수·핸드셰이크를 묻는다
-        LaunchedEffect(connected && wgUp) {
-            ui.meter.reset()
-            ui.handshakeMs = 0L
-            if (!(connected && wgUp)) return@LaunchedEffect
-            while (true) {
-                val stats = withContext(Dispatchers.IO) {
-                    if (NeptunVpnService.up.value) NeptunVpnService.stats() else WgVpn.stats(this@MainActivity)
-                }
-                stats?.let {
-                    ui.meter.add(it.rx, it.tx)
-                    ui.handshakeMs = it.handshakeMs
-                }
-                delay(1_000)
-            }
-        }
 
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
@@ -585,8 +567,8 @@ class MainActivity : ComponentActivity() {
                             bottom = overlap,
                             onSelect = if (locked) null else { r -> select(r, link) },
                             // 앱 안 wg로 연결돼 있으면 엔진이 알려 준 속도만큼 경로 위로 점이 흐른다
-                            flowDown = if (connected) ui.meter.current?.down ?: 0.0 else 0.0,
-                            flowUp = if (connected) ui.meter.current?.up ?: 0.0 else 0.0,
+                            flowDown = if (connected) LinkMonitor.meter.current?.down ?: 0.0 else 0.0,
+                            flowUp = if (connected) LinkMonitor.meter.current?.up ?: 0.0 else 0.0,
                         )
                     }
                     Box(Modifier.matchParentSize().stateGlow(pill))
@@ -765,8 +747,8 @@ class MainActivity : ComponentActivity() {
 
             AnimatedVisibility(connected && !busy, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) {
                 if (wgUp) {
-                    val ago = ui.handshakeMs.takeIf { it > 0 }?.let { (System.currentTimeMillis() - it) / 1000 }
-                    TrafficPanel(ui.meter, ago)
+                    val ago = LinkMonitor.handshakeMs.takeIf { it > 0 }?.let { (System.currentTimeMillis() - it) / 1000 }
+                    TrafficPanel(LinkMonitor.meter, ago)
                 } else {
                     Text("link · ikev2 system tunnel", style = Term.mono(12.sp, color = Term.muted))
                 }

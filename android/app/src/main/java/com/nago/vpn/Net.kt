@@ -4,7 +4,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -92,6 +98,44 @@ object LatencyProbe {
 
 /** 터널을 실제로 오가는지: 받은·보낸 바이트와 마지막 핸드셰이크 시각(epoch ms, 아직 없으면 0) */
 data class LinkStats(val rx: Long, val tx: Long, val handshakeMs: Long)
+
+/**
+ * 연결돼 있는 동안 1초마다 엔진에 바이트 수·핸드셰이크를 물어 최근 1분 속도를 쌓는다.
+ * 화면이 아니라 프로세스에서 돈다(엔진이 켜질 때 시작, 꺼질 때 멈춤) — 탭을 오가거나 화면을 나갔다 와도 그래프가 이어진다.
+ * VPN이 켜져 있는 동안은 시스템이 앱 프로세스를 살려 둔다(VpnService).
+ */
+object LinkMonitor {
+    val meter = TrafficMeter()
+    /** 마지막 핸드셰이크(epoch ms, 아직 없으면 0) */
+    var handshakeMs by mutableLongStateOf(0L)
+        private set
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var job: Job? = null
+
+    @Synchronized
+    fun start(read: suspend () -> LinkStats?) {
+        job?.cancel()
+        meter.reset()
+        handshakeMs = 0L
+        job = scope.launch {
+            while (isActive) {
+                read()?.let {
+                    meter.add(it.rx, it.tx)
+                    handshakeMs = it.handshakeMs
+                }
+                delay(1_000)
+            }
+        }
+    }
+
+    @Synchronized
+    fun stop() {
+        job?.cancel()
+        job = null
+        meter.reset()
+        handshakeMs = 0L
+    }
+}
 
 /** 1초마다 받은 바이트 수로 속도(바이트/초)를 낸다. 최근 60초를 남긴다(iOS TrafficMeter와 같음). */
 class TrafficMeter {

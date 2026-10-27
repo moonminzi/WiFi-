@@ -131,10 +131,15 @@ object WgVpn {
 
     suspend fun up(context: Context, config: Config) = withContext(Dispatchers.IO) {
         backend(context).setState(tunnel, Tunnel.State.UP, config)
+        val app = context.applicationContext
+        LinkMonitor.start { stats(app) }
     }
 
     suspend fun down(context: Context) = withContext(Dispatchers.IO) {
+        // neptun이 쓰는 기록은 건드리지 않게, go가 켜져 있었을 때만 멈춘다
+        val wasUp = state.value == Tunnel.State.UP
         runCatching { backend(context).setState(tunnel, Tunnel.State.DOWN, null) }
+        if (wasUp) LinkMonitor.stop()
     }
 
     /** 받은·보낸 바이트와 마지막 핸드셰이크. 꺼져 있으면 null */
