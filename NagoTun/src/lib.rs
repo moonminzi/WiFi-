@@ -1,7 +1,7 @@
-//! NAGO VPN — NepTUN(WireGuard) 엔진을 iOS 터널 확장(Swift)과 안드로이드 앱(JNI, src/android.rs)에서 부르기 위한 C 인터페이스.
+//! NAGO VPN — NagoTun(WireGuard) 엔진(engine/, NepTUN 포크)을 iOS 터널 확장(Swift)과 안드로이드 앱(JNI, src/android.rs)에서 부르기 위한 C 인터페이스.
 //!
-//! OS가 만든 터널(iOS utun, 안드로이드 VpnService TUN) 파일 디스크립터를 그대로 넘겨받아 NepTUN 장치를 띄우고,
-//! 설정은 WireGuard UAPI 문자열(set=1 …)로 넣는다. 패킷 처리는 NepTUN의 스레드들이 utun과 UDP를 직접 읽고 쓴다.
+//! OS가 만든 터널(iOS utun, 안드로이드 VpnService TUN) 파일 디스크립터를 그대로 넘겨받아 엔진 장치를 띄우고,
+//! 설정은 WireGuard UAPI 문자열(set=1 …)로 넣는다. 패킷 처리는 엔진의 스레드들이 utun과 UDP를 직접 읽고 쓴다.
 
 use std::ffi::{c_char, c_int, CStr};
 use std::ptr;
@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 
-use neptun::device::tun::TunSocket;
-use neptun::device::{DeviceConfig, DeviceHandle, MakeExternalNeptunNoop};
+use engine::device::tun::TunSocket;
+use engine::device::{DeviceConfig, DeviceHandle, MakeExternalNeptunNoop};
 
 #[cfg(target_os = "android")]
 mod android;
