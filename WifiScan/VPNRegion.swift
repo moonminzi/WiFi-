@@ -4,7 +4,7 @@ import Foundation
 /// 한국 서버는 공인 IP가 고정이고(인증서 ID도 IP), 해외 서버는 켤 때마다 IP가 바뀌어서
 /// 인증서 ID를 FQDN(예: jp.nago.vpn)으로 두고 주소는 API로 받아 온다.
 /// 그 뒤 나라들은 임시 서버(`onDemand`): 고르면 API가 그 리전에 서버를 새로 만들고(WireGuard만, 1분쯤),
-/// 30분 안 쓰면 서버가 스스로 지워진다. 관리자용에서만 보인다.
+/// 30분 안 쓰면 서버가 스스로 지워진다(관리자용·유저용 모두, 한꺼번에 2대까지).
 enum VPNRegion: String, CaseIterable, Identifiable {
     case kr, jp, us, uk
     case sg, de, fr, ie, se, ca, br, au
@@ -12,7 +12,7 @@ enum VPNRegion: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// 늘 있는 서버(유저용에서 고를 수 있는 나라)
+    /// 늘 있는 서버(꺼 두었다가 켬)
     static let fixed: [VPNRegion] = [.kr, .jp, .us, .uk]
 
     /// 고를 때 서버를 새로 만드는 나라

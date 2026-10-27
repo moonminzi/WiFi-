@@ -21,6 +21,12 @@ struct DashData: Decodable {
         let hours: Double
         let egressGB: Double
         let usd: Double
+        /// 임시 서버 나라(만들고 지우는 서버). 지금 떠 있거나 이번 달에 쓴 나라만 온다
+        let onDemand: Bool?
+        /// 이번 달에 만든 서버 수(임시 서버 나라)
+        let servers: Int?
+
+        var isOnDemand: Bool { onDemand == true }
     }
 
     struct Peer: Decodable {
@@ -186,7 +192,12 @@ struct DashView: View {
 
     @ViewBuilder
     private func nodeActions(_ node: DashData.Node) -> some View {
-        if node.state == "stopped" {
+        if node.isOnDemand {
+            // 만드는 건 vpn 탭에서 연결할 때. 여기서는 떠 있는 서버를 바로 지우기만
+            if node.state == "running" || node.state == "pending" {
+                Button("delete now", role: .destructive) { nodeOp("drop", node) }
+            }
+        } else if node.state == "stopped" {
             Button("start") { nodeOp("start", node) }
         } else if node.state == "running" {
             Button("reset idle (\(node.idle ?? 0)m)") { nodeOp("wake", node) }
@@ -230,6 +241,7 @@ struct DashView: View {
         case "start": done = "\(node.code) booting · ~1 min"
         case "stop": done = "\(node.code) stopping"
         case "reboot": done = "\(node.code) rebooting · ~1 min"
+        case "drop": done = "\(node.code) deleting"
         default: done = "\(node.code) idle timer reset"
         }
         // 켜고 끄는 건 상태가 바뀌는 데 시간이 걸려서 몇 번 더 새로 받는다.
@@ -452,12 +464,30 @@ struct DashView: View {
             Text(node.code).foregroundStyle(Term.key)
                 + Text(" " + pad(node.city, 7) + " ").foregroundStyle(Term.muted)
                 + Text(tag.0).foregroundStyle(tag.1)
-                + Text(" " + (node.ip ?? node.state)).foregroundStyle(Term.num)
+                + Text(" " + (node.ip ?? Self.noAddress(node))).foregroundStyle(Term.num)
         )
         line(Text("   " + nodeDetail(node)).foregroundStyle(Term.muted))
     }
 
+    /// IP가 없을 때: 임시 서버 나라는 서버 자체가 없다
+    static func noAddress(_ node: DashData.Node) -> String {
+        node.isOnDemand && node.state == "stopped" ? "no server" : node.state
+    }
+
+    /// 임시 서버 나라 한 줄: 떠 있으면 가동 시간, 아니면 이번 달에 만든 수
+    static func onDemandDetail(_ node: DashData.Node, withType: Bool) -> String {
+        if node.state == "running" {
+            var bits = withType ? [node.type] : []
+            if let up = node.up { bits.append("up " + duration(up)) }
+            bits.append("on demand · deletes after \(node.idleLimit ?? 30)m idle")
+            return bits.joined(separator: " · ")
+        }
+        let made = node.servers ?? 0
+        return "on demand · \(made) server\(made == 1 ? "" : "s") this month"
+    }
+
     private func nodeDetail(_ node: DashData.Node) -> String {
+        if node.isOnDemand { return Self.onDemandDetail(node, withType: true) }
         guard node.state == "running" else { return "\(node.type) · boots on connect" }
         var bits = [node.type]
         if let up = node.up { bits.append("up " + Self.duration(up)) }
@@ -619,7 +649,7 @@ private struct NodeCard: View {
                         .background(Term.green, in: RoundedRectangle(cornerRadius: 3))
                 }
             }
-            Text(node.ip ?? node.state)
+            Text(node.ip ?? DashView.noAddress(node))
                 .font(Term.mono(12))
                 .foregroundStyle(node.ip == nil ? Term.muted : Term.num)
                 .lineLimit(1)
@@ -665,6 +695,7 @@ private struct NodeCard: View {
     }
 
     private var detail: String {
+        if node.isOnDemand { return DashView.onDemandDetail(node, withType: false) }
         guard node.state == "running" else { return "boots on connect" }
         var bits: [String] = []
         if let up = node.up { bits.append("up " + DashView.duration(up)) }

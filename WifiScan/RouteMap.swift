@@ -139,7 +139,7 @@ final class RouteMapModel {
     private let origin = GeoPoint.here
     /// 나라마다 you에서 가는 길(대기 중에 고르지 않은 나라도 옅게 긋는다)
     private let arcs: [VPNRegion: RouteArc] = Dictionary(
-        uniqueKeysWithValues: VPNRegion.shown.map { ($0, RouteArc(from: GeoPoint.here, to: $0.geo)) })
+        uniqueKeysWithValues: VPNRegion.allCases.map { ($0, RouteArc(from: GeoPoint.here, to: $0.geo)) })
     private var started = false
     private var stage: RouteMap.Stage = .idle
     private var stageAt = Date.distantPast
@@ -690,7 +690,7 @@ final class RouteMapModel {
 
     /// 다른 나라 노드(you 바로 밑에 있는 건 가려서 뺀다)
     private func drawNodes(_ ctx: inout GraphicsContext, view: Viewport, highlighted: VPNRegion?) {
-        for region in VPNRegion.shown where region != highlighted && origin.km(to: region.geo) > 150 {
+        for region in VPNRegion.allCases where region != highlighted && origin.km(to: region.geo) > 150 {
             drawNode(&ctx, view: view, region: region, on: false)
         }
     }
@@ -722,7 +722,7 @@ final class RouteMapModel {
     private func drawYou(_ ctx: inout GraphicsContext, view: Viewport) {
         let p = view.point(origin.world)
         // you 바로 밑에 가려진 나라(서울에서 kr)는 you를 눌러 고른다
-        for region in VPNRegion.shown where origin.km(to: region.geo) <= 150 {
+        for region in VPNRegion.allCases where origin.km(to: region.geo) <= 150 {
             hits.append((region, p))
         }
         ctx.fill(Path(ellipseIn: CGRect(x: p.x - 3.2, y: p.y - 3.2, width: 6.4, height: 6.4)), with: .color(Term.text))

@@ -252,7 +252,7 @@ private enum Probes {
 
     static func qualityCheck() async -> Check {
         let here = GeoPoint.here
-        let nearest = VPNRegion.shown.min { here.km(to: $0.geo) < here.km(to: $1.geo) } ?? .kr
+        let nearest = VPNRegion.allCases.min { here.km(to: $0.geo) < here.km(to: $1.geo) } ?? .kr
         let samples = await LatencyProbe.samples(nearest, count: 6)
         let got = samples.compactMap { $0 }
         guard !got.isEmpty else {

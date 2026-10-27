@@ -80,6 +80,11 @@ iOS 내장 Personal VPN(NEVPNManager)이 그대로 쓸 수 있도록 **strongSwa
 - **지우기**: 서버 안의 유휴 검사(분당 송신 300KB 미만이 30분)가 `poweroff` → 종료 동작이 `terminate`라 서버가 그대로 지워진다.
   24시간이 지나도 꺼진다. AWS 쪽 안전장치로 CloudWatch 경보(`nago-ondemand-<인스턴스>`, 5분 송신 1MB 미만이 1시간이면 terminate)도
   건다 — 서버가 멎어서 스스로 못 끄는 경우용. 지난 경보는 다음에 그 리전에 서버를 만들 때 치운다.
+- **대시보드**(`nago-dash`): 지금 떠 있거나 이번 달에 쓴 임시 서버 나라가 서버 목록·지도·비용에 `onDemand: true`로 붙는다.
+  지워진 서버는 목록에서 사라지므로 이번 달 사용량은 CloudTrail `RunInstances` 기록(태그 `nago:ondemand`)으로 인스턴스를 찾아
+  CloudWatch(CPU 데이터 개수 = 켜져 있던 분, NetworkOut)로 센다(10분 캐시). 떠 있는 서버는 `POST {op: "drop", node: "sg"}`로 바로 지운다.
+  대시보드 Lambda 환경 변수 `ONDEMAND`(`{"sg":{"region":"ap-southeast-1","city":"singapore"},...}`), 인라인 정책 `nago-ondemand`
+  (cloudtrail:LookupEvents, 태그 붙은 인스턴스만 ec2:TerminateInstances).
 - **동시에 2대까지**(`ONDEMAND_MAX`). 넘으면 409. 연결해 둔 채로 두면 터널이 핸드셰이크가 끊길 때 API를 다시 불러 새 서버를 만든다
   (늘 있는 서버를 다시 켜는 것과 같은 동작).
 - 비용: 서버 시간당 $0.03~0.06(공인 IPv4 포함, 초 단위) + 송신 GB당 $0.09~0.15(전 리전 합쳐 매달 100GB 무료). 안 쓰면 0원.

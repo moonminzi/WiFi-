@@ -24,7 +24,7 @@ final class LatencyProbe {
             lastRun = Date()
         }
         await withTaskGroup(of: (VPNRegion, Int?).self) { group in
-            for region in VPNRegion.shown {
+            for region in VPNRegion.allCases {
                 group.addTask { (region, await Self.ping(region)) }
             }
             for await (region, ms) in group {
@@ -109,7 +109,4 @@ extension VPNRegion {
     var countryCode: String {
         self == .uk ? "GB" : rawValue.uppercased()
     }
-
-    /// 이 판에서 고를 수 있는 나라. 임시 서버 나라는 관리자용에서만.
-    static var shown: [VPNRegion] { Edition.isUser ? fixed : allCases }
 }

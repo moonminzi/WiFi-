@@ -102,11 +102,7 @@ struct VPNView: View {
         }
         .task(id: vpn.status == .connected) { await pollLink() }
         .task(id: vpn.status) { await statusSettled() }
-        .onAppear {
-            // 관리자용에서 고른 임시 서버 나라가 남아 있으면(같은 폰에 유저용을 덮어 깐 경우) 한국으로
-            if Edition.isUser, region.onDemand { region = .kr }
-            applyDemo()
-        }
+        .onAppear(perform: applyDemo)
     }
 
     /// 스크린샷용 데모 상태(Debug 빌드 + `-nagoDemo`)
@@ -585,11 +581,9 @@ struct VPNView: View {
             .disabled(locked)
             .opacity(locked ? 0.55 : 1)
             .accessibilityHint(shownRegion.detail)
-            // 임시 서버 나라(관리자용): 고르면 그 나라에 서버를 새로 만든다
-            if !Edition.isUser {
-                onDemandPanel
-                    .padding(.top, 2)
-            }
+            // 임시 서버 나라: 고르면 그 나라에 서버를 새로 만든다
+            onDemandPanel
+                .padding(.top, 2)
         }
         .confirmationDialog("hop to \(hopTarget?.geo.city ?? "")?", isPresented: hopping,
                             titleVisibility: .visible, presenting: hopTarget) { target in
