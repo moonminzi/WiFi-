@@ -74,9 +74,13 @@ iOS 내장 Personal VPN(NEVPNManager)이 그대로 쓸 수 있도록 **strongSwa
 - 국가 API(`region-api/index.py`, Lambda `nago-region`)가 `GET /region?r=sg`에 떠 있는 서버가 없으면 새로 만든다.
   Ubuntu 24.04 arm64(`c7g.medium`), 기본 VPC, 보안 그룹 `nago-ondemand`(udp 443/51820만), 태그 `nago:ondemand=<코드>`.
   만들 때 `state: "creating"`, WireGuard가 올라오면 `ready: true`(서버가 콘솔에 남기는 `NAGO_WG_READY`로 판단).
-- **WireGuard만** 올린다. 패키지를 깔지 않는다(커널 wireguard + systemd-networkd, user-data 한 번). 서버 키는 Lambda가 만들어
-  user-data로 넘기고 공개키는 태그 `nago:wgpub`로 돌려준다. 피어는 만들 때의 `/nago/wg/peers`(만든 뒤 새로 등록한 기기는 다음 서버부터).
-  IKEv2·광고 차단 DNS·TCP 분할 가속은 없다.
+- **WireGuard를 먼저** 올린다. 패키지 없이 커널 wireguard + systemd-networkd로(user-data 한 번), 그래서 연결은 1분 안팎이면 된다.
+  서버 키는 Lambda가 만들어 user-data로 넘기고 공개키는 태그 `nago:wgpub`로 돌려준다. 피어는 만들 때의 `/nago/wg/peers`
+  (만든 뒤 새로 등록한 기기는 다음 서버부터). IKEv2·광고 차단 DNS는 없다.
+- **TCP 분할 가속**은 그 뒤에 백그라운드(`nago-accel-setup`)로 haproxy를 깔아 켠다 — 고정 서버(`setup-region.sh`)와 같은 방식.
+  WireGuard가 뜬 뒤 30초쯤이면 콘솔에 `NAGO_ACCEL_READY`가 찍히고, 그 뒤 새로 여는 TCP 연결부터 서버에서 끊어 다시 잇는다
+  (먼 구간은 서버의 BBR·큰 버퍼로). 그동안에도 연결은 되고, 설치가 실패해도 가속만 없을 뿐이다. haproxy가 멈추면
+  `nago-accel.service`(BindsTo=haproxy)가 리다이렉트 규칙을 같이 내려 TCP가 죽은 포트로 가지 않는다.
 - **지우기**: 서버 안의 유휴 검사(분당 송신 300KB 미만이 30분)가 `poweroff` → 종료 동작이 `terminate`라 서버가 그대로 지워진다.
   24시간이 지나도 꺼진다. AWS 쪽 안전장치로 CloudWatch 경보(`nago-ondemand-<인스턴스>`, 5분 송신 1MB 미만이 1시간이면 terminate)도
   건다 — 서버가 멎어서 스스로 못 끄는 경우용. 지난 경보는 다음에 그 리전에 서버를 만들 때 치운다.

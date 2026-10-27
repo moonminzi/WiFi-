@@ -42,6 +42,8 @@ OD_PUB_TAG = "nago:wgpub"
 OD_SG = "nago-ondemand"
 OD_AMI = "/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
 OD_READY = "NAGO_WG_READY"
+# 가속(haproxy)까지 켜졌다는 표시(준비 판단에는 쓰지 않는다 — 연결은 그 전부터 된다)
+OD_ACCEL_READY = "NAGO_ACCEL_READY"
 # 콘솔 출력을 못 읽어도 켜진 지 이만큼 지나면 준비된 걸로 본다
 OD_GRACE_SEC = 150
 PEER_KEY_RE = re.compile(r"^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$")
@@ -139,14 +141,18 @@ def wg_keypair():
 
 # 서버가 첫 부팅 때 한 번 돌리는 스크립트. 패키지를 깔지 않는다(커널 wireguard + systemd-networkd).
 OD_SCRIPT = r"""#!/bin/bash
-# NAGO VPN 임시 서버(@CODE@). WireGuard만. 30분 동안 거의 안 쓰거나 24시간이 지나면 스스로 끈다
-# (종료 동작이 terminate라 서버가 지워진다).
+# NAGO VPN 임시 서버(@CODE@). WireGuard를 먼저 올리고(바로 연결됨), TCP 분할 가속(haproxy)은 그 뒤에
+# 백그라운드로 깔아 켠다. 30분 동안 거의 안 쓰거나 24시간이 지나면 스스로 끈다(종료 동작이 terminate라 서버가 지워진다).
 exec > >(tee -a /var/log/nago-ondemand.log /dev/console) 2>&1
 DEFIF=$(ip route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i=="dev") {print $(i+1); exit}}')
 
 modprobe tcp_bbr 2>/dev/null
+modprobe nf_conntrack 2>/dev/null
 printf '%s\n' net.ipv4.ip_forward=1 net.core.default_qdisc=fq net.ipv4.tcp_congestion_control=bbr \
-  net.ipv4.tcp_mtu_probing=1 net.core.rmem_max=67108864 net.core.wmem_max=67108864 > /etc/sysctl.d/99-nago.conf
+  net.ipv4.tcp_mtu_probing=1 net.core.rmem_max=67108864 net.core.wmem_max=67108864 \
+  'net.ipv4.tcp_rmem=4096 131072 67108864' 'net.ipv4.tcp_wmem=4096 65536 67108864' \
+  net.ipv4.tcp_slow_start_after_idle=0 net.ipv4.tcp_fastopen=3 net.netfilter.nf_conntrack_max=262144 \
+  > /etc/sysctl.d/99-nago.conf
 sysctl -q -p /etc/sysctl.d/99-nago.conf
 
 wg_up() {
@@ -204,6 +210,78 @@ systemctl enable --now nago-idle.timer
 systemd-run --unit nago-ttl --on-active=24h /usr/bin/systemctl poweroff
 
 echo "@READY@ wg0=$(cat /sys/class/net/wg0/operstate 2>/dev/null || echo missing) peers=@NPEERS@"
+
+# ---- TCP 분할 가속(고정 서버의 nago-accel과 같음): wg0 사용자의 TCP를 haproxy가 받아 서버에서 새로 잇는다.
+# 먼 경로(폰↔서버)는 서버의 BBR·큰 버퍼로, 서버↔목적지는 짧은 경로로 따로 돈다. 사설망은 빼고, 12345는 REDIRECT로
+# 들어온 연결만 받는다(직접 붙으면 자기 자신에게 무한 연결). haproxy가 멈추면 BindsTo로 규칙도 같이 내려간다
+# (안 그러면 모든 TCP가 죽은 포트로 간다). 설치는 위 WireGuard와 따로 돈다 — 그동안에도 연결은 된다.
+cat > /usr/local/sbin/nago-accel <<'SH'
+#!/bin/bash
+GUARD="INPUT -p tcp --dport 12345 -m conntrack ! --ctstate DNAT -j DROP"
+WG_MATCH="-i wg0 -p tcp"
+case "$1" in
+on)
+  iptables -t nat -N NAGO_ACCEL 2>/dev/null; iptables -t nat -F NAGO_ACCEL
+  for n in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 169.254.0.0/16 100.64.0.0/10; do
+    iptables -t nat -A NAGO_ACCEL -d $n -j RETURN
+  done
+  iptables -t nat -A NAGO_ACCEL -p tcp -j REDIRECT --to-ports 12345
+  iptables -C $GUARD 2>/dev/null || iptables -I $GUARD
+  iptables -t nat -C PREROUTING $WG_MATCH -j NAGO_ACCEL 2>/dev/null || iptables -t nat -I PREROUTING $WG_MATCH -j NAGO_ACCEL ;;
+off)
+  iptables -t nat -D PREROUTING $WG_MATCH -j NAGO_ACCEL 2>/dev/null
+  iptables -D $GUARD 2>/dev/null
+  iptables -t nat -F NAGO_ACCEL 2>/dev/null; iptables -t nat -X NAGO_ACCEL 2>/dev/null ;;
+esac
+SH
+chmod +x /usr/local/sbin/nago-accel
+cat > /usr/local/sbin/nago-accel-setup <<'SH'
+#!/bin/bash
+exec > >(tee -a /var/log/nago-ondemand.log /dev/console) 2>&1
+export DEBIAN_FRONTEND=noninteractive
+for i in 1 2 3; do
+  apt-get -o DPkg::Lock::Timeout=120 -q update && \
+    apt-get -o DPkg::Lock::Timeout=120 -q install -y --no-install-recommends haproxy && break
+  sleep 5
+done
+command -v haproxy >/dev/null || { echo "NAGO_ACCEL_FAIL no haproxy"; exit 1; }
+cat > /etc/haproxy/haproxy.cfg <<'CFG'
+global
+    log /dev/log local0 warning
+    chroot /var/lib/haproxy
+    user haproxy
+    group haproxy
+    maxconn 40000
+
+defaults
+    log global
+    mode tcp
+    option dontlognull
+    option splice-auto
+    timeout connect 8s
+    timeout client 6h
+    timeout server 6h
+    timeout client-fin 30s
+    timeout server-fin 30s
+
+frontend nago_split
+    bind :12345
+    default_backend nago_orig
+
+backend nago_orig
+    server orig 0.0.0.0
+CFG
+haproxy -c -f /etc/haproxy/haproxy.cfg || { echo "NAGO_ACCEL_FAIL config"; exit 1; }
+printf '%s\n' '[Unit]' 'Description=NAGO VPN TCP split acceleration (off when haproxy stops)' \
+  'After=haproxy.service' 'BindsTo=haproxy.service' '[Service]' 'Type=oneshot' \
+  'ExecStart=/usr/local/sbin/nago-accel on' 'ExecStop=/usr/local/sbin/nago-accel off' 'RemainAfterExit=yes' \
+  '[Install]' 'WantedBy=multi-user.target haproxy.service' > /etc/systemd/system/nago-accel.service
+systemctl daemon-reload
+systemctl restart haproxy && systemctl enable --now nago-accel && \
+  echo "NAGO_ACCEL_READY uptime=$(cut -d. -f1 /proc/uptime)s"
+SH
+chmod +x /usr/local/sbin/nago-accel-setup
+systemd-run --unit nago-accel-setup /usr/local/sbin/nago-accel-setup
 """
 
 
