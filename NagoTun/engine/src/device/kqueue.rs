@@ -68,6 +68,11 @@ unsafe impl<H> Sync for EventPoll<H> {}
 
 impl<H: Send + Sync> EventPoll<H> {
     /// Create a new event registry
+    /// NagoTun: epoll과 같은 모양. kqueue는 아직 이벤트 루프 수와 상관없이 EV_DISPATCH 그대로
+    pub fn with_threads(_threads: usize) -> Result<EventPoll<H>, Error> {
+        Self::new()
+    }
+
     pub fn new() -> Result<EventPoll<H>, Error> {
         let kqueue = match unsafe { kqueue() } {
             -1 => return Err(Error::EventQueue(io::Error::last_os_error())),

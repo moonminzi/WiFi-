@@ -24,6 +24,9 @@ pub enum WaitResult<'a, H> {
 pub struct EventPoll<H: Sized> {
     events: Mutex<Vec<Option<Box<Event<H>>>>>,
     epoll: RawFd, // The OS epoll
+    /// NagoTun: 이벤트 루프가 하나뿐이면 읽기 이벤트를 레벨 트리거로 두고(ONESHOT 없음) 깰 때마다
+    /// 다시 켜는 epoll_ctl을 하지 않는다(시스템 호출 하나 덜). 둘 이상이면 NepTUN처럼 ONESHOT
+    level_reads: bool,
 }
 
 /// A type that hold a reference to a triggered Event
@@ -57,6 +60,11 @@ impl<H> Drop for EventPoll<H> {
 impl<H: Sync + Send> EventPoll<H> {
     /// Create a new event registry
     pub fn new() -> Result<EventPoll<H>, Error> {
+        Self::with_threads(2)
+    }
+
+    /// NagoTun: 이 큐를 기다릴 이벤트 루프 수에 맞춰 만든다(하나면 읽기 이벤트를 다시 켜지 않는다)
+    pub fn with_threads(threads: usize) -> Result<EventPoll<H>, Error> {
         let epoll = match unsafe { epoll_create(1) } {
             -1 => return Err(Error::EventQueue(io::Error::last_os_error())),
             epoll => epoll,
@@ -65,6 +73,7 @@ impl<H: Sync + Send> EventPoll<H> {
         Ok(EventPoll {
             events: Mutex::new(vec![]),
             epoll,
+            level_reads: threads <= 1,
         })
     }
 
@@ -81,8 +90,8 @@ impl<H: Sync + Send> EventPoll<H> {
     /// appropriate EventGuard. It is guaranteed that only a single thread can have a reference to
     /// the handler at any given time.
     pub fn new_event(&self, trigger: RawFd, handler: H) -> Result<EventRef, Error> {
-        // Create an event descriptor
-        let flags = EPOLLIN | EPOLLONESHOT;
+        // Create an event descriptor (NagoTun: level-triggered when a single thread waits)
+        let flags = if self.level_reads { EPOLLIN } else { EPOLLIN | EPOLLONESHOT };
         let ev = Event {
             event: epoll_event {
                 events: flags as _,
@@ -402,6 +411,11 @@ impl<H> Drop for EventGuard<'_, H> {
             let mut buf: [std::mem::MaybeUninit<u8>; 256] =
                 unsafe { std::mem::MaybeUninit::uninit().assume_init() };
             while unsafe { read(self.event.fd, buf.as_mut_ptr() as _, buf.len() as _) } != -1 {}
+        }
+
+        // NagoTun: 레벨 트리거(ONESHOT 없음) 이벤트는 꺼진 적이 없으니 다시 켤 필요가 없다
+        if self.event.event.events & EPOLLONESHOT as u32 == 0 {
+            return;
         }
 
         unsafe {

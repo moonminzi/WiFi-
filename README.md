@@ -23,7 +23,7 @@
 - **지도 중심 화면**(2.0): 지도가 화면 위쪽 절반을 꽉 채우고, 머리줄(`~/vpn $▌` + `● secured / exposed` 알약)은 지도 위에 뜬다.
   그 아래로 시트처럼 겹쳐 올라오는 콘솔에
   - 세션: 지금 나라(🇯🇵 tokyo)를 크게, 연결되면 오른쪽에 접속 시간 타이머. 연결 중에는 `api › boot › tunnel › up` 진행 막대,
-    연결되면 wg 터널이 알려 주는 `hs · rx · tx`(5초마다). 설정은 `wg/neptun` `adblock` 칩으로
+    연결되면 wg 터널이 알려 주는 `hs · rx · tx`(5초마다). 설정은 `wg/nagotun` `adblock` 칩으로
   - 큰 연결 버튼(`nago up jp`): 연결 중에는 지금 단계를 쓰고 빛이 훑고 지나간다
   - 나갈 국가 카드 네 장: 깃발·코드·도시·어림 왕복 시간(거리 ÷ 100 × 1.3 + 6ms, 실제 측정 아님). **지도에서 나라 점을 눌러도 고를 수 있다**
     (서울에서 kr처럼 you 밑에 가려진 나라는 you를 누름). 대기 중에는 고르지 않은 나라로 가는 길도 옅게 그어 둔다
@@ -70,7 +70,7 @@
 - **auto**: IKEv2를 12초 기다려 안 붙으면 WireGuard로
 - **unicorn**(iOS): 서버로 안 나간다. SNI 차단만 우회한다 — 아래 참고
 - WireGuard 키는 폰에서 처음 한 번 만들고 공개키만 피어 목록(SSM 파라미터 `/nago/wg/peers`)에 등록. 서버 4대 모두 같은 목록으로 맞춰짐(`server/wireguard/setup-wg.sh`, `nago-peer sync`)
-- **wg engine**(iOS): `neptun`(기본) — NordVPN이 쓰는 Rust 엔진 NepTUN(BSD-3)을 `NagoTun/`(C 인터페이스)으로 감쌈. utun fd를 엔진 스레드가 직접 읽고 씀 / `go` — WireGuardKit(공식 WireGuard 앱과 같은 wireguard-go)
+- **wg engine**(iOS): `nagotun`(기본, 설정 값은 예전 이름 `neptun` 그대로) — NordVPN의 Rust 엔진 NepTUN(BSD-3)을 `NagoTun/engine/`에 가져와 고친 우리 엔진(2.1.1). `NagoTun/`(C 인터페이스)으로 감싸고 utun fd를 엔진 스레드가 직접 읽고 씀. 이벤트 루프 기본 1개(벤치: 2개와 같은 속도에 1GB당 CPU 25~32% 덜). 무엇을 왜 바꿨는지·벤치 숫자는 `NagoTun/engine/README.md`, 벤치 도구는 `tools/nagotun-bench/` / `go` — WireGuardKit(공식 WireGuard 앱과 같은 wireguard-go)
   - 리눅스 검증(서울→도쿄): NepTUN 다운 약 250~290Mbps, 커널 WireGuard 약 270Mbps로 같은 급. `NagoTun/examples/linux_tun.rs`로 서버에서 재현 가능
   - **애플에서 NepTUN이 도는 방식**(고정한 rev `ce18515`의 소스 기준): 작업 스레드·스레드 사이 대기열(`packet_workers`)은 애플 밖에서만 만든다.
     아이폰에선 이벤트 루프가 패킷을 그 자리에서 처리한다(utun 읽기→암호화→`send_to` / `recv_from`→복호화→utun 쓰기, 묶음 없이 한 개씩)
@@ -85,7 +85,7 @@
     - MTU 1420은 그대로(IPv6로 나가는 망·PPPoE에서도 조각나지 않는 WireGuard 기본값)
 - **speed test**(vpn 탭 아래, 머리줄을 누르면 접고 편다 — net scan도 같음): Cloudflare 속도 측정 서버에 연결 4개(세션을 따로 둬 HTTP/2 한 연결에 몰리지 않게)로 7초씩 받기·올리기,
   처음 1.5초는 빼고 잰다. 쉬는 동안 핑(5번 중간값)과 받는 동안 핑(0.4초마다)도 같이 — 둘의 차이가 대기열이 쌓이는 정도.
-  결과는 설정(`wg/neptun ×2 · jp`, `wg/go · jp`, `direct` …)과 함께 최근 8개까지 남아서, loops·engine을 바꿔 가며 같은 나라로 재면 바로 비교된다.
+  결과는 설정(`wg/nagotun ×1 · jp`, `wg/go · jp`, `direct` …)과 함께 최근 8개까지 남아서, loops·engine을 바꿔 가며 같은 나라로 재면 바로 비교된다.
   한 번에 최대 약 300MB를 쓴다
   - iOS 빌드 때 `NagoTunRust` 타깃이 `NagoTun/build-ios.sh`로 `cargo build --target aarch64-apple-ios`(Rust 필요)
 - iOS 빌드: `Vendor/WireGuardKit`(wireguard-apple 1.0.16-27, MIT, Xcode 16용 두 줄 수정) + Go 1.24로 libwg-go.a를 만드는 `WireGuardGoBridgeiOS` 타깃
@@ -144,7 +144,7 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
   - 터널 확장은 핸드셰이크가 170초 넘게 없으면(서버 유휴 종료, 재부팅으로 IP 변경) 국가 API로 서버를 켜고 주소가 바뀌었으면 피어를 바꾼다. 확장 자신의 통신은 킬 스위치에도 막히지 않는다
 - **custom dns** (wg만): `1.1.1.1, 8.8.8.8`처럼. --adblock이 켜져 있으면 광고 차단 DNS가 우선. IKEv2 DNS는 서버가 준다
 - **안드로이드**: `--allow-lan`(IKEv2 `setLocalRoutesExcluded`, wg는 사설망·멀티캐스트 대역을 AllowedIPs에서 뺌), 항상 켜기·킬 스위치는 시스템 VPN 설정(`system ›`)에서
-- **안드로이드 wg engine**: `neptun`(기본) — iOS와 같은 NepTUN을 `NagoTun/build-android.sh`(NDK)로 libnago_tun.so로 빌드해 JNI(`NagoTun/src/android.rs`, `NeptunNative.kt`)로 부른다. `NeptunVpnService`가 TUN을 만들고 엔진에 넘김. NordVPN과 같게 이벤트 루프 4개 + 서버마다 connect한 UDP 소켓. 앱 자신은 VPN에서 빼서(`addDisallowedApplication`) 엔진 소켓과 국가 API 요청이 터널 밖으로 나간다. 핸드셰이크가 끊기면 iOS처럼 서버를 깨우고 새 주소로 바꾼다 / `go` — wireguard-android GoBackend
+- **안드로이드 wg engine**: `nagotun`(기본) — iOS와 같은 NagoTun 엔진을 `NagoTun/build-android.sh`(NDK)로 libnago_tun.so로 빌드해 JNI(`NagoTun/src/android.rs`, `NeptunNative.kt`)로 부른다. `NeptunVpnService`가 TUN을 만들고 엔진에 넘김. 2.0.5부터 이벤트 루프 1개 + 패킷을 루프에서 바로 처리(NepTUN은 루프 4개 + 작업 스레드 — 같은 속도에 1GB당 CPU 40~50% 덜) + 서버마다 connect한 UDP 소켓. 앱 자신은 VPN에서 빼서(`addDisallowedApplication`) 엔진 소켓과 국가 API 요청이 터널 밖으로 나간다. 핸드셰이크가 끊기면 iOS처럼 서버를 깨우고 새 주소로 바꾼다 / `go` — wireguard-android GoBackend
   - 빌드에 Rust와 Android NDK가 필요(Gradle `preBuild` 앞에 `buildNagoTun`이 돈다. NDK는 `ANDROID_NDK_HOME` 또는 `<SDK>/ndk/<버전>`)
 - **logs**: 진행 단계·오류·VPN 상태 변화(끊긴 이유 포함). iOS는 터널 확장이 켜져 있으면 확장의 로그와 상태(wg는 핸드셰이크·주고받은 양, unicorn은 쪼갠 횟수·DNS 질의 수)도 같이 보여 준다
 - **server**: 가속(TCP 분할)은 4대 모두 IKEv2·WireGuard TCP에 켜져 있음
@@ -201,7 +201,7 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
 ## 릴리스
 
 - **iOS**: `build-ipa.yml`(main에 push하거나 직접 실행)이 IPA를 만들어 버전마다 릴리스 하나에 올린다 — 태그 `ios-<버전>`(예: `ios-2.0.5`), 파일 `NAGO-VPN-<버전>.ipa`(유저용)와 `NAGO-VPN-<버전>-admin.ipa`(관리자용).
-  - 유저용은 컴파일 조건 `USER_EDITION`으로 따로 빌드한다(재서명 도구가 Info.plist를 바꿔도 판이 유지되게, `NAGOEdition = user`도 같이 넣음). 홈 화면 이름은 유저용 NAGO VPN · 관리자용 NAGO Admin, settings → about에 판 표시. 유저용(`Edition.isUser`): vpn · settings 탭만, 속도 측정·설정 꼬리표·링크 상세 없음, settings는 화면 모양·비밀번호·자동 연결/킬 스위치·광고 차단·로그·버전만. 프로토콜·엔진은 기본값(auto · neptun). 친구용은 유저용 IPA에 `NAGOPresetPassword`를 넣어 재서명한다
+  - 유저용은 컴파일 조건 `USER_EDITION`으로 따로 빌드한다(재서명 도구가 Info.plist를 바꿔도 판이 유지되게, `NAGOEdition = user`도 같이 넣음). 홈 화면 이름은 유저용 NAGO VPN · 관리자용 NAGO Admin, settings → about에 판 표시. 유저용(`Edition.isUser`): vpn · settings 탭만, 속도 측정·설정 꼬리표·링크 상세 없음, settings는 화면 모양·비밀번호·자동 연결/킬 스위치·광고 차단·로그·버전만. 프로토콜·엔진은 기본값(auto · nagotun). 친구용은 유저용 IPA에 `NAGOPresetPassword`를 넣어 재서명한다
   - 스크린샷(`ui-shots`)에 `user-*` 장면(`-nagoEdition user`) 버전은 `project.yml`의 `MARKETING_VERSION`(빌드 번호는 `CURRENT_PROJECT_VERSION`). 같은 버전을 다시 빌드하면 그 릴리스의 IPA·설명만 바뀐다. 설명은 `release-notes/ios-<버전>.md`
 - **안드로이드**: 태그 `android-<버전>`, 파일 `NAGO-VPN-<버전>.apk`(nago-release 키로 서명)
 

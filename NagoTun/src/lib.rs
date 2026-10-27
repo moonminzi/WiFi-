@@ -104,6 +104,9 @@ pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u3
         // 8묶음(약 600KB)이면 300Mbps에서 쌓이는 지연이 20ms 안팎이고, 순간 버스트는 위의 소켓 버퍼가 받는다.
         inter_thread_channel_size: Some(if queue == 0 { 8 } else { queue.clamp(1, 64) as usize }),
         max_inter_thread_batched_pkts: None,
+        // 애플 밖: queue가 0이면 패킷을 이벤트 루프에서 바로 처리한다(작업 스레드 없음, NagoTun 기본).
+        // 1 이상이면 NepTUN처럼 그 크기의 대기열로 작업 스레드에 넘긴다(비교용)
+        inline_packets: queue == 0,
     };
     let handle = match DeviceHandle::new_with_tun(tun, config) {
         Ok(h) => h,

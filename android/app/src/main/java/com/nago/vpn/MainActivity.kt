@@ -256,7 +256,7 @@ class MainActivity : ComponentActivity() {
             ?: throw IllegalStateException("no wireguard key for ${region.name}")
         val endpoint = "${target.address}:${target.wgPort}"
         prefs.edit().putString("wgEndpoint", endpoint).putString("wgEngineUsed", o.engine).apply()
-        onPhase("${region.name}: wg/${o.engine} → $endpoint")
+        onPhase("${region.name}: wg/${engineName(o.engine)} → $endpoint")
         if (o.engine == "go") {
             if (NeptunVpnService.up.value) NeptunVpnService.stop(this)
             WgVpn.up(this, WgVpn.config(reg, serverPub, endpoint, o.wgDns, o.allowLan))
@@ -492,7 +492,7 @@ class MainActivity : ComponentActivity() {
 
     /** `wg/neptun · adblock · allow-lan` 처럼 지금 설정 */
     private fun flags(o: Options) = buildList {
-        add(if (o.proto == VpnProto.wg) "wg/${o.engine}" else o.proto.label)
+        add(if (o.proto == VpnProto.wg) "wg/${engineName(o.engine)}" else o.proto.label)
         when {
             o.adblock -> add("adblock")
             o.proto != VpnProto.ikev2 && o.dns != null -> add("dns " + o.dns.joinToString(","))
@@ -679,7 +679,7 @@ class MainActivity : ComponentActivity() {
         val connected = link == LinkState.Connected
         val busy = ui.busy
         val engine = prefs.getString("wgEngineUsed", o.engine) ?: o.engine
-        val proto = if (wgUp) "wg/$engine" else "ikev2"
+        val proto = if (wgUp) "wg/${engineName(engine)}" else "ikev2"
         val (tag, tagColor) = when {
             connected -> "[ OK ]" to Term.green
             busy || link == LinkState.Connecting -> "[ .. ]" to Term.amber
@@ -1005,7 +1005,7 @@ class MainActivity : ComponentActivity() {
                     TermDivider()
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("engine", style = Term.mono(15.sp, color = Term.muted), modifier = Modifier.weight(1f))
-                        TermChoice(listOf("neptun" to "neptun", "go" to "go"), engine, enabled) {
+                        TermChoice(listOf("nagotun" to "neptun", "go" to "go"), engine, enabled) {
                             engine = it
                             prefs.edit().putString("engine", it).apply()
                         }
@@ -1070,7 +1070,7 @@ class MainActivity : ComponentActivity() {
             TermBlock("about") {
                 val version = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull() ?: "?"
                 Text("nago vpn $version", style = Term.mono(13.sp))
-                Text("neptun ce18515 · wireguard-go 1.0.20230706", style = Term.mono(13.sp, color = Term.muted))
+                Text("nagotun 2.2.3-nago.1 (neptun ce18515) · wireguard-go 1.0.20230706", style = Term.mono(13.sp, color = Term.muted))
             }
         }
     }

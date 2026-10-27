@@ -1,6 +1,7 @@
 [package]
 # NagoTun 엔진 — NordSecurity NepTUN(BoringTun 포크)을 가져와 NAGO VPN에 맞게 고친 것.
 # 가져온 곳: https://github.com/NordSecurity/NepTUN rev ce185155e1639403cc40e01260d0830065a49555 (neptun 2.2.3)
+# 바꾼 것은 engine/README.md에 적는다.
 name = "nagotun_engine"
 description = "NagoTun: WireGuard engine for NAGO VPN (fork of NordSecurity NepTUN)"
 version = "2.2.3-nago.1"

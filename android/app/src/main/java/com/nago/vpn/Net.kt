@@ -18,6 +18,9 @@ import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
 
+/** 설정 값 "neptun"(예전 이름 그대로 저장)은 화면에 우리 엔진 이름 nagotun으로 */
+fun engineName(value: String): String = if (value == "neptun") "nagotun" else value
+
 /** 출구 IP가 이 나라로 보여야 하는 국가 코드 */
 val VpnRegion.countryCode: String
     get() = when (this) {

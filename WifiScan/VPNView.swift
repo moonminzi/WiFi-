@@ -14,7 +14,7 @@ struct VPNView: View {
     @AppStorage("vpnAdblock") private var adblock = false
     @AppStorage("vpnProtocol") private var proto: VPNProto = .auto
     @AppStorage("wgEngine") private var wgEngine = "neptun"
-    @AppStorage("wgLoops") private var wgLoops = 2
+    @AppStorage("wgLoops") private var wgLoops = 1
     @AppStorage("vpnAutoConnect") private var autoConnect: VPNAutoConnect = .off
     @AppStorage("vpnKillSwitch") private var killSwitch = false
     /// isp·exit 줄의 IP를 가린다(줄을 누르면 바뀜)
@@ -163,7 +163,7 @@ struct VPNView: View {
             if autoConnect != .off { parts.append("auto:\(autoConnect.label)") }
             return parts
         }
-        var parts = [effectiveProto == .wireguard ? "wg/\(wgEngine)" : effectiveProto.label]
+        var parts = [effectiveProto == .wireguard ? "wg/\(VPNView.engineName(wgEngine))" : effectiveProto.label]
         if effectiveProto == .wireguard, wgEngine == "neptun" { parts[0] += " ×\(wgLoops)" }
         if fastMode, effectiveProto != .wireguard { parts.append("gcm") }
         if adblock {
@@ -343,7 +343,7 @@ struct VPNView: View {
         case .unicorn?: return "unicorn"
         case .ikev2?: return "ikev2 · \(savedRegion.rawValue)"
         default:
-            let engine = wgEngine == "neptun" ? "wg/neptun ×\(wgLoops)" : "wg/\(wgEngine)"
+            let engine = wgEngine == "neptun" ? "wg/nagotun ×\(wgLoops)" : "wg/\(wgEngine)"
             return "\(engine) · \(savedRegion.rawValue)"
         }
     }
@@ -551,6 +551,11 @@ struct VPNView: View {
     private func distanceText(_ region: VPNRegion) -> String {
         let km = GeoPoint.here.km(to: region.geo)
         return km < 150 ? "local" : "\(RouteMath.grouped(Int(km))) km"
+    }
+
+    /// 설정 값 "neptun"(예전 이름 그대로 저장)은 화면에 우리 엔진 이름 nagotun으로
+    static func engineName(_ value: String) -> String {
+        value == "neptun" ? "nagotun" : value
     }
 
     /// 1:02:03 / 12:34

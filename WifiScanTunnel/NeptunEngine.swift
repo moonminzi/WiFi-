@@ -35,17 +35,17 @@ final class NeptunEngine {
     }
 
     /// 엔진 시작. 실패하면 이유를 던진다.
-    /// - loops: 이벤트 루프 수(1~4). 애플에선 NepTUN이 패킷을 이벤트 루프에서 바로 처리한다
-    ///   (작업 스레드·스레드 사이 대기열이 없다). utun 읽기와 UDP 받기는 한 번에 한 스레드만 잡으니(kqueue EV_DISPATCH)
-    ///   2개면 내려받기(받기→복호화→utun 쓰기)와 올리기·ACK(utun 읽기→암호화→보내기)가 다른 코어에서 겹친다.
-    ///   피어 잠금은 암·복호화하는 동안만 잡는다
+    /// - loops: 이벤트 루프 수(1~4, 기본 1). 애플에선 엔진이 패킷을 이벤트 루프에서 바로 처리한다
+    ///   (작업 스레드·스레드 사이 대기열이 없다). 2개면 내려받기와 올리기·ACK가 다른 코어에서 겹치지만,
+    ///   폰 속도에서는 패킷마다 다른 코어를 깨우고 피어 잠금을 다투는 비용이 더 커서 1개가 같은 속도에
+    ///   CPU를 25~32% 덜 쓴다(tools/nagotun-bench, 코어 2개에 묶어서 잼)
     func start(tunFD: Int32, privateKey: String, serverPub: String, endpoint: String, loops: Int) throws {
         let uapi = Self.uapi(privateKey: privateKey, serverPub: serverPub, endpoint: endpoint)
         let threads = UInt32(min(max(loops, 1), 4))
         // 마지막 인자(스레드 사이 대기열)는 애플에서 쓰이지 않는다
         guard let handle = uapi.withCString({ nago_tun_start(tunFD, $0, threads, 0) }) else {
             throw NSError(domain: "nago.neptun", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "neptun: \(Self.lastError())"])
+                          userInfo: [NSLocalizedDescriptionKey: "nagotun: \(Self.lastError())"])
         }
         tun = handle
         Self.log.info("started with \(threads) loops")
@@ -134,12 +134,12 @@ final class NeptunEngine {
     func replacePeer(serverPub: String, endpoint: String) throws {
         try queue.sync {
             guard let tun else { throw NSError(domain: "nago.neptun", code: 3,
-                                               userInfo: [NSLocalizedDescriptionKey: "neptun: not running"]) }
+                                               userInfo: [NSLocalizedDescriptionKey: "nagotun: not running"]) }
             let rc = Self.uapi(privateKey: nil, serverPub: serverPub, endpoint: endpoint)
                 .withCString { nago_tun_set(tun, $0) }
             if rc != 0 {
                 throw NSError(domain: "nago.neptun", code: Int(rc),
-                              userInfo: [NSLocalizedDescriptionKey: "neptun: uapi set errno \(rc)"])
+                              userInfo: [NSLocalizedDescriptionKey: "nagotun: uapi set errno \(rc)"])
             }
         }
     }

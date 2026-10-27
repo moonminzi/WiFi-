@@ -11,7 +11,7 @@ struct SettingsView: View {
     @AppStorage("wgEngine") private var wgEngine = "neptun"
     /// NepTUN 이벤트 루프 수. 2면 내려받기와 올리기(ACK 포함)가 다른 코어에서 돈다.
     /// (예전 queue 설정은 iOS에서 NepTUN이 쓰지 않아 뺐다 — README)
-    @AppStorage("wgLoops") private var wgLoops = 2
+    @AppStorage("wgLoops") private var wgLoops = 1
     @AppStorage("vpnFastMode") private var fastMode = true
     @AppStorage("vpnAdblock") private var adblock = false
     @AppStorage("vpnAutoConnect") private var autoConnect: VPNAutoConnect = .off
@@ -133,7 +133,7 @@ struct SettingsView: View {
             if proto == .auto || proto == .wireguard {
                 TermDivider()
                 row("engine") {
-                    TermChoice(options: [(label: "neptun", value: "neptun"), (label: "go", value: "go")],
+                    TermChoice(options: [(label: "nagotun", value: "neptun"), (label: "go", value: "go")],
                                selection: $wgEngine)
                 }
                 if wgEngine == "neptun" {
@@ -273,7 +273,7 @@ struct SettingsView: View {
         TermBlock(label: "about") {
             Text("nago vpn \(Self.version) · \(Edition.label)")
             if !Edition.isUser {
-                Text("neptun ce18515 · wireguard-go 1.0.16")
+                Text("nagotun 2.2.3-nago.1 (neptun ce18515) · wireguard-go 1.0.16")
                     .foregroundStyle(Term.muted)
             }
         }

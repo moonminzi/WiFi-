@@ -38,8 +38,11 @@ class NeptunVpnService : VpnService() {
 
     companion object {
         private const val ACTION_STOP = "com.nago.vpn.NEPTUN_STOP"
-        /** NordVPN(libtelio)과 같게 안드로이드는 이벤트 루프 4개 */
-        private const val THREADS = 4
+        /**
+         * NagoTun 이벤트 루프 1개. 패킷은 루프에서 바로 처리한다(작업 스레드 없음).
+         * NepTUN 방식(루프 4개 + 작업 스레드)보다 같은 속도에 1GB당 CPU가 절반 안팎(tools/nagotun-bench)
+         */
+        private const val THREADS = 1
 
         val up = MutableStateFlow(false)
         val failure = MutableStateFlow<String?>(null)
@@ -69,7 +72,7 @@ class NeptunVpnService : VpnService() {
                 failure.value?.let { throw IllegalStateException(it) }
                 delay(200)
             }
-            throw IllegalStateException("neptun: start timeout")
+            throw IllegalStateException("nagotun: start timeout")
         }
 
         private fun prefs(context: Context) = context.getSharedPreferences("nago", Context.MODE_PRIVATE)
@@ -127,7 +130,7 @@ class NeptunVpnService : VpnService() {
         val s = pending ?: restore(this)
         pending = null
         if (s == null) {
-            fail("neptun: no saved config")
+            fail("nagotun: no saved config")
             return START_NOT_STICKY
         }
         // 여기서 예외가 나면 앱 프로세스째 죽고, START_STICKY라 시스템이 다시 띄우며 또 죽는다 → 실패로 돌린다
@@ -136,7 +139,7 @@ class NeptunVpnService : VpnService() {
             START_STICKY
         } catch (e: Exception) {
             teardown(null)
-            fail("neptun: ${e.javaClass.simpleName}: ${e.message}")
+            fail("nagotun: ${e.javaClass.simpleName}: ${e.message}")
             START_NOT_STICKY
         }
     }
@@ -169,7 +172,7 @@ class NeptunVpnService : VpnService() {
         }
         val tun = runCatching { builder.establish() }.getOrNull()
         if (tun == null) {
-            fail("neptun: vpn permission missing")
+            fail("nagotun: vpn permission missing")
             return
         }
         val fd = tun.detachFd()
@@ -180,14 +183,14 @@ class NeptunVpnService : VpnService() {
             if (error.startsWith("tun fd") || error.startsWith("uapi is not")) {
                 runCatching { ParcelFileDescriptor.adoptFd(fd).close() }
             }
-            fail("neptun: $error")
+            fail("nagotun: $error")
             return
         }
         synchronized(lock) { handle = h }
         session = s
         running = this
         up.value = true
-        NagoLog.add("neptun: up → ${s.endpoint}")
+        NagoLog.add("nagotun: up → ${s.endpoint}")
         LinkMonitor.start { stats() }
         watchNetwork()
         startWatchdog()
@@ -213,7 +216,7 @@ class NeptunVpnService : VpnService() {
             if (h != 0L) NeptunNative.stop(h)
             h != 0L
         }
-        if (stopped && reason != null) NagoLog.add("neptun: $reason")
+        if (stopped && reason != null) NagoLog.add("nagotun: $reason")
         session = null
         if (running === this) {
             running = null
@@ -249,7 +252,7 @@ class NeptunVpnService : VpnService() {
                 current = network
                 if (previous == null || previous == network) return
                 synchronized(lock) { if (handle != 0L) NeptunNative.networkChanged(handle) }
-                NagoLog.add("neptun: network changed")
+                NagoLog.add("nagotun: network changed")
             }
         }
         // 앱은 VPN에서 빠져 있어서 앱 기준 기본 망 = 실제 와이파이/모바일 데이터.

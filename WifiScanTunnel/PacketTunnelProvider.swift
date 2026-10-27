@@ -61,7 +61,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             self.dns = (p["dns"] as? [String]) ?? ["1.1.1.1"]
             self.mtu = (p["mtu"] as? Int) ?? 1420
             self.engine = (p["engine"] as? String) ?? "neptun"
-            self.loops = (p["loops"] as? Int) ?? 2
+            self.loops = (p["loops"] as? Int) ?? 1
             self.region = p["region"] as? String
             self.apiKey = p["apiKey"] as? String
         }
@@ -120,7 +120,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         current = settings
-        let engineLabel = settings.engine == "go" ? "go" : "neptun ×\(settings.loops)"
+        let engineLabel = settings.engine == "go" ? "go" : "nagotun ×\(settings.loops)"
         journal.add("start \(engineLabel) → \(settings.endpoint)" + (onDemand ? " · on-demand" : ""))
         let done: (Error?) -> Void = { [weak self] error in
             Task { @MainActor in
@@ -280,7 +280,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
                 guard let fd = NeptunEngine.utunFileDescriptor() else {
                     completionHandler(NSError(domain: "nago.neptun", code: 2,
-                                              userInfo: [NSLocalizedDescriptionKey: "neptun: utun not found"]))
+                                              userInfo: [NSLocalizedDescriptionKey: "nagotun: utun not found"]))
                     return
                 }
                 let engine = NeptunEngine()

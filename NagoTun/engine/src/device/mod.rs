@@ -123,13 +123,28 @@ where
             port
         };
 
-        let udp_sock6 = socket2::Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+        // NagoTun: IPv6가 없는 커널(일부 리눅스, 벤치 VM)에서도 뜨게 한다. v6 소켓을 못 만들면
+        // 쓰지 않는 v4 소켓으로 자리만 채운다(v6 주소로 보낼 일이 없다). 폰에서는 늘 v6 소켓이 만들어진다.
+        let (udp_sock6, has_v6) =
+            match socket2::Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)) {
+                Ok(sock) => (sock, true),
+                Err(error) if error.raw_os_error() == Some(libc::EAFNOSUPPORT) => (
+                    socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?,
+                    false,
+                ),
+                Err(error) => return Err(error),
+            };
         udp_sock6.set_reuse_address(true)?;
 
-        match bind_ipv6(
-            &udp_sock6,
-            SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, bound_port, 0, 0),
-        ) {
+        let bound = if has_v6 {
+            bind_ipv6(
+                &udp_sock6,
+                SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, bound_port, 0, 0),
+            )
+        } else {
+            udp_sock6.bind(&SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0).into())
+        };
+        match bound {
             Ok(()) => return Ok((udp_sock4, udp_sock6, bound_port)),
             Err(error)
                 if port == 0
@@ -229,6 +244,10 @@ pub struct DeviceConfig {
     pub skt_buffer_size: Option<usize>,
     pub inter_thread_channel_size: Option<usize>,
     pub max_inter_thread_batched_pkts: Option<usize>,
+    /// NagoTun: 애플 밖(안드로이드·리눅스)에서도 패킷을 이벤트 루프에서 바로 처리한다(애플과 같은 방식).
+    /// 끄면 NepTUN처럼 작업 스레드로 넘긴다. 폰 속도(수백 Mbps 이하)에서는 패킷마다 스레드를 깨우는
+    /// 비용이 암호화보다 커서, 바로 처리하는 쪽이 1GB당 CPU를 덜 쓴다(tools/nagotun-bench). 애플에선 늘 켜진 것과 같다.
+    pub inline_packets: bool,
 }
 
 pub struct Device {
@@ -761,7 +780,7 @@ impl Device {
         mtu: usize,
         config: DeviceConfig,
     ) -> Result<Device, Error> {
-        let poll = EventPoll::<Handler>::new()?;
+        let poll = EventPoll::<Handler>::with_threads(config.n_threads)?;
 
         #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
         let workers = PacketWorkers::new(&config);
@@ -864,9 +883,11 @@ impl Device {
         self.register_udp_handler(udp4.clone())?;
         self.register_udp_handler(udp6.clone())?;
 
-        // Process packet in a separate thread for non-Apple platforms
+        // Process packet in a separate thread for non-Apple platforms (NagoTun: unless inline)
         #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
-        self.workers.start(udp4, udp6, &self.config);
+        if !self.config.inline_packets {
+            self.workers.start(udp4, udp6, &self.config);
+        }
 
         self.listen_port = port;
 
@@ -1240,10 +1261,13 @@ impl Device {
                 // with a known peer, this saves us the hustle of finding the right peer. If another
                 // peer gets the same ip, it will be ignored until the socket does not expire.
                 let max_batched_pkts = d.workers.max_batched_pkts;
+                let inline = d.config.inline_packets;
                 loop {
-                    let mut batched_pkts = Vec::with_capacity(max_batched_pkts);
+                    // 바로 처리할 때는 묶음을 만들지 않는다(묶음 하나가 패킷 50개 자리 ≈ 80KB라 깰 때마다 할당하게 된다)
+                    let mut batched_pkts =
+                        Vec::with_capacity(if inline { 0 } else { max_batched_pkts });
                     let mut socket_buffer_exhausted = false;
-                    for _ in 0..batched_pkts.capacity() {
+                    for _ in 0..max_batched_pkts {
                         // Safety: the `recv_from` implementation promises not to write uninitialised
                         // bytes to the buffer, so this casting is safe.
                         let src_buf = unsafe {
@@ -1284,14 +1308,25 @@ impl Device {
                                     }
                                 }
                                 TunnResult::WriteToTunnel(packet, addr) => {
-                                    let worker_data = TunnelWorkerData {
-                                        buf_len: packet.len(),
-                                        addr,
-                                        buffer,
-                                        iface: t.iface.clone(),
-                                        peer: peer.clone(),
-                                    };
-                                    batched_pkts.push(worker_data);
+                                    if inline {
+                                        if let Some(callback) = &d.config.firewall_process_inbound_callback {
+                                            if !callback(peer.public_key.as_bytes(), packet) {
+                                                continue;
+                                            }
+                                        }
+                                        if peer.is_allowed_ip(addr) {
+                                            _ = t.iface.as_ref().write(packet);
+                                        }
+                                    } else {
+                                        let worker_data = TunnelWorkerData {
+                                            buf_len: packet.len(),
+                                            addr,
+                                            buffer,
+                                            iface: t.iface.clone(),
+                                            peer: peer.clone(),
+                                        };
+                                        batched_pkts.push(worker_data);
+                                    }
                                 }
                             }
 
@@ -1318,7 +1353,10 @@ impl Device {
                         }
                     }
 
-                    d.workers.submit_inbound(batched_pkts);
+                    // 빈 묶음으로 tun 작업 스레드를 깨우지 않는다
+                    if !batched_pkts.is_empty() {
+                        d.workers.submit_inbound(batched_pkts);
+                    }
 
                     if socket_buffer_exhausted {
                         break;
@@ -1355,9 +1393,14 @@ impl Device {
                 }
 
                 // On non-Apple platforms, batch packets and send them to a worker thread for processing
+                // (NagoTun: or process them inline like Apple when `inline_packets`)
                 #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
                 {
-                    d.workers.dispatch_iface_read(&iface, &mtu, peers)
+                    if d.config.inline_packets {
+                        process_iface_inline(d, _t, &iface, &mtu, peers)
+                    } else {
+                        d.workers.dispatch_iface_read(&iface, &mtu, peers)
+                    }
                 }
             }),
         )?;
@@ -1369,7 +1412,6 @@ impl Device {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 fn process_iface_inline(
     device: &Device,
     thread_data: &mut ThreadData,
@@ -1556,8 +1598,16 @@ impl Default for IndexLfsr {
 mod tests {
     use super::*;
 
+    /// 이 기계에서 IPv6 UDP 소켓을 만들 수 있는지
+    fn has_ipv6() -> bool {
+        socket2::Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).is_ok()
+    }
+
     #[test]
     fn random_listen_port_retries_ipv6_address_in_use() {
+        if !has_ipv6() {
+            return; // NagoTun: IPv6가 없는 커널에선 v6 bind를 아예 안 하니(대체 소켓) 잴 게 없다
+        }
         let mut ipv6_bind_attempts = 0;
 
         let (udp_sock4, udp_sock6, port) = bind_listen_sockets_with(0, |socket, address| {
@@ -1583,6 +1633,9 @@ mod tests {
 
     #[test]
     fn random_listen_port_stops_after_maximum_bind_attempts() {
+        if !has_ipv6() {
+            return; // NagoTun: IPv6가 없는 커널에선 v6 bind를 아예 안 하니(대체 소켓) 잴 게 없다
+        }
         let mut ipv6_bind_attempts = 0;
 
         let error = bind_listen_sockets_with(0, |_, _| {
@@ -1597,6 +1650,9 @@ mod tests {
 
     #[test]
     fn fixed_listen_port_does_not_retry_ipv6_address_in_use() {
+        if !has_ipv6() {
+            return; // NagoTun: IPv6가 없는 커널에선 v6 bind를 아예 안 하니(대체 소켓) 잴 게 없다
+        }
         let probe = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
@@ -1675,6 +1731,7 @@ mod tests {
             skt_buffer_size: None,
             inter_thread_channel_size: None,
             max_inter_thread_batched_pkts: None,
+            inline_packets: false,
         };
 
         (
