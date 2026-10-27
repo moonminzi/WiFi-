@@ -334,10 +334,15 @@ struct RegionChip: View {
                     Circle().fill(Term.green).frame(width: 5, height: 5)
                         .shadow(color: Term.green, radius: 2)
                 } else {
-                    Text(measured.map { "\($0)ms" } ?? "~\(RegionCard.rtt(region))")
-                        .font(Term.mono(9, measured == nil ? .regular : .semibold))
-                        .foregroundStyle(Term.muted)
-                        .lineLimit(1)
+                    // 좁은 화면(SE)에선 칸이 좁아 "238ms"가 잘린다 — 들어가지 않으면 숫자만
+                    let ms = measured.map { "\($0)" } ?? "~\(RegionCard.rtt(region))"
+                    ViewThatFits(in: .horizontal) {
+                        Text(ms + "ms")
+                        Text(ms)
+                    }
+                    .font(Term.mono(9, measured == nil ? .regular : .semibold))
+                    .foregroundStyle(Term.muted)
+                    .lineLimit(1)
                 }
             }
             .padding(.horizontal, 7)
