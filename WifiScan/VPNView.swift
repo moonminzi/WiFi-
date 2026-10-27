@@ -477,7 +477,14 @@ struct VPNView: View {
             if Demo.on { await probe.measure() }
             try? await Task.sleep(for: .seconds(1.5))
             guard !Task.isCancelled else { return }
-            exitInfo = await ExitInfo.fetch()
+            var info = await ExitInfo.fetch()
+            // 막 붙었을 때 한 번 다르게 나오면 3초 뒤 한 번 더 본다(경로가 자리 잡는 중일 수 있다) — 그래도 다르면 leak?
+            if let first = info, !onDevice, first.country != savedRegion.countryCode {
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled else { return }
+                info = await ExitInfo.fetch() ?? first
+            }
+            exitInfo = info
         case .disconnected, .invalid:
             exitInfo = nil
             async let info = ExitInfo.fetch()

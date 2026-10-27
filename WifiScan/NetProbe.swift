@@ -76,7 +76,12 @@ struct ExitInfo: Equatable {
         guard let url = URL(string: "https://1.1.1.1/cdn-cgi/trace") else { return nil }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 6)
         request.httpMethod = "GET"
-        guard let (data, _) = try? await URLSession.shared.data(for: request),
+        // 잴 때마다 새 세션(새 연결). 함께 쓰는 세션은 연결 전에 isp를 잴 때 열어 둔 1.1.1.1 연결을 다시 쓰는데,
+        // 그 연결은 터널이 생기기 전 회선(와이파이·LTE)에 묶여 있어 VPN이 켜진 뒤에도 그쪽으로 나간다
+        // → 제대로 연결됐는데 KR이 보이고 "not JP — leak?"이 떴다
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.finishTasksAndInvalidate() }
+        guard let (data, _) = try? await session.data(for: request),
               let text = String(data: data, encoding: .utf8) else { return nil }
         var fields: [String: String] = [:]
         for line in text.split(separator: "\n") {

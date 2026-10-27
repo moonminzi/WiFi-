@@ -161,7 +161,7 @@ private enum Probes {
         guard let url = URL(string: "http://captive.apple.com/hotspot-detect.html") else {
             return Check(id: "portal", detail: "skipped", level: .info)
         }
-        guard let (data, response) = try? await session.data(from: url) else {
+        guard let (data, response) = try? await load(from: url) else {
             return Check(id: "portal", detail: "apple check unreachable", level: .warn)
         }
         let body = String(data: data, encoding: .utf8) ?? ""
@@ -195,7 +195,7 @@ private enum Probes {
         }
         var request = URLRequest(url: url)
         request.setValue("application/dns-json", forHTTPHeaderField: "accept")
-        guard let (data, response) = try? await session.data(for: request),
+        guard let (data, response) = try? await load(request),
               (response as? HTTPURLResponse)?.statusCode == 200,
               String(data: data, encoding: .utf8)?.contains("1.1.1.1") == true else {
             return Check(id: "doh", detail: "encrypted dns blocked · try unicorn or wg", level: .warn)
@@ -229,7 +229,7 @@ private enum Probes {
             return Check(id: "ipv6", detail: v6 ? "ipv6 available · rescan with vpn on to test leaks" : "ipv4 only", level: .info)
         }
         guard let url = URL(string: "https://[2606:4700:4700::1111]/cdn-cgi/trace"),
-              let (data, _) = try? await session.data(from: url),
+              let (data, _) = try? await load(from: url),
               let text = String(data: data, encoding: .utf8) else {
             return Check(id: "ipv6", detail: "no ipv6 path around the tunnel", level: .pass)
         }
@@ -278,7 +278,19 @@ private enum Probes {
         return config
     }
 
-    static let session = URLSession(configuration: config)
+    /// 검사마다 새 세션(연결을 다시 쓰지 않는다). VPN을 켜고 끄는 사이에 예전 회선에 묶인 연결을 다시 쓰면
+    /// 터널 밖으로 나가서 결과가 틀린다(연결됐는데 출구가 KR로 보이는 것)
+    static func load(from url: URL) async throws -> (Data, URLResponse) {
+        let session = URLSession(configuration: config)
+        defer { session.finishTasksAndInvalidate() }
+        return try await session.data(from: url)
+    }
+
+    static func load(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        let session = URLSession(configuration: config)
+        defer { session.finishTasksAndInvalidate() }
+        return try await session.data(for: request)
+    }
 
     static func trace(_ text: String) -> [String: String] {
         var fields: [String: String] = [:]
