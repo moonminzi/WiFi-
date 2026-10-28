@@ -63,6 +63,8 @@ targets:
       - path: WifiScan/VPNRegion.swift
       # 유니콘 HTTPS 설정을 앱이 만들고 확장이 읽는다(앱과 같은 코드)
       - path: WifiScan/UnicornSettings.swift
+      # nagoing(막힌 망 우회) 설정을 앱이 만들고 확장이 읽는다(앱과 같은 코드)
+      - path: WifiScan/NagoingSettings.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan.tunnel   # 앱 번들 ID + .tunnel

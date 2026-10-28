@@ -95,14 +95,22 @@ cargo run --release --example nagoing_proxy -- server <psk> 0.0.0.0:443 0.0.0.0:
 cargo run --release --example nagoing_proxy -- client <psk> <server_ip> 443 443 127.0.0.1:51820 auto
 ```
 
-## 통합 경로 (다음 단계)
+## 통합 상태
 
-리눅스 코어·PoC가 끝났다. 다음은 기기·서버 통합이다(이 클라우드 환경에선 리눅스까지만 검증 가능).
+- **리눅스 코어·PoC** — 완료. `NagoTun/src/nagoing/`, 테스트 20개, `examples/nagoing_loopback`.
+- **iOS 앱** — 연결됨. protocol `nagoing`을 고르면 터널 확장이 `nago_nagoing_client_*`(C FFI)로 프록시를
+  띄우고 NepTUN의 endpoint를 로컬 포트(127.0.0.1:51822)로 돌린다. `NWPathMonitor`가 경로 변화 때
+  `nago_nagoing_network_changed`를 부르고, 서버가 꺼졌다 켜져 IP가 바뀌면 watchdog이 프록시만 새 IP로 다시 띄운다.
+  settings 탭에 `nagoing` 블록(`prefer`·`--fec`). 나갈 국가·adblock·auto-connect는 wg와 같다.
+  - 앱 쪽: `WifiScan/NagoingSettings.swift`, `VPNManager.saveNagoing`, `VPNView`, `SettingsView`
+  - 확장: `WifiScanTunnel/NagoingProxy.swift`, `PacketTunnelProvider`(mode `nagoing`)
 
-- **iOS/안드로이드**: `nago_nagoing_client_*`(C FFI, `NagoTun/include/nago_tun.h`)로 프록시를 띄우고
-  NepTUN의 endpoint를 로컬 포트로 돌린다. 네트워크 경로가 바뀌면(`NWPathMonitor` / 안드로이드 `ConnectivityManager`)
-  `nago_nagoing_network_changed`를 부른다. 설정 탭에 protocol `nagoing` + `--fec`·`prefer` 토글 추가.
-- **서버**: 443에 서버 프록시를 올리고(systemd), wg0는 지금처럼 51820. `server/wireguard/`에 설치 스크립트 추가.
-- **운영 강화**: 진짜 uTLS/QUIC, r>1 Reed–Solomon(2개 이상 동시 손실), 혼잡 제어, 리플레이 방지.
+### 남은 단계
+
+- **서버 nagoing 프록시 배포** — 443에 서버 프록시를 올리고(systemd + `examples/nagoing_proxy server`),
+  wg0는 지금처럼 51820. `server/wireguard/`에 설치 스크립트. **이게 떠야 iOS의 nagoing이 실제로 붙는다**
+  (지금은 앱에서 고를 수 있고 빌드되지만, 서버 프록시가 없으면 연결은 안 된다).
+- **안드로이드** — iOS와 같은 FFI로 `NeptunVpnService`에 nagoing 경로 추가.
+- **운영 강화** — 진짜 uTLS/QUIC, r>1 Reed–Solomon(2개 이상 동시 손실), 혼잡 제어, 리플레이 방지.
 
 코드: `NagoTun/src/nagoing/`(`obfs`·`frame`·`fec`·`transport`·`proxy`), 예제 `NagoTun/examples/nagoing_*.rs`.
