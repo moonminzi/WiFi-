@@ -31,6 +31,10 @@ BRANCH="${NAGO_BRANCH:-main}"   # nagoing이 main에 병합되기 전에는 기�
 SRC=/opt/nago/WiFi-
 BIN=/usr/local/sbin/nagoing-proxy
 
+echo ">> C 링커 확인/설치(rustc가 링크에 cc를 쓴다 — 최소 우분투엔 없다)"
+command -v cc >/dev/null 2>&1 || apt-get -o DPkg::Lock::Timeout=120 install -y build-essential >/dev/null \
+  || { apt-get -o DPkg::Lock::Timeout=120 update -y >/dev/null; apt-get -o DPkg::Lock::Timeout=120 install -y build-essential >/dev/null; }
+
 echo ">> Rust 확인/설치"
 if ! command -v cargo >/dev/null 2>&1; then
   export PATH="$HOME/.cargo/bin:$PATH"

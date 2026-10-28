@@ -53,6 +53,15 @@ final class NagoingProxy {
         nago_nagoing_network_changed(client)
     }
 
+    /// 경로가 바뀌었다고 알려 전송을 다시 세운다(watchdog/NWPathMonitor에서 호출).
+    func networkChanged() {
+        queue.sync {
+            if let client {
+                nago_nagoing_network_changed(client)
+            }
+        }
+    }
+
     /// 상태 한 줄("udp · tx .. · rx .. · fec+..").
     func stats() -> String? {
         queue.sync {
