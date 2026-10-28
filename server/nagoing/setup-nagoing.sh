@@ -19,6 +19,8 @@
 # 환경변수(선택): NAGO_PSK(난독화 키, 클라와 같아야 함), NAGO_UDP_PORT, NAGO_TCP_PORT, WG_ADDR, REPO, FORCE_BUILD=1
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+# SSM/cloud-init 등 HOME 없는 환경에서도 돌게(rustup·cargo가 HOME을 쓴다).
+export HOME="${HOME:-/root}"
 
 PSK="${NAGO_PSK:-nago-obfs-v1}"
 UDP_PORT="${NAGO_UDP_PORT:-51821}"
