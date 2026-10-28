@@ -16,6 +16,8 @@ default = ["engine"]
 engine = ["dep:neptun", "dep:base64", "dep:libc"]
 
 [dependencies]
+# nagoing 난독화 nonce·난수용(OS 난수). 작고 git이 아니라 서버 빌드도 가볍다.
+getrandom = "0.2"
 # NordVPN이 쓰는 WireGuard 엔진(BoringTun 포크, BSD-3-Clause). 버전 고정. engine 기능에서만 쓴다.
 neptun = { git = "https://github.com/NordSecurity/NepTUN", rev = "ce185155e1639403cc40e01260d0830065a49555", features = ["device"], optional = true }
 # 0.2.187부터 iOS에서 sockaddr_ctl 등을 macOS 전용으로 막아 nix(neptun 의존성)가 iOS로 안 빌드됨. NepTUN이 쓰는 버전으로 고정.

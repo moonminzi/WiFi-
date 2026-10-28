@@ -26,41 +26,26 @@ pub use proxy::{
 };
 pub use transport::Kind;
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-static RNG_STATE: AtomicU64 = AtomicU64::new(0);
-
-/// 가벼운 난수(보안용 아님): session_id, connection id, TLS random 등 유일성에만 쓴다.
-/// SystemTime으로 한 번 시드하고 splitmix64로 뽑는다.
-pub fn rand_u64() -> u64 {
-    let mut s = RNG_STATE.load(Ordering::Relaxed);
-    if s == 0 {
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+/// buf를 OS 난수로 채운다(getrandom: 리눅스 getrandom(2)/iOS SecRandom/안드로이드). 스레드 안전·암호급.
+/// 패킷 nonce, session_id, connection id, TLS random에 쓴다.
+pub fn rand_bytes(buf: &mut [u8]) {
+    if getrandom::getrandom(buf).is_err() {
+        // 극히 드문 실패 — 적어도 서로 다른 값이 나오게 시간 기반으로 채운다(nonce 유일성 유지).
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x9E37_79B9_7F4A_7C15)
-            ^ (&RNG_STATE as *const _ as u64);
-        s = seed | 1;
+            .unwrap_or(0);
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = (t >> ((i % 8) * 8)) as u8 ^ (i as u8).wrapping_mul(31);
+        }
     }
-    // splitmix64
-    s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    RNG_STATE.store(s, Ordering::Relaxed);
-    let mut z = s;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
 }
 
-/// buf를 난수로 채운다.
-pub fn rand_bytes(buf: &mut [u8]) {
-    let mut i = 0;
-    while i < buf.len() {
-        let r = rand_u64().to_le_bytes();
-        let n = (buf.len() - i).min(8);
-        buf[i..i + n].copy_from_slice(&r[..n]);
-        i += n;
-    }
+/// 난수 u64.
+pub fn rand_u64() -> u64 {
+    let mut b = [0u8; 8];
+    rand_bytes(&mut b);
+    u64::from_le_bytes(b)
 }
 
 #[cfg(test)]

@@ -25,6 +25,7 @@ UDP_PORT="${NAGO_UDP_PORT:-51821}"
 TCP_PORT="${NAGO_TCP_PORT:-443}"
 WG_ADDR="${WG_ADDR:-127.0.0.1:51820}"
 REPO="${REPO:-https://github.com/moonminzi/WiFi-}"
+BRANCH="${NAGO_BRANCH:-main}"   # nagoing이 main에 병합되기 전에는 기능 브랜치를 가리킨다
 SRC=/opt/nago/WiFi-
 BIN=/usr/local/sbin/nagoing-proxy
 
@@ -42,9 +43,9 @@ echo ">> 소스 받기/갱신"
 command -v git >/dev/null || apt-get -o DPkg::Lock::Timeout=120 install -y git >/dev/null
 mkdir -p /opt/nago
 if [ -d "$SRC/.git" ]; then
-  git -C "$SRC" fetch --depth 1 origin main >/dev/null 2>&1 && git -C "$SRC" reset --hard origin/main >/dev/null 2>&1 || true
+  git -C "$SRC" fetch --depth 1 origin "$BRANCH" >/dev/null 2>&1 && git -C "$SRC" reset --hard FETCH_HEAD >/dev/null 2>&1 || true
 else
-  git clone --depth 1 "$REPO" "$SRC" >/dev/null 2>&1
+  git clone --depth 1 --branch "$BRANCH" "$REPO" "$SRC" >/dev/null 2>&1
 fi
 
 # 바이너리가 이미 있고 소스가 안 바뀌었으면 빌드를 건너뛴다(FORCE_BUILD=1로 강제).

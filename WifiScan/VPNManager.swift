@@ -289,7 +289,9 @@ final class VPNManager {
             // NepTUN은 로컬 프록시로 붙는다. 실제 서버 주소는 serverIP로 따로 넘긴다.
             "endpoint": "127.0.0.1:\(settings.localPort)",
             "dns": dns,
-            "mtu": 1420,
+            // nagoing이 패킷마다 ~24B를 더 붙인다. WG 오버헤드까지 더해 바깥 UDP가 1500을 안 넘게 낮춘다
+            // (IPv6 경로까지 안전하게 1380). 안 그러면 큰 패킷이 조각나 모바일 망에서 버려진다(리뷰 #3).
+            "mtu": 1380,
             "engine": "neptun",
             "queue": 8,
             "region": region,

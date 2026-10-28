@@ -43,17 +43,18 @@ pub fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64
     out
 }
 
-/// 방향 + 카운터로 12바이트 nonce를 만든다: [dir, 0,0,0, counter(8 LE)].
-fn nonce_for(dir: u8, counter: u64) -> [u8; 12] {
+/// 방향 + 패킷 nonce(8바이트, 패킷마다 무작위)로 12바이트 ChaCha nonce를 만든다: [dir, 0,0,0, nonce8].
+/// nonce8은 선 위에 평문으로 실어 수신 측이 같은 keystream을 만든다. 무작위라 클라끼리 키스트림이 겹치지 않는다.
+fn nonce_for(dir: u8, nonce8: &[u8; 8]) -> [u8; 12] {
     let mut n = [0u8; 12];
     n[0] = dir;
-    n[4..12].copy_from_slice(&counter.to_le_bytes());
+    n[4..12].copy_from_slice(nonce8);
     n
 }
 
-/// data를 keystream으로 제자리 XOR한다. (dir, counter)가 nonce를 정하므로 같은 값으로 다시 부르면 복호화된다.
-pub fn apply(key: &[u8; 32], dir: u8, counter: u64, data: &mut [u8]) {
-    let nonce = nonce_for(dir, counter);
+/// data를 keystream으로 제자리 XOR한다. (dir, nonce8)이 nonce를 정하므로 같은 값으로 다시 부르면 복호화된다.
+pub fn apply(key: &[u8; 32], dir: u8, nonce8: &[u8; 8], data: &mut [u8]) {
+    let nonce = nonce_for(dir, nonce8);
     let mut block_ctr: u32 = 0;
     let mut off = 0;
     let total = data.len();
@@ -109,22 +110,24 @@ mod tests {
     #[test]
     fn apply_roundtrip() {
         let key = derive_key(b"nago-secret");
+        let nonce = [9u8, 8, 7, 6, 5, 4, 3, 2];
         let mut data = b"the quick brown fox jumps over the lazy dog, several times over".to_vec();
         let original = data.clone();
-        apply(&key, DIR_C2S, 42, &mut data);
+        apply(&key, DIR_C2S, &nonce, &mut data);
         assert_ne!(data, original); // 실제로 가려졌는지
-        apply(&key, DIR_C2S, 42, &mut data);
-        assert_eq!(data, original); // 같은 (dir,counter)로 되돌아옴
+        apply(&key, DIR_C2S, &nonce, &mut data);
+        assert_eq!(data, original); // 같은 (dir,nonce)로 되돌아옴
     }
 
     #[test]
     fn direction_separation() {
-        // 같은 카운터라도 방향이 다르면 다른 keystream → 평문 누출 없음.
+        // 같은 nonce라도 방향이 다르면 다른 keystream → 평문 누출 없음.
         let key = derive_key(b"k");
+        let nonce = [1u8, 2, 3, 4, 5, 6, 7, 8];
         let mut a = vec![0u8; 32];
         let mut b = vec![0u8; 32];
-        apply(&key, DIR_C2S, 7, &mut a);
-        apply(&key, DIR_S2C, 7, &mut b);
+        apply(&key, DIR_C2S, &nonce, &mut a);
+        apply(&key, DIR_S2C, &nonce, &mut b);
         assert_ne!(a, b);
     }
 

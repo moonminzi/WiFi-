@@ -24,15 +24,25 @@ pub enum Kind {
 }
 
 // ── UDP (QUIC short-header 꼴) ────────────────────────────────────────────────
-// 첫 바이트 0b01xxxxxx(0x40 세트) = QUIC short header 폼. 뒤에 4바이트 connection id.
-const QUIC_FLAG: u8 = 0x41;
+// 첫 바이트는 0b01xxxxxx(상위 2비트 01 = QUIC short header 폼) + 하위 6비트 무작위.
+// 고정 0x41이면 지문이 되므로 패킷마다 하위 비트를 흩뜨린다. 뒤에 4바이트 connection id(세션 식별).
 const QUIC_HDR: usize = 5;
 
 pub fn udp_wrap(inner: &[u8], cid: u32, out: &mut Vec<u8>) {
     out.clear();
-    out.push(QUIC_FLAG);
+    let mut r = [0u8; 1];
+    super::rand_bytes(&mut r);
+    out.push(0x40 | (r[0] & 0x3f));
     out.extend_from_slice(&cid.to_be_bytes());
     out.extend_from_slice(inner);
+}
+
+/// 데이터그램의 connection id(세션 식별용). 헤더가 안 맞으면 None.
+pub fn udp_cid(datagram: &[u8]) -> Option<u32> {
+    if datagram.len() < QUIC_HDR || datagram[0] & 0xC0 != 0x40 {
+        return None;
+    }
+    Some(u32::from_be_bytes([datagram[1], datagram[2], datagram[3], datagram[4]]))
 }
 
 /// 받은 데이터그램에서 inner message 부분을 돌려준다(헤더가 안 맞으면 None).

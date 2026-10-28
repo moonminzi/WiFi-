@@ -463,7 +463,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                         journal.add("✗ \(code): nagoing restart: \(error.localizedDescription)")
                     }
                 } else {
-                    journal.add("\(code): up · \(target.address)")
+                    // IP가 같아도(서울처럼 고정 IP 서버 재부팅) 전송을 다시 세우라고 알린다(리뷰 #1).
+                    journal.add("\(code): up · \(target.address) · nagoing rebind")
+                    proxy.networkChanged()
                 }
                 // 서버 WG 키가 바뀐 드문 경우에만 피어를 바꾼다(endpoint는 로컬 그대로).
                 if serverPub != s.serverPub {

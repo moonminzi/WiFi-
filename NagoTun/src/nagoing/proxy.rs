@@ -33,6 +33,19 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(1500);
 const KEEPALIVE: Duration = Duration::from_secs(5);
 const HELLO_RETRIES: usize = 3;
 const MAX_MSG: usize = 2048;
+/// TCP 쓰기 제한. 한 클라이언트의 멈춘 쓰기가 잠금을 오래 쥐지 못하게 한다(①#2).
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// 클라이언트가 이만큼 아무것도 못 받으면 전송을 다시 세운다(서버 재시작·NAT 변경 복구, #1).
+const CLIENT_STALE: Duration = Duration::from_secs(15);
+/// 서버가 이만큼 조용한 세션은 정리한다(자원 누수 방지, #5).
+const SESSION_IDLE: Duration = Duration::from_secs(300);
+
+/// 단조 증가 ms(유휴 판단용).
+fn now_ms() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
 
 #[derive(Clone, Copy)]
 pub struct FecParams {
@@ -107,18 +120,21 @@ struct Session {
     ret: Mutex<Return>,
     enc: Mutex<FecEncoder>, // wg→client
     dec: Mutex<FecDecoder>, // client→wg
-    tx_ctr: AtomicU64,      // s2c nonce
     fec_on: bool,
     alive: Arc<AtomicBool>,
     recovered: Arc<AtomicU64>, // client→wg 방향에서 FEC로 되살린 조각 수(서버 전체 합산)
+    last_seen: AtomicU64,      // 마지막 수신 시각(ms). 유휴 정리에 쓴다
 }
 
 impl Session {
     fn send_frame(&self, key: &[u8; 32], frame: &Frame) -> io::Result<()> {
-        let ctr = self.tx_ctr.fetch_add(1, Ordering::Relaxed);
         let mut out = Vec::new();
-        frame::encode(frame, key, DIR_S2C, ctr, &mut out);
+        frame::encode(frame, key, DIR_S2C, &mut out);
         self.ret.lock().unwrap().send(&out)
+    }
+
+    fn touch(&self) {
+        self.last_seen.store(now_ms(), Ordering::Relaxed);
     }
 
     /// 클라이언트→wg0: 받은 조각은 바로 wg0로, FEC로 되살린 조각도 wg0로.
@@ -152,35 +168,64 @@ struct ServerInner {
     fec: FecParams,
     sessions: Mutex<HashMap<u64, Arc<Session>>>,
     by_udp: Mutex<HashMap<SocketAddr, u64>>,
+    by_cid: Mutex<HashMap<u32, u64>>, // 클라이언트 cid → 세션. NAT로 주소가 바뀌어도 cid로 찾는다(#1)
     stop: AtomicBool,
     recovered: Arc<AtomicU64>,
 }
 
 impl ServerInner {
     /// 세션을 찾거나 만든다. 이미 있으면 반환 경로(ret)만 새 것으로 바꾼다(재접속/망 전환).
+    /// ★ 세션 표(sessions) 잠금을 쥔 채로는 절대 ret 잠금을 기다리지 않는다. ret은 멈춘 TCP 쓰기가
+    ///    오래 쥘 수 있어서(쓰기 제한은 있지만), 그걸 표 잠금과 겹치면 서버 전체가 멈춘다(#2).
     fn attach(self: &Arc<Self>, session_id: u64, ret: Return) -> io::Result<Arc<Session>> {
-        let mut map = self.sessions.lock().unwrap();
-        if let Some(s) = map.get(&session_id) {
+        // 1) 이미 있으면 표 잠금을 먼저 풀고(clone 후 release) 밖에서 ret만 교체.
+        if let Some(s) = self.sessions.lock().unwrap().get(&session_id).cloned() {
             *s.ret.lock().unwrap() = ret;
-            return Ok(s.clone());
+            s.touch();
+            return Ok(s);
         }
+        // 2) 새 세션. 소켓 바인드는 블로킹이 아니라 표 잠금 안에서 해도 되지만, ret 잠금은 절대 안 건드린다.
         let wg = UdpSocket::bind(if self.upstream.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" })?;
         wg.connect(self.upstream)?;
         wg.set_read_timeout(Some(READ_TIMEOUT))?;
+        let mut map = self.sessions.lock().unwrap();
+        if let Some(s) = map.get(&session_id).cloned() {
+            // 그사이 다른 HELLO가 만들었으면 표 잠금을 풀고 ret만 교체.
+            drop(map);
+            *s.ret.lock().unwrap() = ret;
+            s.touch();
+            return Ok(s);
+        }
         let session = Arc::new(Session {
             wg,
             ret: Mutex::new(ret),
             enc: Mutex::new(FecEncoder::new(self.fec.k, self.fec.groups)),
             dec: Mutex::new(FecDecoder::new()),
-            tx_ctr: AtomicU64::new(0),
             fec_on: self.fec.enabled,
             alive: Arc::new(AtomicBool::new(true)),
             recovered: self.recovered.clone(),
+            last_seen: AtomicU64::new(now_ms()),
         });
         map.insert(session_id, session.clone());
         drop(map);
         self.clone().spawn_downpump(session.clone());
         Ok(session)
+    }
+
+    /// UDP 데이터그램의 세션을 찾는다. 주소로 먼저, 없으면 cid로(통신사 NAT가 포트를 바꾼 경우) 찾아
+    /// 반환 경로를 새 주소로 갱신한다(#1). 세션 표·cid 표 잠금을 쥔 채 ret을 만지지 않는다.
+    fn resolve_udp(&self, from: SocketAddr, cid: Option<u32>, udp: &Arc<UdpSocket>) -> Option<Arc<Session>> {
+        if let Some(id) = self.by_udp.lock().unwrap().get(&from).copied() {
+            if let Some(s) = self.sessions.lock().unwrap().get(&id).cloned() {
+                return Some(s);
+            }
+        }
+        let cid = cid?;
+        let id = self.by_cid.lock().unwrap().get(&cid).copied()?;
+        let s = self.sessions.lock().unwrap().get(&id).cloned()?;
+        self.by_udp.lock().unwrap().insert(from, id);
+        *s.ret.lock().unwrap() = Return::Udp { sock: udp.clone(), addr: from, cid };
+        Some(s)
     }
 
     /// wg0→client 펌프: wg0에서 읽은 응답을 FEC로 조각내 클라이언트에게 보낸다.
@@ -209,19 +254,30 @@ impl ServerInner {
         });
     }
 
-    fn route(self: &Arc<Self>, session_id: Option<u64>, frame: Frame) {
-        if let Some(id) = session_id {
-            if let Some(s) = self.sessions.lock().unwrap().get(&id) {
-                s.inbound(frame);
+    /// 유휴 세션을 정리한다(자원 누수 방지, #5). SESSION_IDLE 동안 조용하면 내려받기 스레드를 멈추고
+    /// 세션·주소·cid 표에서 뺀다.
+    fn reap(&self) {
+        let cutoff = now_ms().saturating_sub(SESSION_IDLE.as_millis() as u64);
+        let dead: Vec<u64> = self.sessions.lock().unwrap().iter()
+            .filter(|(_, s)| s.last_seen.load(Ordering::Relaxed) < cutoff)
+            .map(|(id, _)| *id)
+            .collect();
+        if dead.is_empty() {
+            return;
+        }
+        for id in &dead {
+            if let Some(s) = self.sessions.lock().unwrap().remove(id) {
+                s.alive.store(false, Ordering::Relaxed);
             }
         }
+        self.by_udp.lock().unwrap().retain(|_, id| !dead.contains(id));
+        self.by_cid.lock().unwrap().retain(|_, id| !dead.contains(id));
     }
 }
 
 pub struct ServerHandle {
     inner: Arc<ServerInner>,
     threads: Vec<JoinHandle<()>>,
-    tcp_conns: Arc<Mutex<Vec<TcpStream>>>,
     udp_addr: SocketAddr,
     tcp_addr: SocketAddr,
 }
@@ -244,9 +300,7 @@ impl ServerHandle {
         for s in self.inner.sessions.lock().unwrap().values() {
             s.alive.store(false, Ordering::Relaxed);
         }
-        for c in self.tcp_conns.lock().unwrap().iter() {
-            let _ = c.shutdown(std::net::Shutdown::Both);
-        }
+        // TCP 연결 스레드는 stop 플래그를 READ_TIMEOUT마다 확인해 스스로 빠진다(fd를 따로 들고 있지 않음).
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
@@ -260,6 +314,7 @@ pub fn run_server(cfg: ServerConfig) -> io::Result<ServerHandle> {
         fec: cfg.fec,
         sessions: Mutex::new(HashMap::new()),
         by_udp: Mutex::new(HashMap::new()),
+        by_cid: Mutex::new(HashMap::new()),
         stop: AtomicBool::new(false),
         recovered: Arc::new(AtomicU64::new(0)),
     });
@@ -271,7 +326,6 @@ pub fn run_server(cfg: ServerConfig) -> io::Result<ServerHandle> {
     let tcp_addr = listener.local_addr()?;
     listener.set_nonblocking(true)?;
 
-    let tcp_conns: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
     let mut threads = Vec::new();
 
     // UDP 수신 루프
@@ -283,11 +337,23 @@ pub fn run_server(cfg: ServerConfig) -> io::Result<ServerHandle> {
     // TCP accept 루프
     {
         let inner = inner.clone();
-        let conns = tcp_conns.clone();
-        threads.push(thread::spawn(move || server_tcp_loop(inner, listener, conns)));
+        threads.push(thread::spawn(move || server_tcp_loop(inner, listener)));
+    }
+    // 유휴 세션 정리 루프
+    {
+        let inner = inner.clone();
+        threads.push(thread::spawn(move || {
+            while !inner.stop.load(Ordering::Relaxed) {
+                for _ in 0..60 {
+                    if inner.stop.load(Ordering::Relaxed) { return; }
+                    thread::sleep(Duration::from_millis(500));
+                }
+                inner.reap();
+            }
+        }));
     }
 
-    Ok(ServerHandle { inner, threads, tcp_conns, udp_addr, tcp_addr })
+    Ok(ServerHandle { inner, threads, udp_addr, tcp_addr })
 }
 
 fn server_udp_loop(inner: Arc<ServerInner>, udp: Arc<UdpSocket>) {
@@ -298,6 +364,7 @@ fn server_udp_loop(inner: Arc<ServerInner>, udp: Arc<UdpSocket>) {
             Err(e) if is_timeout(&e) => continue,
             Err(_) => continue,
         };
+        let cid = transport::udp_cid(&buf[..n]);
         let inner_msg = match transport::udp_unwrap(&buf[..n]) {
             Some(m) => m,
             None => continue,
@@ -309,42 +376,40 @@ fn server_udp_loop(inner: Arc<ServerInner>, udp: Arc<UdpSocket>) {
         };
         match frame {
             Frame::Hello { session, .. } => {
-                let cid = rand_u64() as u32;
-                let ret = Return::Udp { sock: udp.clone(), addr: from, cid };
+                let ret_cid = cid.unwrap_or_else(|| rand_u64() as u32);
+                let ret = Return::Udp { sock: udp.clone(), addr: from, cid: ret_cid };
                 match inner.attach(session, ret) {
                     Ok(s) => {
                         inner.by_udp.lock().unwrap().insert(from, session);
+                        if let Some(c) = cid {
+                            inner.by_cid.lock().unwrap().insert(c, session);
+                        }
                         let _ = s.send_frame(&inner.key, &Frame::HelloAck { session });
                     }
                     Err(_) => continue,
                 }
             }
             Frame::Ping { token } => {
-                let id = inner.by_udp.lock().unwrap().get(&from).copied();
-                if let Some(id) = id {
-                    if let Some(s) = inner.sessions.lock().unwrap().get(&id) {
-                        // 반환 경로를 최신 주소로 갱신하고 Pong.
-                        *s.ret.lock().unwrap() = Return::Udp { sock: udp.clone(), addr: from, cid: rand_u64() as u32 };
-                        let _ = s.send_frame(&inner.key, &Frame::Pong { token });
-                    }
+                if let Some(s) = inner.resolve_udp(from, cid, &udp) {
+                    s.touch();
+                    let _ = s.send_frame(&inner.key, &Frame::Pong { token });
                 }
             }
             Frame::Data { .. } | Frame::Parity { .. } => {
-                let id = inner.by_udp.lock().unwrap().get(&from).copied();
-                inner.route(id, frame);
+                if let Some(s) = inner.resolve_udp(from, cid, &udp) {
+                    s.touch();
+                    s.inbound(frame);
+                }
             }
             _ => {}
         }
     }
 }
 
-fn server_tcp_loop(inner: Arc<ServerInner>, listener: TcpListener, conns: Arc<Mutex<Vec<TcpStream>>>) {
+fn server_tcp_loop(inner: Arc<ServerInner>, listener: TcpListener) {
     while !inner.stop.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, _peer)) => {
-                if let Ok(clone) = stream.try_clone() {
-                    conns.lock().unwrap().push(clone);
-                }
                 let inner = inner.clone();
                 thread::spawn(move || {
                     let _ = server_tcp_conn(inner, stream);
@@ -360,6 +425,8 @@ fn server_tcp_loop(inner: Arc<ServerInner>, listener: TcpListener, conns: Arc<Mu
 
 fn server_tcp_conn(inner: Arc<ServerInner>, stream: TcpStream) -> io::Result<()> {
     stream.set_nodelay(true)?;
+    // 멈춘 쓰기가 ret 잠금을 오래 쥐지 못하게 쓰기 제한을 둔다(#2).
+    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
     let read = stream.try_clone()?;
     // 짧은 타임아웃으로 종료를 폴링. TcpRx가 버퍼드라 타임아웃에 프레임이 깨지지 않는다.
     read.set_read_timeout(Some(READ_TIMEOUT))?;
@@ -405,11 +472,13 @@ fn server_tcp_conn(inner: Arc<ServerInner>, stream: TcpStream) -> io::Result<()>
             }
             Frame::Ping { token } => {
                 if let Some(s) = &session {
+                    s.touch();
                     let _ = s.send_frame(&inner.key, &Frame::Pong { token });
                 }
             }
             Frame::Data { .. } | Frame::Parity { .. } => {
                 if let Some(s) = &session {
+                    s.touch();
                     s.inbound(frame);
                 }
             }
@@ -444,7 +513,7 @@ struct ClientInner {
     rx: Mutex<Option<Box<dyn RxHalf>>>,
     enc: Mutex<FecEncoder>, // c2s
     dec: Mutex<FecDecoder>, // s2c
-    tx_ctr: AtomicU64,
+    last_rx: AtomicU64,     // 마지막 수신 시각(ms). 오래 조용하면 전송을 다시 세운다(#1)
     stop: AtomicBool,
     rebind: AtomicBool,
     st_sent: AtomicU64,
@@ -455,9 +524,8 @@ struct ClientInner {
 
 impl ClientInner {
     fn send_frame(&self, frame: &Frame) {
-        let ctr = self.tx_ctr.fetch_add(1, Ordering::Relaxed);
         let mut out = Vec::new();
-        frame::encode(frame, &self.key, DIR_C2S, ctr, &mut out);
+        frame::encode(frame, &self.key, DIR_C2S, &mut out);
         let mut g = self.tx.lock().unwrap();
         if let Some(tx) = g.as_mut() {
             if tx.send_msg(&out).is_err() {
@@ -510,10 +578,9 @@ impl ClientInner {
     }
 
     fn hello_bytes(&self) -> Vec<u8> {
-        let ctr = self.tx_ctr.fetch_add(1, Ordering::Relaxed);
         let mut out = Vec::new();
         frame::encode(&Frame::Hello { session: self.session_id, version: PROTOCOL_VERSION },
-                      &self.key, DIR_C2S, ctr, &mut out);
+                      &self.key, DIR_C2S, &mut out);
         out
     }
 
@@ -555,9 +622,12 @@ impl ClientInner {
     }
 
     fn try_tcp(&self) -> io::Result<Conn> {
-        let stream = TcpStream::connect(self.cfg.server_tcp)?;
+        // connect에 제한을 둬서 SYN이 사라지는 망에서 오래 매달리지 않게 한다(#6).
+        let stream = TcpStream::connect_timeout(&self.cfg.server_tcp, Duration::from_secs(3))?;
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT.max(Duration::from_secs(3))))?;
+        // 멈춘 쓰기가 tx 잠금을 오래 쥐지 못하게 한다(#2).
+        stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
         let mut random = [0u8; 32];
         rand_bytes(&mut random);
         // ClientHello(모양) 보내고 ServerHello(모양) 한 레코드 받기.
@@ -660,7 +730,7 @@ pub fn run_client(cfg: ClientConfig) -> io::Result<ClientHandle> {
         rx: Mutex::new(None),
         enc: Mutex::new(FecEncoder::new(cfg.fec.k, cfg.fec.groups)),
         dec: Mutex::new(FecDecoder::new()),
-        tx_ctr: AtomicU64::new(0),
+        last_rx: AtomicU64::new(0),
         stop: AtomicBool::new(false),
         rebind: AtomicBool::new(false),
         st_sent: AtomicU64::new(0),
@@ -724,6 +794,7 @@ fn client_down_loop(inner: Arc<ClientInner>) {
         match res {
             Ok(n) => {
                 inner.st_recv.fetch_add(1, Ordering::Relaxed);
+                inner.last_rx.store(now_ms(), Ordering::Relaxed); // 살아 있음 표시(#1 stale 판단)
                 let mut m = buf[..n].to_vec();
                 if let Some(frame) = frame::decode(&mut m, &inner.key, DIR_S2C) {
                     inner.handle_down(frame);
@@ -748,19 +819,27 @@ fn client_supervisor(inner: Arc<ClientInner>) {
                 *inner.tx.lock().unwrap() = Some(tx);
                 *inner.rx.lock().unwrap() = Some(rx);
                 inner.st_kind.store(match kind { Kind::Udp => 1, Kind::Tcp => 2 }, Ordering::Relaxed);
+                inner.last_rx.store(now_ms(), Ordering::Relaxed); // 방금 붙음 → stale 타이머 리셋
                 inner.rebind.store(false, Ordering::Relaxed);
             }
             Err(_) => {
+                if inner.stop.load(Ordering::Relaxed) { break; }
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
         }
         let mut last_ping = Instant::now();
+        // keepalive PING(5초)에 PONG이 오면 last_rx가 갱신된다. CLIENT_STALE 동안 아무것도 못 받으면
+        // 서버 재시작/NAT 변경으로 보고 전송을 다시 세운다(#1). 서울처럼 IP가 안 바뀌어도 복구된다.
         while !inner.stop.load(Ordering::Relaxed) && !inner.rebind.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(200));
             if last_ping.elapsed() >= KEEPALIVE {
                 last_ping = Instant::now();
                 inner.send_frame(&Frame::Ping { token: rand_u64() });
+            }
+            let quiet = now_ms().saturating_sub(inner.last_rx.load(Ordering::Relaxed));
+            if quiet > CLIENT_STALE.as_millis() as u64 {
+                inner.rebind.store(true, Ordering::Relaxed);
             }
         }
         // 현재 전송 내려놓기(다운로드 루프가 rx 잠금을 놓을 때까지 최대 READ_TIMEOUT 대기).
