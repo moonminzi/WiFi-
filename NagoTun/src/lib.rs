@@ -5,20 +5,26 @@
 
 use std::ffi::{c_char, c_int, CStr};
 use std::ptr;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
+#[cfg(feature = "engine")]
+use std::sync::Arc;
+#[cfg(feature = "engine")]
 use base64::Engine;
-
+#[cfg(feature = "engine")]
 use neptun::device::tun::TunSocket;
+#[cfg(feature = "engine")]
 use neptun::device::{DeviceConfig, DeviceHandle, MakeExternalNeptunNoop};
 
-#[cfg(target_os = "android")]
+// 안드로이드 JNI는 engine(NepTUN) 경로에서만 쓴다. 서버/리눅스 nagoing 빌드에는 없다.
+#[cfg(all(target_os = "android", feature = "engine"))]
 mod android;
 
-// WireGuard 아래에 끼우는 난독화·손실보정·빠른전환 전송 층. WG(NepTUN)는 건드리지 않는다.
+// WireGuard 아래에 끼우는 난독화·손실보정·빠른전환 전송 층. WG(NepTUN)는 건드리지 않는다. engine 없이도 빌드된다.
 pub mod nagoing;
 
 /// Swift 쪽에서는 불투명 포인터로만 다룬다.
+#[cfg(feature = "engine")]
 pub struct NagoTun {
     handle: DeviceHandle,
 }
@@ -34,6 +40,7 @@ fn fail<T>(message: String) -> *mut T {
 
 /// UAPI는 키를 16진수로 받는다(값 안의 '='로 줄을 자르기 때문에 base64를 그대로 넣으면 EPROTO).
 /// Swift/WireGuard 설정은 base64라서 여기서 바꿔 준다.
+#[cfg(feature = "engine")]
 fn normalize(cmd: &str) -> String {
     let mut out = String::with_capacity(cmd.len() + 64);
     for line in cmd.split_inclusive('\n') {
@@ -60,6 +67,7 @@ fn text(p: *const c_char) -> Option<String> {
     unsafe { CStr::from_ptr(p) }.to_str().ok().map(str::to_owned)
 }
 
+#[cfg(feature = "engine")]
 fn errno_of(response: &str) -> c_int {
     response
         .lines()
@@ -73,6 +81,7 @@ fn errno_of(response: &str) -> c_int {
 /// - `uapi`: "set=1\nprivate_key=…\npublic_key=…\nendpoint=…\nallowed_ip=…\n\n"
 /// - `threads`: 이벤트 루프 스레드 수(NordVPN과 같게 아이폰 1, 안드로이드 4)
 /// - `queue`: 스레드 사이 대기열 묶음 수(0이면 8). 작을수록 다운로드 중 핑이 낮고, 클수록 몰릴 때 덜 버린다
+#[cfg(feature = "engine")]
 #[no_mangle]
 pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u32, queue: u32) -> *mut NagoTun {
     let Some(cmd) = text(uapi).map(|c| normalize(&c)) else {
@@ -113,6 +122,7 @@ pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u3
 }
 
 /// 설정을 바꾼다(예: 서버 주소). 0이면 성공, 아니면 UAPI errno.
+#[cfg(feature = "engine")]
 #[no_mangle]
 pub extern "C" fn nago_tun_set(tun: *mut NagoTun, uapi: *const c_char) -> c_int {
     let (Some(tun), Some(cmd)) = (unsafe { tun.as_ref() }, text(uapi)) else {
@@ -137,6 +147,7 @@ pub extern "C" fn nago_tun_last_error(buf: *mut c_char, len: usize) -> usize {
 
 /// 상태(UAPI get=1 응답: rx_bytes, tx_bytes, last_handshake_time_sec …)를 buf에 쓴다.
 /// 돌려주는 값은 전체 길이(buf가 작으면 잘림, 항상 NUL로 끝남).
+#[cfg(feature = "engine")]
 #[no_mangle]
 pub extern "C" fn nago_tun_get(tun: *mut NagoTun, buf: *mut c_char, len: usize) -> usize {
     let Some(tun) = (unsafe { tun.as_ref() }) else {
@@ -154,6 +165,7 @@ pub extern "C" fn nago_tun_get(tun: *mut NagoTun, buf: *mut c_char, len: usize) 
 }
 
 /// 와이파이↔셀룰러 전환 등 네트워크가 바뀌었을 때 부른다(UDP 소켓을 새로 만듦).
+#[cfg(feature = "engine")]
 #[no_mangle]
 pub extern "C" fn nago_tun_network_changed(tun: *mut NagoTun) {
     if let Some(tun) = unsafe { tun.as_ref() } {
@@ -162,6 +174,7 @@ pub extern "C" fn nago_tun_network_changed(tun: *mut NagoTun) {
 }
 
 /// 터널을 멈추고 해제한다. 이후 포인터는 쓰면 안 된다.
+#[cfg(feature = "engine")]
 #[no_mangle]
 pub extern "C" fn nago_tun_stop(tun: *mut NagoTun) {
     if tun.is_null() {
@@ -191,7 +204,7 @@ fn parse_addr(ip: &str, port: u16) -> Option<SocketAddr> {
 
 /// nagoing 클라이언트를 띄운다. 실패하면 NULL(사유는 nago_tun_last_error).
 /// - `psk`: 서버와 공유하는 난독화 PSK(인증 아님 — 진짜 보안은 안쪽 WG)
-/// - `server_ip` + `udp_port`/`tcp_port`: 서버 프록시 주소(보통 둘 다 443)
+/// - `server_ip` + `udp_port`/`tcp_port`: 서버 프록시 주소(TCP 443 = HTTPS, UDP는 전용 포트 51821)
 /// - `local_ip`/`local_port`: NepTUN이 WG 패킷을 보낼 로컬 주소(보통 127.0.0.1)
 /// - `fec_k`/`fec_groups`/`fec_on`: 손실 보정(k당 패리티 1, groups만큼 연속 손실 복구). fec_on=0이면 끔
 /// - `prefer`: 0 auto(UDP→TCP), 1 udp, 2 tcp
@@ -276,7 +289,7 @@ pub extern "C" fn nago_nagoing_client_stop(client: *mut NagoingClient) {
     handle.stop();
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "engine"))]
 mod tests {
     use super::normalize;
 

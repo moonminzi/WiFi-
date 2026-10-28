@@ -105,11 +105,17 @@ cargo run --release --example nagoing_proxy -- client <psk> <server_ip> 443 443 
   - 앱 쪽: `WifiScan/NagoingSettings.swift`, `VPNManager.saveNagoing`, `VPNView`, `SettingsView`
   - 확장: `WifiScanTunnel/NagoingProxy.swift`, `PacketTunnelProvider`(mode `nagoing`)
 
+- **서버 nagoing 프록시** — 준비됨. `server/nagoing/setup-nagoing.sh`를 각 서버에서 돌리면 TCP 443(TLS 흉내)·
+  UDP 51821(QUIC 모양)에서 듣고 wg0(127.0.0.1:51820)로 넘긴다. 프록시 바이너리는 neptun 없이 빌드돼
+  외부 크레이트가 0개다(rustc만 필요). WireGuard는 그대로.
+  - **포트**: TCP는 443(막힌 망의 핵심). UDP는 51821 — udp 443은 기존 WG REDIRECT가 먼저 가로채서 전용 포트.
+  - **★ AWS 보안그룹**: inbound `tcp 443`·`udp 51821`을 열어야 바깥에서 닿는다(호스트 iptables INPUT은 ACCEPT).
+  - 설치·운영: [`server/nagoing/README.md`](server/nagoing/README.md).
+
 ### 남은 단계
 
-- **서버 nagoing 프록시 배포** — 443에 서버 프록시를 올리고(systemd + `examples/nagoing_proxy server`),
-  wg0는 지금처럼 51820. `server/wireguard/`에 설치 스크립트. **이게 떠야 iOS의 nagoing이 실제로 붙는다**
-  (지금은 앱에서 고를 수 있고 빌드되지만, 서버 프록시가 없으면 연결은 안 된다).
+- **서버에 실제 롤아웃** — 위 스크립트를 kr/jp/us/uk 4대에 적용 + SG 열기. **이게 돼야 iOS의 nagoing이 실제로 붙는다**
+  (지금은 앱에서 고를 수 있고 양쪽 다 빌드·검증되지만, 서버에 프록시가 떠 있어야 연결된다).
 - **안드로이드** — iOS와 같은 FFI로 `NeptunVpnService`에 nagoing 경로 추가.
 - **운영 강화** — 진짜 uTLS/QUIC, r>1 Reed–Solomon(2개 이상 동시 손실), 혼잡 제어, 리플레이 방지.
 

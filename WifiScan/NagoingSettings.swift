@@ -33,8 +33,9 @@ struct NagoingSettings: Codable, Equatable {
     /// 인터리브 깊이(= 견딜 수 있는 연속 손실 길이).
     var fecGroups = 8
     var prefer: Prefer = .auto
-    /// 서버 nagoing 프록시 포트(보통 둘 다 443).
-    var udpPort = 443
+    /// 서버 nagoing 프록시 포트. TCP는 443(HTTPS, 막힌 망의 핵심). UDP는 전용 포트 —
+    /// udp 443은 기존 WG REDIRECT가 먼저 가로채므로 서버가 51821에서 듣는다.
+    var udpPort = 51821
     var tcpPort = 443
     /// NepTUN이 WG 패킷을 보낼 로컬 포트(기기 안, 127.0.0.1).
     var localPort = 51822
