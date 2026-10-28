@@ -40,6 +40,7 @@ struct VPNView: View {
     private var effectiveProto: VPNProto {
         if killSwitch { return .wireguard }
         if proto == .unicorn { return .unicorn }
+        if proto == .nagoing { return .nagoing }
         return autoConnect != .off ? .wireguard : proto
     }
 
@@ -52,6 +53,16 @@ struct VPNView: View {
     private var flags: String {
         if effectiveProto == .unicorn {
             var parts = ["unicorn", unicornSettings.summary]
+            if autoConnect != .off { parts.append("auto:\(autoConnect.label)") }
+            return parts.joined(separator: " · ")
+        }
+        if effectiveProto == .nagoing {
+            var parts = ["nagoing", NagoingSettings.fromDefaults().summary]
+            if adblock {
+                parts.append("adblock")
+            } else if let dns = DNSList.parse(customDNS) {
+                parts.append("dns " + dns.joined(separator: ","))
+            }
             if autoConnect != .off { parts.append("auto:\(autoConnect.label)") }
             return parts.joined(separator: " · ")
         }
@@ -220,6 +231,8 @@ struct VPNView: View {
                 try await connectIKE(target, user: user, key: key)
             case .wireguard:
                 try await connectWG(target, user: user, key: key)
+            case .nagoing:
+                try await connectNagoing(target, user: user, key: key)
             case .auto:
                 try await connectIKE(target, user: user, key: key)
                 step("\(region.rawValue): ikev2 handshake…")
@@ -284,6 +297,23 @@ struct VPNView: View {
                                     serverPub: serverPub, endpoint: endpoint, dns: wgDNS, engine: wgEngine,
                                     queue: wgQueue, region: region.rawValue, apiKey: key,
                                     autoConnect: autoConnect, killSwitch: killSwitch, allowLAN: allowLAN)
+        try vpn.connectTunnel()
+    }
+
+    /// nagoing: WireGuard를 그대로 쓰되, 서버로 바로 가지 않고 난독화 전송(443)으로 감싼다.
+    /// WG 등록·키·서버 주소는 wg와 똑같이 구하고, 저장만 nagoing 모드로 한다.
+    private func connectNagoing(_ target: RegionAPI.Target, user: String, key: String) async throws {
+        step("\(region.rawValue): nagoing register…")
+        let reg = try await WGClient.registration(apiKey: key, name: "\(user) iphone app")
+        guard let serverPub = target.wgPub ?? reg.servers[region.rawValue]?.pub else {
+            throw PeerAPI.Failure.server("no wireguard key for \(region.rawValue)")
+        }
+        let settings = NagoingSettings.fromDefaults()
+        step("\(region.rawValue): nagoing → \(target.address):\(settings.udpPort)")
+        try await vpn.saveNagoing(privateKey: reg.privateKey, address: reg.address + "/32",
+                                  serverPub: serverPub, serverIP: target.address, dns: wgDNS,
+                                  region: region.rawValue, apiKey: key, settings: settings,
+                                  autoConnect: autoConnect, killSwitch: killSwitch, allowLAN: allowLAN)
         try vpn.connectTunnel()
     }
 

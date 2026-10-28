@@ -24,6 +24,9 @@ struct SettingsView: View {
     @AppStorage(UnicornSettings.Key.blockQUIC) private var uniBlockQUIC = true
     @AppStorage(UnicornSettings.Key.handleIPv6) private var uniIPv6 = true
     @AppStorage(UnicornSettings.Key.resolver) private var uniResolver: UnicornSettings.Resolver = .cloudflare
+    // nagoing(막힌 망 우회). 키는 NagoingSettings.Key에 모여 있다.
+    @AppStorage(NagoingSettings.Key.fec) private var nagoFec = true
+    @AppStorage(NagoingSettings.Key.prefer) private var nagoPrefer: NagoingSettings.Prefer = .auto
 
     @State private var password = ""
     /// 키체인에 비밀번호가 들어 있는지. 들어 있으면 입력칸 대신 ●●●● 로 보여 준다.
@@ -50,6 +53,9 @@ struct SettingsView: View {
             protocolBlock
             if proto == .unicorn {
                 unicornBlock
+            }
+            if proto == .nagoing {
+                nagoingBlock
             }
             connectionBlock
             dnsBlock
@@ -167,6 +173,31 @@ struct SettingsView: View {
                     .font(Term.mono(12))
                     .foregroundStyle(Term.muted)
             }
+            if killSwitch {
+                StatusLine(kind: .warn, text: "kill-switch forces wg")
+            }
+        }
+        .locked(locked)
+    }
+
+    /// nagoing: WireGuard를 443(udp quic 모양 → 막히면 tls/tcp)으로 감싸 막힌 망을 지나간다.
+    /// 유니콘과 달리 서버로 나간다(나갈 국가를 고른다).
+    private var nagoingBlock: some View {
+        TermBlock(label: "nagoing") {
+            Text("wireguard를 443으로 감싼다. udp(quic 모양)가 막히면 tls/tcp로 내려간다.")
+                .font(Term.mono(12))
+                .foregroundStyle(Term.muted)
+            TermDivider()
+            VStack(alignment: .leading, spacing: 8) {
+                key("prefer")
+                TermChoice(options: NagoingSettings.Prefer.allCases.map { (label: $0.label, value: $0) },
+                           selection: $nagoPrefer)
+            }
+            TermDivider()
+            toggle("--fec", isOn: $nagoFec)
+            Text("지하철·엘리베이터 버스트 손실을 재전송 없이 되살린다.")
+                .font(Term.mono(12))
+                .foregroundStyle(Term.muted)
             if killSwitch {
                 StatusLine(kind: .warn, text: "kill-switch forces wg")
             }

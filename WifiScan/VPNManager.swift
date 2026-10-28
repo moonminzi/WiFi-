@@ -5,13 +5,13 @@ import Security
 /// VPN 프로토콜 선택. auto는 IKEv2를 먼저 해 보고 안 붙으면 WireGuard(443)로 넘어간다.
 /// unicorn은 서버로 나가지 않는다 — 기기 안에서 SNI 차단만 우회한다(유니콘 HTTPS).
 enum VPNProto: String, CaseIterable, Identifiable {
-    case auto, ikev2, wireguard, unicorn
+    case auto, ikev2, wireguard, unicorn, nagoing
 
     var id: String { rawValue }
     var label: String { self == .wireguard ? "wg" : rawValue }
 
     /// 우리 터널 확장(WifiScanTunnel)으로 뜨는 프로토콜인지
-    var usesTunnel: Bool { self == .wireguard || self == .unicorn }
+    var usesTunnel: Bool { self == .wireguard || self == .unicorn || self == .nagoing }
 }
 
 /// 자동 연결(On Demand). 꺼진 서버를 깨우고 바뀐 IP를 따라가는 건 우리 터널만 할 수 있어서 wg로 연결한다.
@@ -98,11 +98,14 @@ final class VPNManager {
         wgStatus = tunnel?.connection.status ?? .invalid
     }
 
-    /// 저장된 터널 설정이 유니콘 HTTPS인지 WireGuard인지
+    /// 저장된 터널 설정이 유니콘 HTTPS·nagoing·WireGuard 중 무엇인지
     private static func proto(of tunnel: NETunnelProviderManager?) -> VPNProto {
         let proto = tunnel?.protocolConfiguration as? NETunnelProviderProtocol
-        let mode = proto?.providerConfiguration?["mode"] as? String
-        return mode == UnicornSettings.mode ? .unicorn : .wireguard
+        switch proto?.providerConfiguration?["mode"] as? String {
+        case UnicornSettings.mode: return .unicorn
+        case NagoingSettings.mode: return .nagoing
+        default: return .wireguard
+        }
     }
 
     /// IKEv2가 연결될 때까지 기다린다. 시간 안에 안 되거나 도중에 끊기면 false.
@@ -262,6 +265,54 @@ final class VPNManager {
         try await tunnel.loadFromPreferences()
         self.tunnel = tunnel
         tunnelProto = .wireguard
+        isConfigured = true
+        refreshStatus()
+    }
+
+    // MARK: nagoing (막힌 망 우회)
+
+    /// nagoing 설정을 저장한다. WireGuard와 같은 터널 확장을 쓰되 mode가 "nagoing"이라,
+    /// 확장이 NepTUN을 로컬 프록시(127.0.0.1:localPort)로 붙이고 그 프록시가 서버(443)로 난독화 전송한다.
+    /// WireGuard 자체는 그대로다. serverIP는 프록시가 실제로 붙을 서버 주소.
+    func saveNagoing(privateKey: String, address: String, serverPub: String, serverIP: String,
+                     dns: [String], region: String, apiKey: String, settings: NagoingSettings,
+                     autoConnect: VPNAutoConnect, killSwitch: Bool, allowLAN: Bool) async throws {
+        let tunnel = try await NETunnelProviderManager.loadAllFromPreferences().first ?? NETunnelProviderManager()
+        let proto = NETunnelProviderProtocol()
+        proto.providerBundleIdentifier = Self.tunnelBundleID
+        proto.serverAddress = serverIP
+        proto.providerConfiguration = [
+            "mode": NagoingSettings.mode,
+            "privateKey": privateKey,
+            "address": address,
+            "serverPub": serverPub,
+            // NepTUN은 로컬 프록시로 붙는다. 실제 서버 주소는 serverIP로 따로 넘긴다.
+            "endpoint": "127.0.0.1:\(settings.localPort)",
+            "dns": dns,
+            // nagoing이 패킷마다 ~24B를 더 붙인다. WG 오버헤드까지 더해 바깥 UDP가 1500을 안 넘게 낮춘다
+            // (IPv6 경로까지 안전하게 1380). 안 그러면 큰 패킷이 조각나 모바일 망에서 버려진다(리뷰 #3).
+            "mtu": 1380,
+            "engine": "neptun",
+            "queue": 8,
+            "region": region,
+            "apiKey": apiKey,
+            "serverIP": serverIP,
+            "udpPort": settings.udpPort,
+            "tcpPort": settings.tcpPort,
+            "localPort": settings.localPort,
+            NagoingSettings.configurationKey: settings.configurationValue,
+        ]
+        proto.includeAllNetworks = killSwitch
+        proto.excludeLocalNetworks = killSwitch && allowLAN
+        tunnel.protocolConfiguration = proto
+        tunnel.localizedDescription = "NAGO VPN (nagoing)"
+        tunnel.isEnabled = true
+        tunnel.onDemandRules = autoConnect.rules
+        tunnel.isOnDemandEnabled = autoConnect != .off
+        try await tunnel.saveToPreferences()
+        try await tunnel.loadFromPreferences()
+        self.tunnel = tunnel
+        tunnelProto = .nagoing
         isConfigured = true
         refreshStatus()
     }

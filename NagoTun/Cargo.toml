@@ -9,16 +9,29 @@ license = "MIT"
 [lib]
 crate-type = ["staticlib", "rlib"]
 
-[dependencies]
-# NordVPN이 쓰는 WireGuard 엔진(BoringTun 포크, BSD-3-Clause). 버전 고정.
-neptun = { git = "https://github.com/NordSecurity/NepTUN", rev = "ce185155e1639403cc40e01260d0830065a49555", features = ["device"] }
-# 0.2.187부터 iOS에서 sockaddr_ctl 등을 macOS 전용으로 막아 nix(neptun 의존성)가 iOS로 안 빌드됨. NepTUN이 쓰는 버전으로 고정.
-libc = "=0.2.186"
-base64 = "0.22"
+[features]
+# 기본은 WireGuard 엔진(NepTUN) 포함 — iOS/안드로이드 staticlib이 이걸 쓴다.
+default = ["engine"]
+# nagoing 전송 층은 engine 없이도 빌드된다(서버 프록시는 neptun을 안 끌어와 가볍게 빌드).
+engine = ["dep:neptun", "dep:base64", "dep:libc"]
 
-# 안드로이드 앱(Kotlin)에서 부르는 JNI 함수용(src/android.rs)
+[dependencies]
+# nagoing 난독화 nonce·난수용(OS 난수). 작고 git이 아니라 서버 빌드도 가볍다.
+getrandom = "0.2"
+# NordVPN이 쓰는 WireGuard 엔진(BoringTun 포크, BSD-3-Clause). 버전 고정. engine 기능에서만 쓴다.
+neptun = { git = "https://github.com/NordSecurity/NepTUN", rev = "ce185155e1639403cc40e01260d0830065a49555", features = ["device"], optional = true }
+# 0.2.187부터 iOS에서 sockaddr_ctl 등을 macOS 전용으로 막아 nix(neptun 의존성)가 iOS로 안 빌드됨. NepTUN이 쓰는 버전으로 고정.
+libc = { version = "=0.2.186", optional = true }
+base64 = { version = "0.22", optional = true }
+
+# 안드로이드 앱(Kotlin)에서 부르는 JNI 함수용(src/android.rs) — engine 경로에서만.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", default-features = false }
+
+# 리눅스 WireGuard 엔진 시험용 예제(neptun 필요). nagoing 예제는 engine 없이도 빌드된다.
+[[example]]
+name = "linux_tun"
+required-features = ["engine"]
 
 [profile.release]
 lto = true
