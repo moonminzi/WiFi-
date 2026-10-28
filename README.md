@@ -3,6 +3,8 @@
 > 같은 저장소에 다운로드 매니저 **NAGO DL**(따로 설치하는 IPA)도 있다 → [`NagoDL/README.md`](NagoDL/README.md)
 >
 > 망가·사진 번역기 **NAGO TL**(따로 설치하는 IPA)은 [moonminzi/TL](https://github.com/moonminzi/TL) 레포로 옮겼다
+>
+> WireGuard 아래에 끼우는 난독화·손실보정·빠른전환 전송 층 **nagoing**(막힌 망 우회) → [`NAGOING.md`](NAGOING.md). 리눅스 코어·PoC 완료(`cargo run --example nagoing_loopback`)
 
 앱 이름은 **NAGO VPN**. 탭 두 개짜리 앱입니다. 화면은 대시보드 사이트와 같은 터미널 스타일(초록빛 다크 팔레트, JetBrains Mono, `~/vpn $▌` 머리줄)이고 아이콘은 `>_`.
 
