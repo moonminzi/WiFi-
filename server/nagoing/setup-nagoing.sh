@@ -7,7 +7,7 @@
 #                 먼저 가로채므로 쓰지 않고 전용 포트를 쓴다
 #   받은 걸 풀어서 로컬 wg0(127.0.0.1:51820)로 넘긴다. WireGuard는 하나도 안 바뀐다.
 #
-# 빌드: neptun을 안 끌어오는 --no-default-features라 외부 크레이트가 0개다(rustc만 있으면 됨, git/crates.io 불필요).
+# 빌드: NagoTun 크레이트(엔진 포함)를 그대로 빌드한다 — crates.io에서 의존 크레이트를 받으므로 서버에 외부 접속이 필요하다.
 #
 # ★ AWS 보안그룹(SG)에서 다음을 열어야 바깥에서 닿는다(호스트 iptables INPUT은 ACCEPT라 따로 안 건드린다):
 #     - inbound TCP 443      0.0.0.0/0
@@ -57,11 +57,17 @@ fi
 # 바이너리가 이미 있고 소스가 안 바뀌었으면 빌드를 건너뛴다(FORCE_BUILD=1로 강제).
 NEED_BUILD=1
 if [ -x "$BIN" ] && [ -z "${FORCE_BUILD:-}" ]; then
-  if [ "$SRC/NagoTun/src/nagoing" -ot "$BIN" ] 2>/dev/null; then NEED_BUILD=0; fi
+  # 프록시에 들어가는 소스(코어·예제·엔진·Cargo 파일) 중 바이너리보다 새 파일이 하나도 없을 때만 건너뛴다.
+  # (예전엔 src/nagoing 디렉터리의 mtime만 봐서 파일 내용만 바뀐 갱신을 놓칠 수 있었다)
+  if [ -z "$(find "$SRC/NagoTun/src" "$SRC/NagoTun/examples" "$SRC/NagoTun/engine" \
+              "$SRC/NagoTun/Cargo.toml" "$SRC/NagoTun/Cargo.lock" \
+              -path "$SRC/NagoTun/engine/target" -prune -o -type f -newer "$BIN" -print -quit 2>/dev/null)" ]; then
+    NEED_BUILD=0
+  fi
 fi
 if [ "$NEED_BUILD" = "1" ]; then
-  echo ">> nagoing-proxy 빌드(neptun 없이, 외부 의존 0개)"
-  ( cd "$SRC/NagoTun" && cargo build --release --no-default-features --example nagoing_proxy )
+  echo ">> nagoing-proxy 빌드(crates.io에서 의존 크레이트를 받는다)"
+  ( cd "$SRC/NagoTun" && cargo build --release --example nagoing_proxy )
   install -m 0755 "$SRC/NagoTun/target/release/examples/nagoing_proxy" "$BIN"
 else
   echo ">> 빌드 건너뜀(이미 최신). FORCE_BUILD=1로 강제 빌드"

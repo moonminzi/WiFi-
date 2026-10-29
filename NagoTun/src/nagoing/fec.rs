@@ -94,6 +94,10 @@ fn key_of(group: u16, gen: u16) -> u32 {
     ((group as u32) << 16) | gen as u32
 }
 
+/// 최신보다 이만큼 넘게 과거인 세대가 오면 순서 뒤바뀜이 아니라 상대 인코더 리셋으로 본다.
+/// (64세대 = 그룹당 64·k 패킷 — 그만큼 뒤늦게 도착하는 재정렬은 현실에 없다.)
+const RESET_GAP: u16 = 64;
+
 /// a가 b보다 (wrapping 기준) 이만큼 이상 오래됐는가.
 fn gen_distance(newer: u16, older: u16) -> u16 {
     newer.wrapping_sub(older)
@@ -108,6 +112,11 @@ impl FecDecoder {
         let latest = self.latest_gen.entry(group).or_insert(gen);
         if gen_distance(gen, *latest) < 0x8000 {
             *latest = gen;
+        } else if gen_distance(*latest, gen) > RESET_GAP {
+            // 지금보다 한참 '과거' 세대 = 상대 인코더가 새로 시작했다(서버 재시작·세션 재생성으로 gen이 0부터).
+            // 옛 기준을 들고 있으면 새 세대가 전부 '오래된 것'으로 지워져 FEC가 영영 안 된다 → 이 그룹을 새로 시작.
+            *latest = gen;
+            self.groups.retain(|&kk, _| (kk >> 16) as u16 != group);
         }
         // 오래된 세대 정리: 같은 그룹에서 현재 세대보다 4 이상 오래된 것 버림(메모리 상한).
         let cur = *self.latest_gen.get(&group).unwrap();
@@ -288,6 +297,40 @@ mod tests {
         // 같은 그룹의 데이터 두 개(0,1) 손실 → 복구 불가, 잘못된 데이터도 내놓지 않아야 함.
         let rec = run(&shards, &[0, 1]);
         assert!(rec.is_empty());
+    }
+
+    // 상대 인코더가 새로 시작해 gen이 0으로 돌아가도(서버 재시작) 디코더가 계속 복구해야 한다.
+    #[test]
+    fn recovers_after_encoder_restart() {
+        let payloads: Vec<Vec<u8>> = (0..64u8).map(|i| vec![i; 30]).collect();
+        let mut dec = FecDecoder::new();
+        let mut enc = FecEncoder::new(4, 2);
+        // 세대를 한참 올려 둔다(그룹당 100세대).
+        for _ in 0..100 {
+            for p in &payloads[..8] {
+                enc.push(p, |s| match s {
+                    ShardRef::Data { group, gen, index, k, payload, .. } =>
+                        dec.on_data(group, gen, index, k, payload, |_| {}),
+                    ShardRef::Parity { group, gen, k, payload } =>
+                        dec.on_parity(group, gen, k, payload, |_| {}),
+                });
+            }
+        }
+        // 인코더 재시작 → gen 0부터. 첫 데이터 조각 하나를 잃는다.
+        let shards = collect(&mut FecEncoder::new(4, 2), &payloads[..8]);
+        let mut recovered = Vec::new();
+        for (i, s) in shards.iter().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            match s {
+                Owned::Data { group, gen, index, k, payload } =>
+                    dec.on_data(*group, *gen, *index, *k, payload, |r| recovered.push(r.to_vec())),
+                Owned::Parity { group, gen, k, payload } =>
+                    dec.on_parity(*group, *gen, *k, payload, |r| recovered.push(r.to_vec())),
+            }
+        }
+        assert_eq!(recovered, vec![payloads[0].clone()]);
     }
 
     #[test]

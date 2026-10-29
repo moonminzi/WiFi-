@@ -197,12 +197,21 @@ impl TcpTx {
     pub fn send_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.stream.write_all(bytes)
     }
+    /// 연결을 끊는다. 쓰기가 레코드 중간에 끊기면(타임아웃) 바이트 흐름이 어긋나 다시 못 쓰므로 닫아야 한다.
+    /// 같은 소켓을 읽는 쪽(TcpRx)도 곧 EOF/에러를 보고 빠져나간다.
+    pub fn shutdown(&self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 impl TxHalf for TcpTx {
     fn send_msg(&mut self, inner: &[u8]) -> io::Result<()> {
         tls_record(REC_APPDATA, inner, &mut self.scratch);
-        self.stream.write_all(&self.scratch)
+        let res = self.stream.write_all(&self.scratch);
+        if res.is_err() {
+            self.shutdown();
+        }
+        res
     }
 }
 

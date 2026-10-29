@@ -12,9 +12,9 @@ TCP 443은 TLS 흉내로, 손실 보정·빠른 전환(②③)을 살리는 UDP�
 sudo bash server/nagoing/setup-nagoing.sh
 ```
 
-- 빌드는 `--no-default-features`라 **neptun을 안 끌어오고 외부 크레이트가 0개**다(rustc만 있으면 됨, 없으면 스크립트가 설치).
+- NagoTun 크레이트(엔진 포함)를 그대로 빌드한다. 의존 크레이트를 crates.io에서 받으므로 **서버에 외부 접속이 필요**하다(Rust가 없으면 스크립트가 설치).
 - 바이너리는 `/usr/local/sbin/nagoing-proxy`, 설정은 `/etc/nago/nagoing.env`, 서비스는 `nagoing-proxy.service`(systemd, 특권 포트 443만 바인드하도록 `CAP_NET_BIND_SERVICE`로 묶음).
-- 여러 번 실행해도 안전. 소스가 안 바뀌었으면 빌드를 건너뛴다(`FORCE_BUILD=1`로 강제).
+- 여러 번 실행해도 안전. 코어·예제·엔진·Cargo 파일이 바이너리보다 새것이 없으면 빌드를 건너뛴다(`FORCE_BUILD=1`로 강제).
 
 ### 포트
 

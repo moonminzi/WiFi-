@@ -69,7 +69,7 @@ NepTUN의 endpoint를 서버 대신 **로컬 포트(127.0.0.1:local)**로 돌려
 ```bash
 cd NagoTun
 cargo run --example nagoing_loopback
-cargo test --lib                 # 20개 테스트(ChaCha20 RFC 벡터, FEC 버스트 복구, 왕복, 자동 폴백)
+cargo test --lib                 # 23개 테스트(ChaCha20 RFC 벡터, FEC 버스트 복구, 왕복, 자동 폴백)
 ```
 
 예시 출력:
@@ -106,8 +106,8 @@ cargo run --release --example nagoing_proxy -- client <psk> <server_ip> 443 443 
   - 확장: `WifiScanTunnel/NagoingProxy.swift`, `PacketTunnelProvider`(mode `nagoing`)
 
 - **서버 nagoing 프록시** — 준비됨. `server/nagoing/setup-nagoing.sh`를 각 서버에서 돌리면 TCP 443(TLS 흉내)·
-  UDP 51821(QUIC 모양)에서 듣고 wg0(127.0.0.1:51820)로 넘긴다. 프록시 바이너리는 neptun 없이 빌드돼
-  외부 크레이트가 0개다(rustc만 필요). WireGuard는 그대로.
+  UDP 51821(QUIC 모양)에서 듣고 wg0(127.0.0.1:51820)로 넘긴다. 빌드할 때 crates.io에서 의존 크레이트를 받으므로
+  서버에 외부 접속이 필요하다. WireGuard는 그대로.
   - **포트**: TCP는 443(막힌 망의 핵심). UDP는 51821 — udp 443은 기존 WG REDIRECT가 먼저 가로채서 전용 포트.
   - **★ AWS 보안그룹**: inbound `tcp 443`·`udp 51821`을 열어야 바깥에서 닿는다(호스트 iptables INPUT은 ACCEPT).
   - 설치·운영: [`server/nagoing/README.md`](server/nagoing/README.md).
@@ -121,16 +121,25 @@ cargo run --release --example nagoing_proxy -- client <psk> <server_ip> 443 443 
 - **MTU(#3)**: nagoing 터널 MTU 1380(오버헤드 포함 바깥 UDP가 1500을 안 넘게 — 조각화 방지).
 - **지문(#4)**: 패킷 nonce를 매번 OS 난수로(키스트림 재사용·평문 카운터 제거), QUIC 첫 바이트 하위 비트 무작위,
   작은/컨트롤 프레임에 무작위 패딩(WG 핸드셰이크 148/92 크기 가림).
-- **자원 누수(#5)**: 유휴 세션(5분) 정리 스레드. TCP 연결은 stop 폴링으로 스스로 빠져 fd 누수 없음.
+- **자원 누수(#5)**: 유휴 세션(5분) 정리 스레드. TCP 연결은 30초 동안 프레임이 없으면 서버가 끊는다(망 전환으로
+  FIN 없이 버려진 옛 연결, PSK 없이 레코드 하나만 보내고 붙어 있는 연결). 동시 TCP 연결 1024개·세션 4096개 상한,
+  스레드 생성 실패는 panic(=abort) 대신 연결/세션 거절.
 - **연결 지연(#6)**: TCP connect 제한(3초).
 - 난수: `getrandom`(OS 난수)으로 교체 — 스레드 경합·예측 가능성 제거.
+- **UDP 루프 멈춤**: 세션 반환 경로(ret) 잠금은 경로를 복제하는 동안만 쥐고 전송은 밖에서 한다. HELLO_ACK·PONG은
+  요청이 온 그 경로로 바로 답한다 → 한 클라의 멈춘 TCP 쓰기가 모든 UDP 클라를 세우지 않는다.
+- **FEC 리셋**: 상대 인코더가 새로 시작해 세대가 0으로 돌아가면(서버 재시작·세션 재생성) 디코더가 그 그룹을 새로 시작한다.
+  예전엔 새 세대를 전부 '오래된 것'으로 지워 다운로드 FEC가 사실상 꺼졌다.
+- **TCP 어긋남**: 쓰기가 레코드 중간에 끊기면 연결을 닫는다. 클라의 살아 있음(stale) 판단은 제대로 풀린 프레임으로만.
+- **빠른 stop**: 수립(HELLO·ServerHello 대기) 중에도 stop을 확인 → 확장의 stopTunnel·watchdog이 오래 안 멈춘다.
+- **auto 기억**: 붙었던 UDP가 조용해지면(도중에 막힘) 5분간 TCP 먼저. 망이 바뀌면 다시 UDP부터.
 
 ### 아직 남은 것(5.5로 — 리뷰 🟠🟡)
 
 - **#7 리플레이/무결성**: HELLO에 시각+MAC, 리플레이 창. (지금도 cid 라우팅+클라 재접속으로 완화)
 - **#8 진짜 TLS**: TLS 검사 장비(NGFW)는 흉내를 걸러낼 수 있음 → rustls로 실제 핸드셰이크. PSK도 빌드 주입으로.
 - **🟡**: 덜 찬 FEC 그룹 플러시 타이머(통화·게임), TCP에서 FEC 끄기, HELLO로 FEC 설정 전달,
-  auto의 UDP/TCP 동시 시도·망별 기억, 부분 암호화·할당 줄이기, UDP 수신 스레드 분할.
+  auto의 UDP/TCP 동시 시도, 부분 암호화·할당 줄이기, UDP 수신 스레드 분할.
 
 ### 남은 단계
 
