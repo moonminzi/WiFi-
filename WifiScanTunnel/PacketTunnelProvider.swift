@@ -31,6 +31,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// 유니콘 HTTPS로 떴을 때의 스택. 패킷은 아래 큐에서만 다룬다.
     private var unicorn: UnicornStack?
     private let unicornQueue = DispatchQueue(label: "nago.vpn.unicorn", qos: .userInitiated)
+    /// nagoing(막힌 망 우회)으로 떴을 때의 클라이언트 프록시. WG(NepTUN)는 로컬 포트로 이 프록시에 붙는다.
+    private var nagoing: NagoingProxy?
+    private var nagoingState: NagoingState?
+
+    /// nagoing으로 뜰 때의 실제 서버 주소·포트·설정. 서버가 꺼졌다 켜져 IP가 바뀌면 프록시만 다시 띄운다.
+    private struct NagoingState {
+        var serverIP: String
+        let udpPort: UInt16
+        let tcpPort: UInt16
+        let localPort: UInt16
+        let settings: NagoingSettings
+    }
 
     /// providerConfiguration: privateKey, address(10.9.0.x/32), serverPub, endpoint(ip:port), dns([String]), mtu, engine,
     /// region, apiKey(서버 깨우기용)
@@ -91,7 +103,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             if let unicorn = self.unicorn {
                 report["stats"] = unicorn.summary
             } else if let stats = await self.stats() {
-                report["stats"] = stats.summary
+                let transport = self.nagoing?.stats()
+                report["stats"] = transport.map { "\(stats.summary) · \($0)" } ?? stats.summary
                 report["rx"] = stats.rx
                 report["tx"] = stats.tx
                 // 최근 1분 속도. 앱은 이걸로 그래프를 그린다(예전 앱은 rx·tx 차이로 직접 냈다)
@@ -120,6 +133,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         current = settings
+        // nagoing: WG(NepTUN)는 그대로 쓰되 endpoint가 로컬 프록시라, 프록시를 먼저 띄운다.
+        if configuration?["mode"] as? String == NagoingSettings.mode {
+            startNagoing(settings, configuration: configuration, onDemand: onDemand, completionHandler: completionHandler)
+            return
+        }
         let engineLabel = settings.engine == "go" ? "go" : "nagotun ×\(settings.loops)"
         journal.add("start \(engineLabel) → \(settings.endpoint)" + (onDemand ? " · on-demand" : ""))
         let done: (Error?) -> Void = { [weak self] error in
@@ -153,6 +171,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             unicornQueue.async { unicorn.stop() }
             completionHandler()
             return
+        }
+        if let nagoing {
+            // 프록시를 내린다(바로 아래에서 NepTUN도 멈춘다).
+            self.nagoing = nil
+            nagoing.stop()
         }
         if let neptun {
             neptun.stop()
@@ -264,6 +287,60 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let parts = address.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 4 else { return false }
         return parts.allSatisfy { Int($0).map { (0...255).contains($0) } ?? false }
+    }
+
+    // MARK: nagoing (막힌 망 우회)
+
+    /// nagoing 클라이언트 프록시를 띄우고, NepTUN을 로컬 프록시(s.endpoint = 127.0.0.1:localPort)로 붙인다.
+    /// 서버가 꺼졌다 켜져 IP가 바뀌면 watchdog(wakeServer)이 프록시만 새 IP로 다시 띄운다.
+    @MainActor
+    private func startNagoing(_ s: Settings, configuration: [String: Any]?, onDemand: Bool,
+                              completionHandler: @escaping (Error?) -> Void) {
+        let ns = NagoingSettings.from(providerConfiguration: configuration)
+        guard let serverIP = configuration?["serverIP"] as? String else {
+            journal.add("✗ nagoing: no serverIP")
+            completionHandler(NEVPNError(.configurationInvalid))
+            return
+        }
+        let udpPort = UInt16(configuration?["udpPort"] as? Int ?? 51821)
+        let tcpPort = UInt16(configuration?["tcpPort"] as? Int ?? 443)
+        let localPort = UInt16(configuration?["localPort"] as? Int ?? 51822)
+        nagoingState = NagoingState(serverIP: serverIP, udpPort: udpPort, tcpPort: tcpPort,
+                                    localPort: localPort, settings: ns)
+        journal.add("start nagoing · \(ns.summary) → \(serverIP):\(udpPort)")
+        // 먼저 네트워크 설정을 적용(utun MTU), 그다음 프록시 → 엔진 순서로 띄운다.
+        setTunnelNetworkSettings(Self.networkSettings(s)) { [weak self] error in
+            Task { @MainActor in
+                guard let self else { return }
+                if let error {
+                    self.journal.add("✗ nagoing: \(error.localizedDescription)")
+                    completionHandler(error)
+                    return
+                }
+                do {
+                    let proxy = NagoingProxy()
+                    try proxy.start(psk: NagoingSettings.psk, serverIP: serverIP, udpPort: udpPort,
+                                    tcpPort: tcpPort, localPort: localPort, settings: ns)
+                    self.nagoing = proxy
+                    guard let fd = NeptunEngine.utunFileDescriptor() else {
+                        completionHandler(NSError(domain: "nago.nagoing", code: 2,
+                                                  userInfo: [NSLocalizedDescriptionKey: "nagoing: utun not found"]))
+                        return
+                    }
+                    let engine = NeptunEngine()
+                    engine.journal = { [weak self] line in self?.journal.add(line) }
+                    try engine.start(tunFD: fd, privateKey: s.privateKey, serverPub: s.serverPub,
+                                     endpoint: s.endpoint, loops: s.loops)
+                    self.neptun = engine
+                    self.startWatchdog(quick: onDemand)
+                    self.startSampler()
+                    completionHandler(nil)
+                } catch {
+                    self.journal.add("✗ nagoing: \(error.localizedDescription)")
+                    completionHandler(error)
+                }
+            }
+        }
     }
 
     // MARK: NepTUN
@@ -410,6 +487,32 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         journal.add("\(code): no handshake → api")
         do {
             let target = try await RegionAPI.waitUntilReady(region, key: key) { self.journal.add($0) }
+            // nagoing: NepTUN endpoint는 로컬 프록시라 그대로 둔다. 서버 IP가 바뀌었으면 프록시만 새 IP로 다시 띄운다.
+            if let proxy = nagoing, var state = nagoingState {
+                let serverPub = target.wgPub ?? s.serverPub
+                if target.address != state.serverIP {
+                    proxy.stop()
+                    let fresh = NagoingProxy()
+                    do {
+                        try fresh.start(psk: NagoingSettings.psk, serverIP: target.address, udpPort: state.udpPort,
+                                        tcpPort: state.tcpPort, localPort: state.localPort, settings: state.settings)
+                        self.nagoing = fresh
+                        state.serverIP = target.address
+                        self.nagoingState = state
+                        journal.add("\(code): nagoing → \(target.address)")
+                    } catch {
+                        journal.add("✗ \(code): nagoing restart: \(error.localizedDescription)")
+                    }
+                } else {
+                    // IP가 같아도(서울처럼 고정 IP 서버 재부팅) 전송을 다시 세우라고 알린다.
+                    journal.add("\(code): up · \(target.address) · nagoing rebind")
+                    proxy.networkChanged()
+                }
+                if serverPub != s.serverPub {
+                    try await replacePeer(serverPub: serverPub, endpoint: s.endpoint)
+                }
+                return
+            }
             let endpoint = "\(target.address):\(target.wgPort)"
             let serverPub = target.wgPub ?? s.serverPub
             guard endpoint != s.endpoint || serverPub != s.serverPub else {

@@ -26,6 +26,10 @@ struct SettingsView: View {
     @AppStorage(UnicornSettings.Key.blockQUIC) private var uniBlockQUIC = true
     @AppStorage(UnicornSettings.Key.handleIPv6) private var uniIPv6 = true
     @AppStorage(UnicornSettings.Key.resolver) private var uniResolver: UnicornSettings.Resolver = .cloudflare
+    // nagoing(막힌 망 우회) — nagotun(neptun) 엔진에서 켠다. 키는 NagoingSettings.Key에 모여 있다.
+    @AppStorage(NagoingSettings.Key.on) private var nagoOn = false
+    @AppStorage(NagoingSettings.Key.prefer) private var nagoPrefer: NagoingSettings.Prefer = .auto
+    @AppStorage(NagoingSettings.Key.fec) private var nagoFec = true
 
     @State private var password = ""
     /// 키체인에 비밀번호가 들어 있는지. 들어 있으면 입력칸 대신 ●●●● 로 보여 준다.
@@ -140,6 +144,18 @@ struct SettingsView: View {
                     TermDivider()
                     row("loops") {
                         TermChoice(options: [1, 2].map { (label: "\($0)", value: $0) }, selection: $wgLoops)
+                    }
+                    TermDivider()
+                    toggle("--nagoing", isOn: $nagoOn)
+                    if nagoOn {
+                        Text("wireguard를 443으로 감싸 막힌 망을 지난다(udp 막히면 tls/tcp). 서버 프록시 필요.")
+                            .font(Term.mono(12))
+                            .foregroundStyle(Term.muted)
+                        row("prefer") {
+                            TermChoice(options: NagoingSettings.Prefer.allCases.map { (label: $0.label, value: $0) },
+                                       selection: $nagoPrefer)
+                        }
+                        toggle("--fec", isOn: $nagoFec)
                     }
                 }
             }

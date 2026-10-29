@@ -14,6 +14,8 @@ members = [".", "engine"]
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+# nagoing 난독화 nonce·난수용(OS 난수). 작고 git이 아니라 가볍다.
+getrandom = "0.2"
 # NagoTun 엔진: NordVPN의 NepTUN(BoringTun 포크, BSD-3-Clause, rev ce18515)을 engine/에 가져와 고친 것.
 # 무엇을 바꿨는지는 engine/README.md
 engine = { package = "nagotun_engine", path = "engine", features = ["device"] }

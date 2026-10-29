@@ -287,6 +287,53 @@ final class VPNManager {
         refreshStatus()
     }
 
+    // MARK: nagoing (막힌 망 우회)
+
+    /// nagoing 설정을 저장한다. nagotun(neptun)과 같은 WG를 쓰되 mode가 "nagoing"이라, 확장이 NepTUN을
+    /// 로컬 프록시(127.0.0.1:localPort)로 붙이고 그 프록시가 서버(443)로 난독화 전송한다. WireGuard 자체는 그대로.
+    /// serverIP는 프록시가 실제로 붙을 서버 주소.
+    func saveNagoing(privateKey: String, address: String, serverPub: String, serverIP: String,
+                     dns: [String], loops: Int, region: String, apiKey: String, settings: NagoingSettings,
+                     autoConnect: VPNAutoConnect, killSwitch: Bool, allowLAN: Bool) async throws {
+        let tunnel = try await NETunnelProviderManager.loadAllFromPreferences().first ?? NETunnelProviderManager()
+        let proto = NETunnelProviderProtocol()
+        proto.providerBundleIdentifier = Self.tunnelBundleID
+        proto.serverAddress = serverIP
+        proto.providerConfiguration = [
+            "mode": NagoingSettings.mode,
+            "privateKey": privateKey,
+            "address": address,
+            "serverPub": serverPub,
+            // NepTUN은 로컬 프록시로 붙는다. 실제 서버 주소는 serverIP로 따로 넘긴다.
+            "endpoint": "127.0.0.1:\(settings.localPort)",
+            "dns": dns,
+            // nagoing이 패킷마다 ~24B를 더 붙인다. WG 오버헤드까지 더해 바깥 UDP가 1500을 안 넘게(IPv6 포함 1380).
+            "mtu": 1380,
+            "engine": "neptun",
+            "loops": loops,
+            "region": region,
+            "apiKey": apiKey,
+            "serverIP": serverIP,
+            "udpPort": settings.udpPort,
+            "tcpPort": settings.tcpPort,
+            "localPort": settings.localPort,
+            NagoingSettings.configurationKey: settings.configurationValue,
+        ]
+        proto.includeAllNetworks = killSwitch
+        proto.excludeLocalNetworks = killSwitch && allowLAN
+        tunnel.protocolConfiguration = proto
+        tunnel.localizedDescription = "NAGO VPN (nagoing)"
+        tunnel.isEnabled = true
+        tunnel.onDemandRules = autoConnect.rules
+        tunnel.isOnDemandEnabled = autoConnect != .off
+        try await tunnel.saveToPreferences()
+        try await tunnel.loadFromPreferences()
+        self.tunnel = tunnel
+        tunnelProto = .wireguard   // nagoing은 wg를 감싼 것 — 상태 표시는 wg로
+        isConfigured = true
+        refreshStatus()
+    }
+
     // MARK: 유니콘 HTTPS
 
     /// 유니콘 HTTPS 설정을 저장한다. 같은 터널 확장을 쓰지만 mode가 달라서

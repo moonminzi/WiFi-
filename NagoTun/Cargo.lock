@@ -560,6 +560,7 @@ name = "nago_tun"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "getrandom 0.2.17",
  "jni",
  "libc",
  "nagotun_engine",

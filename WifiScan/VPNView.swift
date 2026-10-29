@@ -15,6 +15,8 @@ struct VPNView: View {
     @AppStorage("vpnProtocol") private var proto: VPNProto = .auto
     @AppStorage("wgEngine") private var wgEngine = "neptun"
     @AppStorage("wgLoops") private var wgLoops = 1
+    /// nagotun(neptun) 모드에서 막힌 망 우회(nagoing) 켜기
+    @AppStorage(NagoingSettings.Key.on) private var nagoOn = false
     @AppStorage("vpnAutoConnect") private var autoConnect: VPNAutoConnect = .off
     @AppStorage("vpnKillSwitch") private var killSwitch = false
     /// isp·exit 줄의 IP를 가린다(줄을 누르면 바뀜)
@@ -171,6 +173,9 @@ struct VPNView: View {
         }
         var parts = [effectiveProto == .wireguard ? "wg/\(VPNView.engineName(wgEngine))" : effectiveProto.label]
         if effectiveProto == .wireguard, wgEngine == "neptun" { parts[0] += " ×\(wgLoops)" }
+        if effectiveProto == .wireguard, wgEngine == "neptun", nagoOn {
+            parts.append("nagoing \(NagoingSettings.fromDefaults().prefer.label)")
+        }
         if fastMode, effectiveProto != .wireguard { parts.append("gcm") }
         if adblock {
             parts.append(region.onDemand ? "adblock n/a · temp server" : "adblock")
@@ -927,6 +932,17 @@ struct VPNView: View {
         let reg = try await WGClient.registration(apiKey: key, name: "\(user) iphone app")
         guard let serverPub = target.wgPub ?? reg.servers[region.rawValue]?.pub else {
             throw PeerAPI.Failure.server("no wireguard key for \(region.rawValue)")
+        }
+        // nagotun(neptun) 모드에서 막힌 망 우회가 켜져 있으면 WG를 nagoing 전송(443)으로 감싼다.
+        if nagoOn, wgEngine == "neptun" {
+            let ns = NagoingSettings.fromDefaults()
+            step("\(region.rawValue): nagoing → \(target.address):\(ns.udpPort)")
+            try await vpn.saveNagoing(privateKey: reg.privateKey, address: reg.address + "/32",
+                                      serverPub: serverPub, serverIP: target.address, dns: wgDNS,
+                                      loops: wgLoops, region: region.rawValue, apiKey: key, settings: ns,
+                                      autoConnect: autoConnect, killSwitch: killSwitch, allowLAN: allowLAN)
+            try vpn.connectTunnel()
+            return
         }
         let endpoint = "\(target.address):\(target.wgPort)"
         step("\(region.rawValue): wg/\(wgEngine) → \(endpoint)")

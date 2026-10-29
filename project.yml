@@ -24,8 +24,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan   # ← 본인 것으로 변경
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
-        MARKETING_VERSION: "2.1.4"
-        CURRENT_PROJECT_VERSION: "33"
+        MARKETING_VERSION: "2.1.5"
+        CURRENT_PROJECT_VERSION: "34"
     dependencies:
       - target: WifiScanTunnel
     entitlements:
@@ -68,6 +68,8 @@ targets:
       - path: WifiScan/VPNRegion.swift
       # 유니콘 HTTPS 설정을 앱이 만들고 확장이 읽는다(앱과 같은 코드)
       - path: WifiScan/UnicornSettings.swift
+      # nagoing(막힌 망 우회) 설정을 앱이 만들고 확장이 읽는다(앱과 같은 코드)
+      - path: WifiScan/NagoingSettings.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan.tunnel   # 앱 번들 ID + .tunnel
@@ -76,8 +78,8 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: WifiScanTunnel/WifiScanTunnel-Bridging-Header.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/NagoTun/include
         OTHER_LDFLAGS: -lnago_tun -framework Security -framework Foundation -lobjc -liconv -lresolv
-        MARKETING_VERSION: "2.1.4"
-        CURRENT_PROJECT_VERSION: "33"
+        MARKETING_VERSION: "2.1.5"
+        CURRENT_PROJECT_VERSION: "34"
     dependencies:
       - target: WireGuardGoBridgeiOS
       - target: NagoTunRust
