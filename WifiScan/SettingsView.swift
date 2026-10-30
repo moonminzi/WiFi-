@@ -152,9 +152,6 @@ struct SettingsView: View {
                     TermDivider()
                     toggle("--nagoing", isOn: $nagoOn)
                     if nagoOn {
-                        Text("wireguard를 443으로 감싸 막힌 망을 지난다(udp 막히면 tls/tcp). 서버 프록시 필요.")
-                            .font(Term.mono(12))
-                            .foregroundStyle(Term.muted)
                         row("prefer") {
                             TermChoice(options: NagoingSettings.Prefer.allCases.map { (label: $0.label, value: $0) },
                                        selection: $nagoPrefer)
