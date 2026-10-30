@@ -77,7 +77,7 @@ fn main() {
                 eprintln!("서버 시작 실패: {e}");
                 std::process::exit(1);
             });
-            println!("nagoing v2 서버 · udp {} · tls {} · wg0 {}", handle.udp_addr(), handle.tcp_addr(), args[5]);
+            println!("nagoing 서버 · udp {} · tls {} · wg0 {}", handle.udp_addr(), handle.tcp_addr(), args[5]);
             loop {
                 thread::sleep(Duration::from_secs(5));
                 println!("서버 복구(FEC)={}", handle.recovered());
@@ -118,7 +118,7 @@ fn main() {
                 eprintln!("클라 시작 실패: {e}");
                 std::process::exit(1);
             });
-            println!("nagoing v2 클라 · NepTUN endpoint를 {} 로 돌리세요", args[6]);
+            println!("nagoing 클라 · NagoTun endpoint를 {} 로 돌리세요", args[6]);
             loop {
                 thread::sleep(Duration::from_secs(5));
                 println!("{}", handle.stats().summary());
