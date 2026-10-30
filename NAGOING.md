@@ -6,9 +6,9 @@ WireGuard는 **하나도 바꾸지 않는다.** 그 아래에 작은 층(nagoing
 ```
 [폰]
   NepTUN(WG 엔진) ──WG UDP──▶ 127.0.0.1:local   ← nagoing 클라이언트 프록시
-                                   │  ① 난독화(ChaCha20)   ② 인터리브 FEC
-                                   ▼  자동 선택: UDP 443(QUIC 모양) → 막히면 TLS/TCP 443
-                            nagoing 서버 프록시(:443) ──▶ 127.0.0.1:51820 (wg0)
+                                   │  ① 세션 AEAD(ChaCha20-Poly1305)   ② 인터리브 FEC
+                                   ▼  자동 선택: UDP 51821(QUIC 모양) → 막히면 진짜 TLS 1.3/TCP 443
+                            nagoing 서버 프록시 ──▶ 127.0.0.1:51820 (wg0)
 [서버(AWS)]                        ③ session_id로 세션을 묶어 망이 바뀌어도 wg0 소켓은 그대로
 ```
 
@@ -22,10 +22,13 @@ NepTUN의 endpoint를 서버 대신 **로컬 포트(127.0.0.1:local)**로 돌려
 학교·회사·호텔 와이파이는 WireGuard(UDP)를 DPI로 알아보고 끊는다. nagoing은 WG 데이터그램을 두 가지 모양으로 감싼다.
 
 - **UDP(QUIC 모양)**: 데이터그램 첫 바이트를 QUIC short-header 꼴로, 뒤에 connection id. UDP 443이 열린 망에서 가장 가볍다.
-- **TCP(TLS 흉내)**: 접속하면 **ClientHello 모양**(SNI 포함) 레코드를 먼저 보내고, 서버는 ServerHello 모양으로 답한 뒤 `application_data` 레코드로 나른다. TCP 443은 거의 안 막혀서 폴백에 쓴다.
+- **TCP(진짜 TLS 1.3, v2)**: rustls로 **실제 TLS 1.3 핸드셰이크**를 한다(SNI·ALPN `h2,http/1.1` 제안). TLS 1.3이라 서버
+  인증서도 암호화돼 선 위에선 평범한 HTTPS와 같다. 서버는 nagoing이 아닌 접속(능동 탐침·브라우저)에 **HTTP 404**를 준다.
+  TCP 443은 거의 안 막혀서 폴백에 쓴다.
 - **자동 선택**: UDP로 HELLO를 던져 1.5초 안에 답이 없으면(=막힘) TCP로 내려간다. 사용자는 아무것도 안 고른다.
 
-페이로드는 모두 ChaCha20 keystream으로 가려, 선 위에서 WG의 고정 헤더가 안 보인다.
+페이로드는 모두 세션 키로 봉인돼(AEAD) 선 위에서 WG의 고정 헤더가 안 보인다. UDP 핸드셰이크는 QUIC long header
+(Initial처럼 1200바이트), 데이터는 short header 모양이다.
 
 > **기존 `unicorn`과 다르다.** `unicorn`은 서버로 안 나가고 기기 안에서 TLS 첫 패킷(SNI)만 쪼개는
 > 로컬 트릭이다. nagoing은 WG 트래픽을 **서버까지** 날라 주는 진짜 난독화 프록시다(양쪽에 Rust 프록시).
@@ -47,20 +50,36 @@ NepTUN의 endpoint를 서버 대신 **로컬 포트(127.0.0.1:local)**로 돌려
 - 클라이언트는 세션을 `session_id`로 식별한다. 주소가 바뀌어 재접속해도 서버는 **같은 세션**으로 알아보고
   **같은 wg0 소켓**을 계속 쓴다. 그래서 서버가 보는 WG 피어 엔드포인트가 안 바뀌어 **WG 재핸드셰이크 없이** 이어진다.
 
-## 선 프로토콜
+## 선 프로토콜 (v2)
 
-한 "메시지" = `[nonce 8B][ciphertext]`. ciphertext는 아래 프레임을 ChaCha20으로 가린 것. 전송별 바깥 포장만 다르다
-(UDP: QUIC 모양 5바이트 헤더, TCP: TLS 레코드 헤더).
+메시지는 두 종류다. 전송별 바깥 포장만 다르다(UDP: QUIC long/short header, TCP: TLS 1.3 안의 `[len u16][kind][body]`).
 
-| 프레임 | 뜻 |
+**핸드셰이크** — `[nonce 12][AEAD_psk(평문)]`. PSK는 내용을 가리는 데만 쓰고, 인증은 안의 MAC이 한다.
+
+| 메시지 | 평문 |
 |---|---|
-| `HELLO` / `HELLO_ACK` | 세션 수립(= 자동 선택의 탐침). session_id 포함 |
-| `DATA` | WG 데이터그램 한 개 + FEC 메타(seq·group·gen·index·k) |
+| `HELLO` (클라→서버) | 버전 2 · session_id · 시각 · 난수 16 · **클라 WG 공개키** · MAC |
+| `HELLO_ACK` (서버→클라) | 버전 2 · session_id · 서버 난수 16 · MAC |
+
+- MAC 키 = HKDF(X25519(**클라 WG 개인키**, **서버 WG 공개키**)) — 새 키 배포 없이 WG 설정의 키를 그대로 쓴다
+  (서버는 wg0 개인키). PSK를 알아도 남의 WG 개인키 없이는 그 세션을 가로챌 수 없고, 가짜 서버는 ACK를 못 만든다.
+- 서버는 같은 session_id를 **처음 붙은 WG 키로만** 다시 붙게 하고, HELLO 시각이 ±180초 밖이거나 이미 본 난수면
+  답하지 않는다(재전송 공격 방어).
+
+**데이터** — `[가린 카운터 8][AEAD_session(프레임)][태그 16]`. 세션 키 = HKDF(같은 고정 비밀, 클라 난수 ‖ 서버 난수)로
+HELLO마다 새로 뽑는다. nonce는 64비트 카운터(절대 안 겹침), 받는 쪽은 **2048칸 리플레이 창**으로 재전송을 버린다.
+카운터는 태그를 표본으로 한 마스크로 가린다(QUIC 헤더 보호와 같은 생각 — 증가하는 숫자가 지문이 되지 않게).
+서버는 **인증된** 패킷이 온 주소로만 반환 경로를 옮긴다(위조 패킷으로 경로를 못 돌림).
+
+| 프레임(봉인된 평문) | 뜻 |
+|---|---|
+| `DATA` | WG 데이터그램 한 개 + FEC 메타(group·gen·index·k) |
 | `PARITY` | 그룹의 패리티(= 조각들의 길이프리픽스+패딩 XOR) |
 | `PING` / `PONG` | keepalive, 경로 갱신 |
 
-> 난독화는 **보안이 아니라 DPI 회피**다. 진짜 기밀성·무결성은 안쪽 WireGuard가 책임진다.
-> PSK는 공유 난독화 키일 뿐 인증 수단이 아니다. TLS/QUIC "모양"도 근사이며, 운영용으로는 진짜 uTLS/QUIC가 다음 단계다.
+> 안쪽 WireGuard가 따로 기밀성·무결성을 지키므로 nagoing의 암호는 이중 보호다. v2가 새로 막는 것은 nagoing 층 자체의
+> 위조·재전송·세션 가로채기(=서비스 방해)와 DPI가 고정된 모양으로 알아보는 것이다.
+> 남은 지문: rustls의 ClientHello는 브라우저와 다르다(uTLS 같은 브라우저 흉내는 rustls에 없음).
 
 ## 리눅스에서 바로 돌려 보기 (PoC)
 
@@ -78,34 +97,35 @@ cargo test --lib                 # 27개 테스트(ChaCha20 RFC 벡터, FEC 버�
 A. 손실 없음 (UDP/QUIC 모양): 100/100 왕복
 B. 버스트 손실 FEC 끔 : 85/100 왕복  ·  떨군 조각=15  ·  서버 복구=0
 B. 버스트 손실 FEC 켬 : 100/100 왕복  ·  떨군 조각=18  ·  서버 복구=18
-C. UDP 막힘 → 폴백 전송=tcp(TLS 흉내): 100/100 왕복
+C. UDP 막힘 → 폴백 전송=tls 1.3 (tcp): 100/100 왕복
 ```
 
-버스트 손실에서 FEC가 85%→100%로 끌어올리고(서버가 18조각 복구), UDP가 막히면 알아서 TCP로 붙는다.
+버스트 손실에서 FEC가 85%→100%로 끌어올리고(서버가 18조각 복구), UDP가 막히면 알아서 TLS 1.3/TCP로 붙는다.
 
 ## 실제 중계기
 
 서버(AWS, wg0 앞단)와 클라이언트(수동 시험)로 띄울 수 있다.
 
 ```bash
-# 서버: UDP 443·TCP 443을 둘 다 듣고 wg0(51820)로 넘김
-cargo run --release --example nagoing_proxy -- server <psk> 0.0.0.0:443 0.0.0.0:443 127.0.0.1:51820
+# 서버: UDP 51821·TLS 443을 듣고 wg0(51820)로 넘김. wg.key = wg0 개인키(base64), 인증서는 자체서명
+cargo run --release --example nagoing_proxy -- server <psk> 0.0.0.0:51821 0.0.0.0:443 127.0.0.1:51820 wg.key tls.crt tls.key
 
-# 클라: NepTUN endpoint를 127.0.0.1:51820으로 돌려 두고
-cargo run --release --example nagoing_proxy -- client <psk> <server_ip> 443 443 127.0.0.1:51820 auto
+# 클라: NepTUN endpoint를 local_bind로 돌려 두고(server_pub = 서버 wg0 공개키, 키 파일 생략 시 무작위 키)
+cargo run --release --example nagoing_proxy -- client <psk> <server_ip> 51821 443 127.0.0.1:51822 auto <server_pub> [client.key]
 ```
 
 ## 통합 상태
 
-- **리눅스 코어·PoC** — 완료. `NagoTun/src/nagoing/`, 테스트 20개, `examples/nagoing_loopback`.
+- **리눅스 코어·PoC** — 완료. `NagoTun/src/nagoing/`, 테스트 29개, `examples/nagoing_loopback`.
 - **iOS 앱** — 연결됨. protocol `nagoing`을 고르면 터널 확장이 `nago_nagoing_client_*`(C FFI)로 프록시를
   띄우고 NepTUN의 endpoint를 로컬 포트(127.0.0.1:51822)로 돌린다. `NWPathMonitor`가 경로 변화 때
-  `nago_nagoing_network_changed`를 부르고, 서버가 꺼졌다 켜져 IP가 바뀌면 watchdog이 프록시만 새 IP로 다시 띄운다.
+  `nago_nagoing_network_changed`를 부르고, 서버가 꺼졌다 켜져 IP(또는 WG 키)가 바뀌면 watchdog이 프록시만 다시 띄운다.
+  v2 HELLO 인증에 쓰도록 WG 설정의 privateKey·serverPub를 FFI로 넘긴다.
   settings 탭에 `nagoing` 블록(`prefer`·`--fec`). 나갈 국가·adblock·auto-connect는 wg와 같다.
   - 앱 쪽: `WifiScan/NagoingSettings.swift`, `VPNManager.saveNagoing`, `VPNView`, `SettingsView`
   - 확장: `WifiScanTunnel/NagoingProxy.swift`, `PacketTunnelProvider`(mode `nagoing`)
 
-- **서버 nagoing 프록시** — 준비됨. `server/nagoing/setup-nagoing.sh`를 각 서버에서 돌리면 TCP 443(TLS 흉내)·
+- **서버 nagoing 프록시** — 준비됨. `server/nagoing/setup-nagoing.sh`를 각 서버에서 돌리면 TCP 443(TLS 1.3)·
   UDP 51821(QUIC 모양)에서 듣고 wg0(127.0.0.1:51820)로 넘긴다. 빌드할 때 crates.io에서 의존 크레이트를 받으므로
   서버에 외부 접속이 필요하다. WireGuard는 그대로.
   - **포트**: TCP는 443(막힌 망의 핵심). UDP는 51821 — udp 443은 기존 WG REDIRECT가 먼저 가로채서 전용 포트.
@@ -141,18 +161,26 @@ cargo run --release --example nagoing_proxy -- client <psk> <server_ip> 443 443 
   모양이 이상한 UDP 패킷 하나로 재접속하지 않음, iOS stop·watchdog의 프록시 종료는 백그라운드(메인 안 막음),
   settings에서 `--nagoing`을 끄면 저장된 프로필도 일반 WG로 되돌림.
 
-### 아직 남은 것(5.5로 — 리뷰 🟠🟡)
+### v2 (2.1.6): 진짜 TLS + 재전송 공격 방어
 
-- **#7 리플레이/무결성**: HELLO에 시각+MAC, 리플레이 창. (지금도 cid 라우팅+클라 재접속으로 완화)
-- **#8 진짜 TLS**: TLS 검사 장비(NGFW)는 흉내를 걸러낼 수 있음 → rustls로 실제 핸드셰이크. PSK도 빌드 주입으로.
-- **🟡**: TCP에서 FEC 끄기, HELLO로 FEC 설정 전달,
-  auto의 UDP/TCP 동시 시도, 부분 암호화·할당 줄이기, UDP 수신 스레드 분할.
+- **#7 리플레이/무결성** — 완료. WG 키로 인증한 HELLO(시각 ±180초 + 난수 캐시), HELLO마다 새 세션 키, 데이터 AEAD
+  (ChaCha20-Poly1305, ring) + 2048칸 리플레이 창, 같은 session_id는 처음 붙은 WG 키로만. 인증된 패킷만 경로를 옮김.
+- **#8 진짜 TLS** — 완료. TCP 443은 rustls TLS 1.3(인증서는 서버마다 자체서명, 클라는 안쪽 HELLO_ACK로 서버 인증).
+  nagoing이 아닌 TLS 접속엔 HTTP 404. UDP 핸드셰이크도 QUIC Initial 모양(long header, 1200바이트).
+- **v1과 호환 안 됨**: 서버를 v2로 올리면 2.1.5 앱의 nagoing은 붙지 않는다 → 2.1.6으로 같이 올린다.
+
+### 아직 남은 것
+
+- PSK(`nago-obfs-v1`)가 공개 소스에 있다 — v2에선 HELLO를 가리는 용도뿐이라 보안 영향은 작지만, DPI가 HELLO를 풀어
+  모양을 확인할 수는 있다 → 빌드 주입 + 서버 동시 교체.
+- rustls ClientHello는 브라우저 지문과 다르다(uTLS 같은 흉내는 rustls에 없음). 진짜 QUIC(Initial 암호화 규칙)도 아님.
+- **🟡**: TCP에서 FEC 끄기, HELLO로 FEC 설정 전달, auto의 UDP/TCP 동시 시도, 할당 줄이기, UDP 수신 스레드 분할.
 
 ### 남은 단계
 
 - **서버에 실제 롤아웃** — 위 스크립트를 kr/jp/us/uk 4대에 적용 + SG 열기. **이게 돼야 iOS의 nagoing이 실제로 붙는다**
   (지금은 앱에서 고를 수 있고 양쪽 다 빌드·검증되지만, 서버에 프록시가 떠 있어야 연결된다).
 - **안드로이드** — iOS와 같은 FFI로 `NeptunVpnService`에 nagoing 경로 추가.
-- **운영 강화** — 진짜 uTLS/QUIC, r>1 Reed–Solomon(2개 이상 동시 손실), 혼잡 제어, 리플레이 방지.
+- **운영 강화** — 브라우저 지문(uTLS)/진짜 QUIC, r>1 Reed–Solomon(2개 이상 동시 손실), 혼잡 제어.
 
 코드: `NagoTun/src/nagoing/`(`obfs`·`frame`·`fec`·`transport`·`proxy`), 예제 `NagoTun/examples/nagoing_*.rs`.

@@ -19,17 +19,22 @@ final class NagoingProxy {
     private let queue = DispatchQueue(label: "nago.nagoing")
 
     /// 프록시 시작. 실패하면 이유를 던진다.
+    /// privateKey·serverPub: WireGuard 설정의 그 키들(base64). v2는 이걸로 HELLO를 인증한다 — 서버 키가 바뀌면 다시 띄운다.
     func start(psk: String, serverIP: String, udpPort: UInt16, tcpPort: UInt16, localPort: UInt16,
-               settings: NagoingSettings) throws {
+               settings: NagoingSettings, privateKey: String, serverPub: String) throws {
         let handle = psk.withCString { p in
             serverIP.withCString { ip in
                 "127.0.0.1".withCString { local in
                     settings.sni.withCString { sni in
-                        nago_nagoing_client_start(p, ip, udpPort, tcpPort, local, localPort,
-                                                  UInt8(clamping: settings.fecK),
-                                                  UInt16(clamping: settings.fecGroups),
-                                                  settings.fecEnabled ? 1 : 0,
-                                                  settings.prefer.code, sni)
+                        privateKey.withCString { key in
+                            serverPub.withCString { pub in
+                                nago_nagoing_client_start(p, ip, udpPort, tcpPort, local, localPort,
+                                                          UInt8(clamping: settings.fecK),
+                                                          UInt16(clamping: settings.fecGroups),
+                                                          settings.fecEnabled ? 1 : 0,
+                                                          settings.prefer.code, sni, key, pub)
+                            }
+                        }
                     }
                 }
             }

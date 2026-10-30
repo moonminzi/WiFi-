@@ -1,7 +1,7 @@
 # nagoing 서버 프록시
 
 WireGuard(wg0, udp 51820)는 그대로 두고 그 앞에 nagoing 프록시를 세운다. 막힌 망에서도 붙게(①)
-TCP 443은 TLS 흉내로, 손실 보정·빠른 전환(②③)을 살리는 UDP는 전용 포트로 듣고, 풀어서 wg0로 넘긴다.
+TCP 443은 진짜 TLS 1.3으로, 손실 보정·빠른 전환(②③)을 살리는 UDP는 전용 포트로 듣고, 인증·복호화해 wg0로 넘긴다.
 설계는 저장소 루트 [`NAGOING.md`](../../NAGOING.md).
 
 ## 설치
@@ -20,7 +20,7 @@ sudo bash server/nagoing/setup-nagoing.sh
 
 | | 포트 | 쓰임 |
 |---|---|---|
-| TCP | 443 | TLS 흉내(ClientHello). 학교·회사·호텔처럼 VPN 막는 망의 **핵심 경로** |
+| TCP | 443 | 진짜 TLS 1.3(rustls). 학교·회사·호텔처럼 VPN 막는 망의 **핵심 경로**. nagoing이 아닌 접속엔 HTTP 404 |
 | UDP | 51821 | QUIC 모양. FEC·빠른 전환이 사는 경로. `udp 443`은 기존 WG REDIRECT가 먼저 가로채서 전용 포트를 쓴다 |
 
 둘 다 풀어서 로컬 `wg0`(127.0.0.1:51820)로 넘긴다. WireGuard 설정·키는 하나도 안 바뀐다(기존 피어 그대로).
@@ -39,9 +39,21 @@ aws ec2 authorize-security-group-ingress --group-id <sg-id> --region <region> \
     IpProtocol=udp,FromPort=51821,ToPort=51821,IpRanges='[{CidrIp=0.0.0.0/0}]'
 ```
 
-## 난독화 키(PSK)
+## v2 키 (자동)
 
-`NAGO_PSK`(기본 `nago-obfs-v1`)는 **보안이 아니라 DPI 회피용**이라 모든 클라가 공유한다(진짜 보안은 안쪽 WireGuard).
+스크립트가 알아서 만든다 — 손댈 것 없음.
+
+- `/etc/nago/wg.key`: wg0의 WireGuard 개인키(`wg show wg0 private-key`). HELLO 인증에 쓴다(클라가 이미 아는 serverPub의 짝).
+  **wg0 키를 바꾸면 스크립트를 다시 돌린다.**
+- `/etc/nago/tls.crt`·`tls.key`: TLS 1.3용 자체서명 인증서(없을 때만 새로 만듦). 클라는 인증서를 검증하지 않고
+  안쪽 HELLO_ACK로 서버를 인증한다.
+- 서비스는 `DynamicUser`라 이 root 전용 파일을 직접 못 읽고, systemd `LoadCredential`로만 받는다.
+
+v2는 v1(2.1.5 앱)과 호환되지 않는다 — 서버와 앱(2.1.6)을 같이 올린다.
+
+## 핸드셰이크 가리기 키(PSK)
+
+`NAGO_PSK`(기본 `nago-obfs-v1`)는 HELLO 내용을 가리는 용도라 모든 클라가 공유한다(인증은 위의 WG 키가 한다).
 클라이언트(`NagoingSettings.psk`)와 **같아야** 한다. 바꾸려면 양쪽을 같이 바꾼다:
 
 ```bash

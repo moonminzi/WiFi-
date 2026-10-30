@@ -326,7 +326,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 do {
                     let proxy = NagoingProxy()
                     try proxy.start(psk: NagoingSettings.psk, serverIP: serverIP, udpPort: udpPort,
-                                    tcpPort: tcpPort, localPort: localPort, settings: ns)
+                                    tcpPort: tcpPort, localPort: localPort, settings: ns,
+                                    privateKey: s.privateKey, serverPub: s.serverPub)
                     self.nagoing = proxy
                     guard let fd = NeptunEngine.utunFileDescriptor() else {
                         completionHandler(NSError(domain: "nago.nagoing", code: 2,
@@ -496,7 +497,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // nagoing: NepTUN endpoint는 로컬 프록시라 그대로 둔다. 서버 IP가 바뀌었으면 프록시만 새 IP로 다시 띄운다.
             if let proxy = nagoing, var state = nagoingState {
                 let serverPub = target.wgPub ?? s.serverPub
-                if target.address != state.serverIP {
+                // 서버 IP가 바뀌었거나, 서버 WG 키가 바뀌었으면(v2 HELLO 인증에 쓰므로) 프록시를 새로 띄운다.
+                if target.address != state.serverIP || serverPub != s.serverPub {
                     // 옛 프록시가 로컬 포트를 놓을 때까지 기다리되, 메인 액터는 막지 않는다.
                     await proxy.shutdown()
                     // 기다리는 사이 터널이 멈췄으면(stop이 watchdog을 취소) 새로 띄우지 않는다.
@@ -504,7 +506,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     let fresh = NagoingProxy()
                     do {
                         try fresh.start(psk: NagoingSettings.psk, serverIP: target.address, udpPort: state.udpPort,
-                                        tcpPort: state.tcpPort, localPort: state.localPort, settings: state.settings)
+                                        tcpPort: state.tcpPort, localPort: state.localPort, settings: state.settings,
+                                        privateKey: s.privateKey, serverPub: serverPub)
                         self.nagoing = fresh
                         state.serverIP = target.address
                         self.nagoingState = state

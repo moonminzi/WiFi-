@@ -6,7 +6,7 @@
 //! 세 장면:
 //!   A. 손실 없는 왕복(UDP 전송 수립 확인)
 //!   B. 버스트 손실 주입 — FEC 끔 vs 켬 왕복 성공률 비교
-//!   C. UDP를 막아 둔 망 흉내 — 자동으로 TCP(TLS 흉내)로 폴백
+//!   C. UDP를 막아 둔 망 흉내 — 자동으로 TCP(진짜 TLS 1.3)로 폴백
 
 use std::collections::HashSet;
 use std::net::{SocketAddr, UdpSocket};
@@ -16,8 +16,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nago_tun::nagoing::{
-    run_client, run_server, ClientConfig, FecParams, Kind, Prefer, ServerConfig,
+    run_client, run_server, testcert, ClientConfig, FecParams, Identity, Kind, Prefer, ServerConfig,
 };
+
+/// 데모용 고정 키(서버 = wg0 개인키 자리, 클라 = 기기 WG 개인키 자리). 실제로는 WireGuard 키를 그대로 쓴다.
+const SKEY: [u8; 32] = [9; 32];
+const CKEY: [u8; 32] = [7; 32];
 
 fn lo(port: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
@@ -146,10 +150,12 @@ fn main() {
     {
         let (wg, wg_stop) = spawn_echo();
         let server = run_server(ServerConfig {
+            identity: SKEY, tls_cert_pem: testcert::CERT_PEM.into(), tls_key_pem: testcert::KEY_PEM.into(),
             psk: psk.into(), udp_bind: lo(0), tcp_bind: lo(0), upstream: wg,
             fec: FecParams::default(),
         }).unwrap();
         let client = run_client(ClientConfig {
+            identity: CKEY, server_pub: Identity::from_bytes(SKEY).public(),
             psk: psk.into(),
             server_udp: server.udp_addr(), server_tcp: server.tcp_addr(),
             local_bind: lo(0), fec: FecParams::default(), prefer: Prefer::Udp,
@@ -170,11 +176,13 @@ fn main() {
         // k=4, groups=4 → 4연속 손실까지 복구, 패리티 비용 25%.
         let fec = FecParams { k: 4, groups: 4, enabled: fec_on };
         let server = run_server(ServerConfig {
+            identity: SKEY, tls_cert_pem: testcert::CERT_PEM.into(), tls_key_pem: testcert::KEY_PEM.into(),
             psk: psk.into(), udp_bind: lo(0), tcp_bind: lo(0), upstream: wg, fec,
         }).unwrap();
         // 핸드셰이크(앞 8개)는 통과, 이후 20개마다 3개 연속 손실(약 15%, 버스트).
         let (relay, relay_stop, dropped) = spawn_lossy_relay(server.udp_addr(), 8, 20, 3);
         let client = run_client(ClientConfig {
+            identity: CKEY, server_pub: Identity::from_bytes(SKEY).public(),
             psk: psk.into(),
             server_udp: relay, server_tcp: server.tcp_addr(),
             local_bind: lo(0), fec, prefer: Prefer::Udp,
@@ -196,12 +204,14 @@ fn main() {
     {
         let (wg, wg_stop) = spawn_echo();
         let server = run_server(ServerConfig {
+            identity: SKEY, tls_cert_pem: testcert::CERT_PEM.into(), tls_key_pem: testcert::KEY_PEM.into(),
             psk: psk.into(), udp_bind: lo(0), tcp_bind: lo(0), upstream: wg,
             fec: FecParams::default(),
         }).unwrap();
         // 클라에게 알려 주는 UDP 주소는 아무도 안 듣는 죽은 포트 → UDP 핸드셰이크 실패 → TCP로.
         let dead_udp = lo(1); // 포트 1: 바인드 안 됨
         let client = run_client(ClientConfig {
+            identity: CKEY, server_pub: Identity::from_bytes(SKEY).public(),
             psk: psk.into(),
             server_udp: dead_udp, server_tcp: server.tcp_addr(),
             local_bind: lo(0), fec: FecParams::default(), prefer: Prefer::Auto,
@@ -215,7 +225,7 @@ fn main() {
         }
         let kind = match client.stats().kind {
             Some(Kind::Udp) => "udp",
-            Some(Kind::Tcp) => "tcp(TLS 흉내)",
+            Some(Kind::Tcp) => "tls 1.3 (tcp)",
             None => "실패",
         };
         let local = client.local_addr().unwrap();

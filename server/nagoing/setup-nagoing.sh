@@ -2,10 +2,14 @@
 # nagoing 서버 프록시를 올린다(막힌 망 우회). 여러 번 실행해도 안전(idempotent).
 #
 # 하는 일: WG(wg0, udp 51820)는 그대로 두고, 그 앞에 nagoing 프록시를 세운다.
-#   - TCP 443   : TLS 흉내(ClientHello) — 학교·회사·호텔처럼 VPN 막는 망의 핵심 경로(①)
+#   - TCP 443   : 진짜 TLS 1.3(rustls) — 학교·회사·호텔처럼 VPN 막는 망의 핵심 경로(①)
 #   - UDP 51821 : QUIC 모양 — 손실 보정(FEC)·빠른 전환이 사는 경로(②③). udp 443은 기존 WG REDIRECT가
 #                 먼저 가로채므로 쓰지 않고 전용 포트를 쓴다
-#   받은 걸 풀어서 로컬 wg0(127.0.0.1:51820)로 넘긴다. WireGuard는 하나도 안 바뀐다.
+#   받은 걸 인증·복호화해 로컬 wg0(127.0.0.1:51820)로 넘긴다. WireGuard는 하나도 안 바뀐다.
+#
+# v2 키: HELLO 인증에 wg0의 WireGuard 개인키를 쓴다(클라가 이미 아는 serverPub의 짝 — 새 키 배포 없음).
+#   /etc/nago/wg.key(root 전용)로 꺼내 두고, TLS용 자체서명 인증서도 서버마다 만든다. 서비스(DynamicUser)는
+#   systemd LoadCredential로만 받아 읽는다. wg0 키를 바꿨으면 이 스크립트를 다시 돌린다.
 #
 # 빌드: NagoTun 크레이트(엔진 포함)를 그대로 빌드한다 — crates.io에서 의존 크레이트를 받으므로 서버에 외부 접속이 필요하다.
 #
@@ -73,8 +77,17 @@ else
   echo ">> 빌드 건너뜀(이미 최신). FORCE_BUILD=1로 강제 빌드"
 fi
 
-echo ">> 설정·서비스 쓰기"
+echo ">> v2 키: wg0 개인키 · TLS 인증서"
 install -d -m 0750 /etc/nago
+WG_KEY=$(wg show wg0 private-key 2>/dev/null || sed -n 's/^PrivateKey *= *//p' /etc/wireguard/wg0.conf | head -1)
+[ -n "$WG_KEY" ] || { echo "wg0 개인키를 못 찾음(wg0가 떠 있어야 함)"; exit 1; }
+( umask 077; printf '%s\n' "$WG_KEY" > /etc/nago/wg.key )
+if [ ! -s /etc/nago/tls.crt ] || [ ! -s /etc/nago/tls.key ]; then
+  ( umask 077; openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+      -subj "/CN=www.cloudflare.com" -keyout /etc/nago/tls.key -out /etc/nago/tls.crt 2>/dev/null )
+fi
+
+echo ">> 설정·서비스 쓰기"
 cat > /etc/nago/nagoing.env <<EOF
 NAGO_PSK=${PSK}
 NAGO_UDP=0.0.0.0:${UDP_PORT}
@@ -91,7 +104,12 @@ Wants=network-online.target
 
 [Service]
 EnvironmentFile=/etc/nago/nagoing.env
-ExecStart=/usr/local/sbin/nagoing-proxy server ${NAGO_PSK} ${NAGO_UDP} ${NAGO_TCP} ${WG_ADDR}
+# v2 키·인증서는 자격증명으로만 넘긴다(DynamicUser는 root 전용 파일을 직접 못 읽음). 프록시는 이름을
+# $CREDENTIALS_DIRECTORY에서 찾는다.
+LoadCredential=wg.key:/etc/nago/wg.key
+LoadCredential=tls.crt:/etc/nago/tls.crt
+LoadCredential=tls.key:/etc/nago/tls.key
+ExecStart=/usr/local/sbin/nagoing-proxy server ${NAGO_PSK} ${NAGO_UDP} ${NAGO_TCP} ${WG_ADDR} wg.key tls.crt tls.key
 Restart=always
 RestartSec=2
 # 특권 포트(443) 바인드만 필요. 나머지는 묶는다.
@@ -113,7 +131,7 @@ systemctl restart nagoing-proxy
 
 echo ">> 확인"
 sleep 1
-systemctl is-active nagoing-proxy && echo "nagoing-proxy: ON  (tcp ${TCP_PORT} · udp ${UDP_PORT} → ${WG_ADDR})" || {
+systemctl is-active nagoing-proxy && echo "nagoing-proxy v2: ON  (tls ${TCP_PORT} · udp ${UDP_PORT} → ${WG_ADDR})" || {
   echo "nagoing-proxy 시작 실패 — 로그:"; journalctl -u nagoing-proxy --no-pager -n 20; exit 1;
 }
 echo ">> 잊지 말기: SG에서 inbound tcp ${TCP_PORT} · udp ${UDP_PORT} 열기(위 주석 참고)"

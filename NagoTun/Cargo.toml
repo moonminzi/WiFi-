@@ -16,6 +16,12 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 # nagoing 난독화 nonce·난수용(OS 난수). 작고 git이 아니라 가볍다.
 getrandom = "0.2"
+# nagoing v2: 진짜 TLS 1.3(TCP 443 경로). ring 백엔드만 — 엔진이 이미 ring을 쓴다. TLS 1.2·로깅 끔.
+rustls = { version = "=0.23.27", default-features = false, features = ["ring", "std"] }
+# nagoing v2: 세션 AEAD(ChaCha20-Poly1305)·HKDF·HMAC. 엔진과 같은 버전.
+ring = { version = "0.17.14", default-features = false }
+# nagoing v2: 클라 WG 키 ↔ 서버 WG 키 X25519로 HELLO를 인증한다(세션 가로채기 방지). 엔진과 같은 버전.
+x25519-dalek = { version = "=2.0.1", features = ["static_secrets"], default-features = false }
 # NagoTun 엔진: NordVPN의 NepTUN(BoringTun 포크, BSD-3-Clause, rev ce18515)을 engine/에 가져와 고친 것.
 # 무엇을 바꿨는지는 engine/README.md
 engine = { package = "nagotun_engine", path = "engine", features = ["device"] }

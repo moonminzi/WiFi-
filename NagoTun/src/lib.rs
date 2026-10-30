@@ -199,13 +199,19 @@ fn parse_addr(ip: &str, port: u16) -> Option<SocketAddr> {
     ip.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, port))
 }
 
+/// WireGuard 설정의 base64 키(32바이트)를 바이트로.
+fn key32(b64: &str) -> Option<[u8; 32]> {
+    base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok()?.try_into().ok()
+}
+
 /// nagoing 클라이언트를 띄운다. 실패하면 NULL(사유는 nago_tun_last_error).
-/// - `psk`: 서버와 공유하는 난독화 PSK(인증 아님 — 진짜 보안은 안쪽 WG)
+/// - `psk`: 서버와 공유하는 핸드셰이크 가리기 PSK(인증 아님)
+/// - `private_key`/`server_pub`: WireGuard 설정의 클라 개인키·서버 공개키(base64). HELLO 인증·세션 키에 쓴다
 /// - `server_ip` + `udp_port`/`tcp_port`: 서버 프록시 주소(TCP 443 = HTTPS, UDP는 전용 포트 51821)
 /// - `local_ip`/`local_port`: NepTUN이 WG 패킷을 보낼 로컬 주소(보통 127.0.0.1)
 /// - `fec_k`/`fec_groups`/`fec_on`: 손실 보정. fec_on=0이면 끔
 /// - `prefer`: 0 auto(UDP→TCP), 1 udp, 2 tcp
-/// - `sni`: TCP 폴백 ClientHello에 넣을 이름(NULL이면 기본값)
+/// - `sni`: TLS 1.3 ClientHello의 SNI(NULL이면 기본값)
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn nago_nagoing_client_start(
@@ -220,6 +226,8 @@ pub extern "C" fn nago_nagoing_client_start(
     fec_on: c_int,
     prefer: c_int,
     sni: *const c_char,
+    private_key: *const c_char,
+    server_pub: *const c_char,
 ) -> *mut NagoingClient {
     let (Some(psk), Some(server_ip), Some(local_ip)) = (text(psk), text(server_ip), text(local_ip)) else {
         return fail("nagoing: psk/server_ip/local_ip not utf-8".into());
@@ -230,6 +238,11 @@ pub extern "C" fn nago_nagoing_client_start(
         parse_addr(&local_ip, local_port),
     ) else {
         return fail(format!("nagoing: bad address {server_ip} / {local_ip}"));
+    };
+    let (Some(identity), Some(server_pub)) =
+        (text(private_key).as_deref().and_then(key32), text(server_pub).as_deref().and_then(key32))
+    else {
+        return fail("nagoing: private_key/server_pub must be base64 32-byte keys".into());
     };
     let prefer = match prefer {
         1 => nagoing::Prefer::Udp,
@@ -244,6 +257,8 @@ pub extern "C" fn nago_nagoing_client_start(
         fec: nagoing::FecParams { k: fec_k, groups: fec_groups, enabled: fec_on != 0 },
         prefer,
         sni: text(sni).unwrap_or_else(|| "www.cloudflare.com".into()),
+        identity,
+        server_pub,
     };
     match nagoing::run_client(cfg) {
         Ok(handle) => Box::into_raw(Box::new(NagoingClient { handle })),

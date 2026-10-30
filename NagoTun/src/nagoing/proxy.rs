@@ -1,13 +1,16 @@
 //! nagoing 프록시 — 클라이언트(폰)와 서버(AWS)의 중계 루프.
 //!
 //! 클라이언트: NepTUN이 로컬 UDP(127.0.0.1:local)로 보낸 WireGuard 데이터그램을 받아 FEC로 조각내고
-//! 난독화해 전송(UDP 443→막히면 TLS/TCP 443)으로 서버에 보낸다. 반대로 서버에서 온 조각은 풀어서
-//! NepTUN에게 돌려준다. WireGuard 자체는 로컬 소켓만 보므로 하나도 바뀌지 않는다.
+//! 세션 키로 봉인해 전송(UDP 51821 QUIC 모양 → 막히면 진짜 TLS 1.3 / TCP 443)으로 서버에 보낸다. 반대로 서버에서 온
+//! 조각은 열어서 NepTUN에게 돌려준다. WireGuard 자체는 로컬 소켓만 보므로 하나도 바뀌지 않는다.
 //!
-//! 서버: UDP(QUIC 모양)와 TCP(TLS 흉내)를 동시에 듣고, 세션별로 wg0(127.0.0.1:51820)에 UDP로 중계한다.
-//! 세션은 session_id로 묶어 둬서, 클라이언트가 와이파이↔LTE로 바뀌어 주소가 달라져도(=재접속) 같은
-//! wg0 소켓을 계속 쓴다. 그러면 서버가 보는 WireGuard 피어 엔드포인트가 안 바뀌어 WG 재핸드셰이크 없이
-//! 이어진다(③ 빠른 전환의 핵심).
+//! 서버: UDP와 TCP(TLS)를 동시에 듣고, 세션별로 wg0(127.0.0.1:51820)에 UDP로 중계한다. 세션은 session_id와
+//! 클라의 WG 공개키로 묶어 둬서, 클라이언트가 와이파이↔LTE로 바뀌어 주소가 달라져도(=재접속) 같은 wg0 소켓을 계속
+//! 쓴다 → 서버가 보는 WG 피어 엔드포인트가 안 바뀌어 WG 재핸드셰이크 없이 이어진다(③ 빠른 전환).
+//!
+//! v2 보안(crypto.rs): HELLO는 클라 WG 키 × 서버 WG 키로 인증되고(남의 세션 가로채기 불가), 시각 창 + 난수 캐시로
+//! 재전송을 막는다. 데이터는 HELLO마다 새로 뽑은 세션 키로 AEAD 봉인되고 2048칸 리플레이 창을 지난다.
+//! 서버는 **인증된** 패킷이 올 때만 반환 경로를 새 주소로 바꾼다(위조 패킷으로 경로를 돌릴 수 없음).
 
 use std::collections::HashMap;
 use std::io;
@@ -17,35 +20,39 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use super::crypto::{self, ClientHello, HandshakeKey, Identity, ServerAck, SessionKeys};
 use super::fec::{FecDecoder, FecEncoder, ShardRef};
-use super::frame::{self, Frame, PROTOCOL_VERSION};
-use super::obfs::{self, DIR_C2S, DIR_S2C};
-use super::transport::{
-    self, server_hello, Kind, RxHalf, TcpRx, TcpTx, TxHalf, UdpRx, UdpTx,
-};
+use super::frame::{self, Frame};
+use super::transport::{self, Kind, MsgKind, RxHalf, TlsTx, TxHalf, UdpRx, UdpTx};
 use super::{rand_bytes, rand_u64};
 
-/// 수립된 전송 한 벌: 송신 반·수신 반·종류.
-type Conn = (Box<dyn TxHalf>, Box<dyn RxHalf>, Kind);
+pub use super::crypto::VERSION as PROTOCOL_VERSION;
+
+/// 수립된 전송 한 벌: 송신 반·수신 반·종류·세션 키.
+type Conn = (Box<dyn TxHalf>, Box<dyn RxHalf>, Kind, Arc<SessionKeys>);
 
 const READ_TIMEOUT: Duration = Duration::from_millis(500);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(1500);
+/// TCP 접속·TLS 핸드셰이크·HELLO 응답 각각의 제한.
+const TCP_STEP_TIMEOUT: Duration = Duration::from_secs(3);
 const KEEPALIVE: Duration = Duration::from_secs(5);
 const HELLO_RETRIES: usize = 3;
 const MAX_MSG: usize = 2048;
-/// TCP 쓰기 제한. 한 클라이언트의 멈춘 쓰기가 잠금을 오래 쥐지 못하게 한다(①#2).
+/// TCP 쓰기 제한. 한 클라이언트의 멈춘 쓰기가 잠금을 오래 쥐지 못하게 한다.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-/// 클라이언트가 이만큼 아무것도 못 받으면 전송을 다시 세운다(서버 재시작·NAT 변경 복구, #1).
+/// 클라이언트가 이만큼 아무것도 못 받으면 전송을 다시 세운다(서버 재시작·NAT 변경 복구).
 const CLIENT_STALE: Duration = Duration::from_secs(15);
-/// 서버가 이만큼 조용한 세션은 정리한다(자원 누수 방지, #5).
+/// 서버가 이만큼 조용한 세션은 정리한다(자원 누수 방지).
 const SESSION_IDLE: Duration = Duration::from_secs(300);
-/// 서버 TCP 연결이 이만큼 아무 프레임도 못 받으면 끊는다. 클라는 5초마다 PING하므로 살아 있는 연결은 안 걸린다.
-/// 망을 바꾼 폰의 옛 연결(FIN 없이 사라짐)이나 레코드 하나만 보내고 붙어 있는 연결이 스레드·fd를 영영 쥐지 못하게.
+/// 서버 TCP 연결이 이만큼 인증된 프레임을 못 받으면 끊는다. 클라는 5초마다 PING하므로 살아 있는 연결은 안 걸린다.
+/// 망을 바꾼 폰의 옛 연결(FIN 없이 사라짐)이 스레드·fd를 영영 쥐지 못하게.
 const TCP_IDLE: Duration = if cfg!(test) { Duration::from_secs(2) } else { Duration::from_secs(30) };
 /// 동시 TCP 연결 상한(연결마다 스레드 하나). 넘으면 새 연결은 바로 닫는다 — 스레드 고갈로 프로세스가 죽지 않게.
 const MAX_TCP_CONNS: usize = 1024;
-/// 세션 상한(세션마다 wg0 소켓 + 내려받기 스레드). PSK는 공개 소스에 있으므로 HELLO 남발을 막는다.
+/// 세션 상한(세션마다 wg0 소켓 + 내려받기 스레드). 아무 WG 키로나 HELLO를 만들 수 있으므로 남발을 막는다.
 const MAX_SESSIONS: usize = 4096;
+/// 기억할 HELLO 난수 상한(리플레이 캐시). 넘치면 만료된 것부터 지운다.
+const MAX_HELLO_CACHE: usize = 65_536;
 /// auto에서 UDP가 붙었다가 조용해지면(=도중에 막힘) 이 시간 동안은 TCP를 먼저 해 본다.
 const UDP_PENALTY: Duration = Duration::from_secs(300);
 /// 덜 찬 FEC 그룹은 이만큼 기다린 뒤 그 개수로 닫아 패리티를 낸다(드문 트래픽도 복구되게).
@@ -53,6 +60,12 @@ const UDP_PENALTY: Duration = Duration::from_secs(300);
 const FEC_MAX_AGE: Duration = Duration::from_millis(200);
 /// 덜 찬 그룹이 있을 때 읽기 제한을 이만큼으로 줄여 FEC_MAX_AGE를 제때 확인한다(없으면 READ_TIMEOUT).
 const FEC_TICK: Duration = Duration::from_millis(20);
+/// UDP 핸드셰이크 평문을 이만큼 채우면 데이터그램이 QUIC Initial 크기(1200)가 된다.
+const UDP_HS_PAD: usize = transport::QUIC_INITIAL_SIZE - transport::LONG_HDR - 12 - crypto::TAG_LEN;
+/// TLS 안의 HELLO는 진짜 브라우저의 첫 요청 크기쯤으로.
+const TCP_HS_PAD: usize = 400;
+/// nagoing이 아닌 TLS 접속(능동 탐침)에 주는 응답 — 평범한 웹 서버처럼 보이게.
+const HTTP_404: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 /// 단조 증가 ms(유휴 판단용).
 fn now_ms() -> u64 {
@@ -88,14 +101,21 @@ fn is_timeout(e: &io::Error) -> bool {
     matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
 }
 
-/// ShardRef를 Frame으로.
+/// ShardRef를 Frame으로(seq는 선에 싣지 않는다 — 디코더가 안 쓴다).
 fn shard_frame<'a>(shard: ShardRef<'a>) -> Frame<'a> {
     match shard {
-        ShardRef::Data { seq, group, gen, index, k, payload } =>
-            Frame::Data { seq, group, gen, index, k, payload },
-        ShardRef::Parity { group, gen, k, payload } =>
-            Frame::Parity { group, gen, k, payload },
+        ShardRef::Data { group, gen, index, k, payload, .. } => Frame::Data { group, gen, index, k, payload },
+        ShardRef::Parity { group, gen, k, payload } => Frame::Parity { group, gen, k, payload },
     }
+}
+
+/// 프레임을 평문으로 만들고 세션 키로 봉인한다.
+fn seal_frame(keys: &SessionKeys, frame: &Frame) -> Vec<u8> {
+    let mut plain = Vec::new();
+    frame::encode(frame, &mut plain);
+    let mut out = Vec::new();
+    keys.seal(&plain, &mut out);
+    out
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -108,52 +128,58 @@ pub struct ServerConfig {
     pub tcp_bind: SocketAddr,
     pub upstream: SocketAddr, // wg0, 보통 127.0.0.1:51820
     pub fec: FecParams,
+    /// 서버 고정 키 = wg0의 WireGuard 개인키(클라가 이미 아는 serverPub의 짝).
+    pub identity: [u8; 32],
+    /// TCP 443 TLS 1.3용 인증서·키(PEM). 클라는 검증하지 않으므로 자체서명이면 된다.
+    pub tls_cert_pem: Vec<u8>,
+    pub tls_key_pem: Vec<u8>,
 }
 
 /// 클라이언트로 돌려보낼 경로. 복제가 싸서(Arc) 잠금 안에서는 복제만 하고 실제 전송은 잠금 밖에서 한다.
 #[derive(Clone)]
 enum Return {
     Udp { sock: Arc<UdpSocket>, addr: SocketAddr, cid: u32 },
-    Tcp { tx: Arc<Mutex<TcpTx>> },
+    Tcp { tx: Arc<Mutex<TlsTx>> },
 }
 
 impl Return {
-    fn send_frame(&self, key: &[u8; 32], frame: &Frame) -> io::Result<()> {
-        let mut out = Vec::new();
-        frame::encode(frame, key, DIR_S2C, &mut out);
-        self.send(&out)
-    }
-
-    fn send(&self, inner: &[u8]) -> io::Result<()> {
+    fn send(&self, kind: MsgKind, inner: &[u8]) -> io::Result<()> {
         match self {
             Return::Udp { sock, addr, cid } => {
                 let mut wrapped = Vec::new();
-                transport::udp_wrap(inner, *cid, &mut wrapped);
+                transport::udp_wrap(kind, inner, *cid, &mut wrapped);
                 sock.send_to(&wrapped, *addr)?;
                 Ok(())
             }
-            Return::Tcp { tx } => tx.lock().unwrap().send_msg(inner),
+            Return::Tcp { tx } => tx.lock().unwrap().send_msg(kind, inner),
         }
     }
 }
 
 struct Session {
     wg: UdpSocket, // wg0에 connect
+    /// 이 세션을 연 클라의 WG 공개키. 다른 키의 HELLO로는 이 세션에 붙을 수 없다(가로채기 방지).
+    static_pub: [u8; 32],
+    keys: Mutex<Arc<SessionKeys>>, // 마지막 HELLO로 뽑은 세션 키
     ret: Mutex<Return>,
     enc: Mutex<FecEncoder>, // wg→client
     dec: Mutex<FecDecoder>, // client→wg
     fec_on: bool,
     alive: Arc<AtomicBool>,
     recovered: Arc<AtomicU64>, // client→wg 방향에서 FEC로 되살린 조각 수(서버 전체 합산)
-    last_seen: AtomicU64,      // 마지막 수신 시각(ms). 유휴 정리에 쓴다
+    last_seen: AtomicU64,      // 마지막 인증된 수신 시각(ms). 유휴 정리에 쓴다
 }
 
 impl Session {
-    /// ★ ret 잠금은 경로를 복제하는 동안만 쥔다. 멈춘 TCP 쓰기(최대 WRITE_TIMEOUT)를 ret 잠금 안에서 하면,
-    ///    같은 세션의 HELLO(망 전환)를 처리하려고 ret을 바꾸려는 UDP 루프가 그동안 멈춰 모든 UDP 클라가 선다(#2).
-    fn send_frame(&self, key: &[u8; 32], frame: &Frame) -> io::Result<()> {
+    fn keys(&self) -> Arc<SessionKeys> {
+        self.keys.lock().unwrap().clone()
+    }
+
+    /// 지금의 반환 경로로 봉인해 보낸다. ★ ret 잠금은 경로를 복제하는 동안만 쥔다 — 멈춘 TCP 쓰기를 잠금 안에서 하면
+    /// 같은 세션의 HELLO(망 전환)로 ret을 바꾸려는 UDP 루프가 그동안 멈춰 모든 UDP 클라가 선다.
+    fn send_frame(&self, frame: &Frame) -> io::Result<()> {
         let ret = self.ret.lock().unwrap().clone();
-        ret.send_frame(key, frame)
+        ret.send(MsgKind::Data, &seal_frame(&self.keys(), frame))
     }
 
     fn touch(&self) {
@@ -163,7 +189,7 @@ impl Session {
     /// 클라이언트→wg0: 받은 조각은 바로 wg0로, FEC로 되살린 조각도 wg0로.
     fn inbound(&self, frame: Frame) {
         match frame {
-            Frame::Data { group, gen, index, k, payload, .. } => {
+            Frame::Data { group, gen, index, k, payload } => {
                 let _ = self.wg.send(payload);
                 if k >= 2 {
                     let (wg, rc) = (&self.wg, &self.recovered);
@@ -186,45 +212,87 @@ impl Session {
 }
 
 struct ServerInner {
-    key: [u8; 32],
+    hs: HandshakeKey,
+    identity: Identity,
+    tls: Arc<rustls::ServerConfig>,
     upstream: SocketAddr,
     fec: FecParams,
     sessions: Mutex<HashMap<u64, Arc<Session>>>,
     by_udp: Mutex<HashMap<SocketAddr, u64>>,
-    by_cid: Mutex<HashMap<u32, u64>>, // 클라이언트 cid → 세션. NAT로 주소가 바뀌어도 cid로 찾는다(#1)
+    by_cid: Mutex<HashMap<u32, u64>>, // 클라이언트 cid → 세션. NAT로 주소가 바뀌어도 cid로 찾는다
+    hello_seen: Mutex<HashMap<[u8; 16], u64>>, // HELLO 난수 → 만료 시각(초). 리플레이 캐시
     stop: AtomicBool,
     recovered: Arc<AtomicU64>,
     tcp_conns: AtomicUsize, // 지금 살아 있는 TCP 연결 스레드 수(MAX_TCP_CONNS 상한)
 }
 
 impl ServerInner {
-    /// 세션을 찾거나 만든다. 이미 있으면 반환 경로(ret)만 새 것으로 바꾼다(재접속/망 전환).
-    /// ★ 세션 표(sessions) 잠금을 쥔 채로는 절대 ret 잠금을 기다리지 않는다. ret은 멈춘 TCP 쓰기가
-    ///    오래 쥘 수 있어서(쓰기 제한은 있지만), 그걸 표 잠금과 겹치면 서버 전체가 멈춘다(#2).
-    fn attach(self: &Arc<Self>, session_id: u64, ret: Return) -> io::Result<Arc<Session>> {
-        // 1) 이미 있으면 표 잠금을 먼저 풀고(clone 후 release) 밖에서 ret만 교체.
-        if let Some(s) = self.sessions.lock().unwrap().get(&session_id).cloned() {
+    /// HELLO를 확인하고(시각·MAC·리플레이) 세션을 붙인 뒤, 봉인한 ACK를 돌려준다. 하나라도 어긋나면 None(무응답).
+    fn accept_hello(self: &Arc<Self>, msg: &mut [u8], ret: Return, pad: usize) -> Option<(u64, Arc<Session>, Vec<u8>)> {
+        let (hello, mac) = ClientHello::open(&self.hs, msg)?;
+        if !hello.fresh(crypto::now_unix()) {
+            return None;
+        }
+        let k = self.identity.shared(&hello.static_pub)?;
+        if !hello.verify(&mac, &k) {
+            return None;
+        }
+        // MAC이 맞는 HELLO만 캐시에 넣는다(아무 바이트로 캐시를 채우지 못하게).
+        if !self.remember_hello(&hello.random) {
+            return None;
+        }
+        let mut s_random = [0u8; 16];
+        rand_bytes(&mut s_random);
+        let keys = Arc::new(SessionKeys::derive(&k, &hello.random, &s_random, false));
+        let s = self.attach(hello.session, hello.static_pub, ret, keys).ok()?;
+        let ack = ServerAck { session: hello.session, random: s_random }.seal(&self.hs, &k, &hello.random, pad);
+        Some((hello.session, s, ack))
+    }
+
+    /// 처음 보는 HELLO 난수면 기억하고 true, 이미 봤으면(재전송) false.
+    fn remember_hello(&self, random: &[u8; 16]) -> bool {
+        let now = crypto::now_unix();
+        let mut seen = self.hello_seen.lock().unwrap();
+        if seen.len() >= MAX_HELLO_CACHE {
+            seen.retain(|_, exp| *exp > now);
+        }
+        if seen.len() >= MAX_HELLO_CACHE || seen.contains_key(random) {
+            return false;
+        }
+        seen.insert(*random, now + 2 * crypto::HELLO_SKEW);
+        true
+    }
+
+    /// 세션을 찾거나 만든다. 이미 있으면(같은 WG 키일 때만) 반환 경로와 세션 키를 새 것으로 바꾼다(재접속/망 전환).
+    /// ★ 세션 표 잠금을 쥔 채로는 절대 ret 잠금을 기다리지 않는다(표 잠금과 겹치면 서버 전체가 멈춘다).
+    fn attach(self: &Arc<Self>, session_id: u64, static_pub: [u8; 32], ret: Return, keys: Arc<SessionKeys>) -> io::Result<Arc<Session>> {
+        let reattach = |s: Arc<Session>, ret: Return, keys: Arc<SessionKeys>| -> io::Result<Arc<Session>> {
+            if s.static_pub != static_pub {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "session belongs to another key"));
+            }
+            *s.keys.lock().unwrap() = keys;
             *s.ret.lock().unwrap() = ret;
             s.touch();
-            return Ok(s);
+            Ok(s)
+        };
+        if let Some(s) = self.sessions.lock().unwrap().get(&session_id).cloned() {
+            return reattach(s, ret, keys);
         }
-        // 2) 새 세션. 소켓 바인드는 블로킹이 아니라 표 잠금 안에서 해도 되지만, ret 잠금은 절대 안 건드린다.
         let wg = UdpSocket::bind(if self.upstream.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" })?;
         wg.connect(self.upstream)?;
         wg.set_read_timeout(Some(READ_TIMEOUT))?;
         let mut map = self.sessions.lock().unwrap();
         if let Some(s) = map.get(&session_id).cloned() {
-            // 그사이 다른 HELLO가 만들었으면 표 잠금을 풀고 ret만 교체.
             drop(map);
-            *s.ret.lock().unwrap() = ret;
-            s.touch();
-            return Ok(s);
+            return reattach(s, ret, keys);
         }
         if map.len() >= MAX_SESSIONS {
             return Err(io::Error::other("too many sessions"));
         }
         let session = Arc::new(Session {
             wg,
+            static_pub,
+            keys: Mutex::new(keys),
             ret: Mutex::new(ret),
             enc: Mutex::new(FecEncoder::new(self.fec.k, self.fec.groups)),
             dec: Mutex::new(FecDecoder::new()),
@@ -236,49 +304,42 @@ impl ServerInner {
         map.insert(session_id, session.clone());
         drop(map);
         if let Err(e) = self.clone().spawn_downpump(session.clone()) {
-            // 스레드를 못 만들면(자원 고갈) 세션을 되돌린다. thread::spawn이었다면 panic → panic=abort로 서버가 죽었다.
+            // 스레드를 못 만들면(자원 고갈) 세션을 되돌린다(thread::spawn이었다면 panic=abort로 서버가 죽었다).
             self.sessions.lock().unwrap().remove(&session_id);
             return Err(e);
         }
         Ok(session)
     }
 
-    /// UDP 데이터그램의 세션을 찾는다. 주소로 먼저, 없으면 cid로(통신사 NAT가 포트를 바꾼 경우) 찾아
-    /// 반환 경로를 새 주소로 갱신한다(#1). 세션 표·cid 표 잠금을 쥔 채 ret을 만지지 않는다.
-    fn resolve_udp(&self, from: SocketAddr, cid: Option<u32>, udp: &Arc<UdpSocket>) -> Option<Arc<Session>> {
-        if let Some(id) = self.by_udp.lock().unwrap().get(&from).copied() {
-            if let Some(s) = self.sessions.lock().unwrap().get(&id).cloned() {
-                return Some(s);
-            }
-        }
-        let cid = cid?;
-        let id = self.by_cid.lock().unwrap().get(&cid).copied()?;
+    /// UDP 데이터의 세션 후보를 찾는다(주소로 먼저, 없으면 cid로). 아직 아무것도 바꾸지 않는다 —
+    /// 반환 경로는 패킷이 그 세션 키로 인증된 뒤에만 바꾼다.
+    fn find_udp(&self, from: SocketAddr, cid: u32) -> Option<(u64, Arc<Session>)> {
+        let id = self.by_udp.lock().unwrap().get(&from).copied();
+        let id = match id {
+            Some(id) => id,
+            None => self.by_cid.lock().unwrap().get(&cid).copied()?,
+        };
         let s = self.sessions.lock().unwrap().get(&id).cloned()?;
-        self.bind_udp(id, from, None);
-        *s.ret.lock().unwrap() = Return::Udp { sock: udp.clone(), addr: from, cid };
-        Some(s)
+        Some((id, s))
     }
 
-    /// 세션의 UDP 주소(와 cid)를 등록한다. 같은 세션의 옛 항목은 지운다 — 클라는 UDP 소켓을 한 번에 하나만 쓰므로,
+    /// 세션의 UDP 주소와 cid를 등록한다. 같은 세션의 옛 항목은 지운다 — 클라는 UDP 소켓을 한 번에 하나만 쓰므로,
     /// 안 지우면 NAT가 포트를 바꾸거나 망을 옮길 때마다 표가 쌓여 오래 붙은 세션에서 메모리가 계속 는다.
-    fn bind_udp(&self, id: u64, from: SocketAddr, cid: Option<u32>) {
+    fn bind_udp(&self, id: u64, from: SocketAddr, cid: u32) {
         {
             let mut by_udp = self.by_udp.lock().unwrap();
             by_udp.retain(|_, v| *v != id);
             by_udp.insert(from, id);
         }
-        if let Some(c) = cid {
-            let mut by_cid = self.by_cid.lock().unwrap();
-            by_cid.retain(|_, v| *v != id);
-            by_cid.insert(c, id);
-        }
+        let mut by_cid = self.by_cid.lock().unwrap();
+        by_cid.retain(|_, v| *v != id);
+        by_cid.insert(cid, id);
     }
 
-    /// wg0→client 펌프: wg0에서 읽은 응답을 FEC로 조각내 클라이언트에게 보낸다.
+    /// wg0→client 펌프: wg0에서 읽은 응답을 FEC로 조각내 봉인해 클라이언트에게 보낸다.
     fn spawn_downpump(self: Arc<Self>, session: Arc<Session>) -> io::Result<()> {
         thread::Builder::new().name("nagoing-down".into()).spawn(move || {
             let mut buf = [0u8; MAX_MSG];
-            let key = &self.key;
             let mut timeout = READ_TIMEOUT;
             while session.alive.load(Ordering::Relaxed) && !self.stop.load(Ordering::Relaxed) {
                 match session.wg.recv(&mut buf) {
@@ -286,12 +347,10 @@ impl ServerInner {
                         let payload = &buf[..n];
                         if session.fec_on {
                             session.enc.lock().unwrap().push(payload, |shard| {
-                                let _ = session.send_frame(key, &shard_frame(shard));
+                                let _ = session.send_frame(&shard_frame(shard));
                             });
                         } else {
-                            let _ = session.send_frame(key, &Frame::Data {
-                                seq: 0, group: 0, gen: 0, index: 0, k: 0, payload,
-                            });
+                            let _ = session.send_frame(&Frame::Data { group: 0, gen: 0, index: 0, k: 0, payload });
                         }
                     }
                     Err(e) if is_timeout(&e) => {}
@@ -301,7 +360,7 @@ impl ServerInner {
                     // 덜 찬 그룹을 제때 닫고, 남은 게 있으면 짧은 주기로 다시 확인한다.
                     let mut enc = session.enc.lock().unwrap();
                     enc.flush_stale(FEC_MAX_AGE, |shard| {
-                        let _ = session.send_frame(key, &shard_frame(shard));
+                        let _ = session.send_frame(&shard_frame(shard));
                     });
                     let want = if enc.has_pending() { FEC_TICK } else { READ_TIMEOUT };
                     drop(enc);
@@ -314,11 +373,16 @@ impl ServerInner {
         Ok(())
     }
 
-    /// 유휴 세션을 정리한다(자원 누수 방지, #5). SESSION_IDLE 동안 조용하면 내려받기 스레드를 멈추고
-    /// 세션·주소·cid 표에서 뺀다.
+    /// 유휴 세션과 만료된 HELLO 기억을 정리한다(자원 누수 방지).
     fn reap(&self) {
+        let now = crypto::now_unix();
+        self.hello_seen.lock().unwrap().retain(|_, exp| *exp > now);
         let cutoff = now_ms().saturating_sub(SESSION_IDLE.as_millis() as u64);
-        let dead: Vec<u64> = self.sessions.lock().unwrap().iter()
+        let dead: Vec<u64> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
             .filter(|(_, s)| s.last_seen.load(Ordering::Relaxed) < cutoff)
             .map(|(id, _)| *id)
             .collect();
@@ -360,7 +424,7 @@ impl ServerHandle {
         for s in self.inner.sessions.lock().unwrap().values() {
             s.alive.store(false, Ordering::Relaxed);
         }
-        // TCP 연결 스레드는 stop 플래그를 READ_TIMEOUT마다 확인해 스스로 빠진다(fd를 따로 들고 있지 않음).
+        // TCP 연결 스레드는 stop 플래그를 READ_TIMEOUT마다 확인해 스스로 빠진다.
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
@@ -369,12 +433,15 @@ impl ServerHandle {
 
 pub fn run_server(cfg: ServerConfig) -> io::Result<ServerHandle> {
     let inner = Arc::new(ServerInner {
-        key: obfs::derive_key(cfg.psk.as_bytes()),
+        hs: HandshakeKey::from_psk(cfg.psk.as_bytes()),
+        identity: Identity::from_bytes(cfg.identity),
+        tls: transport::tls_server_config(&cfg.tls_cert_pem, &cfg.tls_key_pem)?,
         upstream: cfg.upstream,
         fec: cfg.fec,
         sessions: Mutex::new(HashMap::new()),
         by_udp: Mutex::new(HashMap::new()),
         by_cid: Mutex::new(HashMap::new()),
+        hello_seen: Mutex::new(HashMap::new()),
         stop: AtomicBool::new(false),
         recovered: Arc::new(AtomicU64::new(0)),
         tcp_conns: AtomicUsize::new(0),
@@ -388,14 +455,11 @@ pub fn run_server(cfg: ServerConfig) -> io::Result<ServerHandle> {
     listener.set_nonblocking(true)?;
 
     let mut threads = Vec::new();
-
-    // UDP 수신 루프
     {
         let inner = inner.clone();
         let udp = udp.clone();
         threads.push(thread::spawn(move || server_udp_loop(inner, udp)));
     }
-    // TCP accept 루프
     {
         let inner = inner.clone();
         threads.push(thread::spawn(move || server_tcp_loop(inner, listener)));
@@ -406,7 +470,9 @@ pub fn run_server(cfg: ServerConfig) -> io::Result<ServerHandle> {
         threads.push(thread::spawn(move || {
             while !inner.stop.load(Ordering::Relaxed) {
                 for _ in 0..60 {
-                    if inner.stop.load(Ordering::Relaxed) { return; }
+                    if inner.stop.load(Ordering::Relaxed) {
+                        return;
+                    }
                     thread::sleep(Duration::from_millis(500));
                 }
                 inner.reap();
@@ -418,56 +484,45 @@ pub fn run_server(cfg: ServerConfig) -> io::Result<ServerHandle> {
 }
 
 fn server_udp_loop(inner: Arc<ServerInner>, udp: Arc<UdpSocket>) {
-    let mut buf = [0u8; MAX_MSG + 8];
+    let mut buf = [0u8; MAX_MSG + transport::LONG_HDR];
     while !inner.stop.load(Ordering::Relaxed) {
         let (n, from) = match udp.recv_from(&mut buf) {
             Ok(v) => v,
-            Err(e) if is_timeout(&e) => continue,
-            Err(_) => continue,
+            Err(_) => continue, // 타임아웃 포함
         };
-        let cid = transport::udp_cid(&buf[..n]);
-        let inner_msg = match transport::udp_unwrap(&buf[..n]) {
-            Some(m) => m,
-            None => continue,
-        };
-        let mut msg = inner_msg.to_vec();
-        let frame = match frame::decode(&mut msg, &inner.key, DIR_C2S) {
-            Some(f) => f,
-            None => continue,
-        };
-        match frame {
-            Frame::Hello { session, version } => {
-                // 모르는 프로토콜 버전은 받지 않는다(답이 없으면 클라는 실패/폴백 — 섞여서 오동작하지 않게).
-                if version != PROTOCOL_VERSION {
-                    continue;
+        let Some((kind, cid, body)) = transport::udp_parse(&buf[..n]) else { continue };
+        let mut msg = body.to_vec();
+        match kind {
+            MsgKind::Handshake => {
+                let ret = Return::Udp { sock: udp.clone(), addr: from, cid };
+                if let Some((id, _, ack)) = inner.accept_hello(&mut msg, ret.clone(), UDP_HS_PAD) {
+                    inner.bind_udp(id, from, cid);
+                    // 답은 HELLO가 온 그 경로로 바로.
+                    let _ = ret.send(MsgKind::Handshake, &ack);
                 }
-                let ret_cid = cid.unwrap_or_else(|| rand_u64() as u32);
-                let ret = Return::Udp { sock: udp.clone(), addr: from, cid: ret_cid };
-                match inner.attach(session, ret.clone()) {
-                    Ok(_) => {
-                        inner.bind_udp(session, from, cid);
-                        // 답은 HELLO가 온 그 경로로 바로(세션 ret을 거치면 그사이 바뀐 TCP 경로로 갈 수 있다).
-                        let _ = ret.send_frame(&inner.key, &Frame::HelloAck { session });
+            }
+            MsgKind::Data => {
+                let Some((id, s)) = inner.find_udp(from, cid) else { continue };
+                let keys = s.keys();
+                let Some(plain) = keys.open(&mut msg) else { continue }; // 위조·변조·재전송은 여기서 버림
+                let Some(frame) = frame::decode(plain) else { continue };
+                // 인증된 패킷이 새 주소에서 왔으면(NAT 리바인드) 반환 경로를 그리로 옮긴다.
+                let moved = !matches!(&*s.ret.lock().unwrap(), Return::Udp { addr, .. } if *addr == from);
+                if moved {
+                    *s.ret.lock().unwrap() = Return::Udp { sock: udp.clone(), addr: from, cid };
+                    inner.bind_udp(id, from, cid);
+                }
+                s.touch();
+                match frame {
+                    Frame::Ping { token } => {
+                        // PONG은 PING이 온 주소로 바로(이 루프는 모든 클라가 같이 쓰므로 TCP 경로로 쓰다 막히면 안 됨).
+                        let direct = Return::Udp { sock: udp.clone(), addr: from, cid };
+                        let _ = direct.send(MsgKind::Data, &seal_frame(&keys, &Frame::Pong { token }));
                     }
-                    Err(_) => continue,
+                    Frame::Data { .. } | Frame::Parity { .. } => s.inbound(frame),
+                    Frame::Pong { .. } => {}
                 }
             }
-            Frame::Ping { token } => {
-                if let Some(s) = inner.resolve_udp(from, cid, &udp) {
-                    s.touch();
-                    // PONG은 PING이 온 주소로 바로 보낸다. 이 UDP 루프는 모든 클라가 같이 쓰므로
-                    // 세션의 (멈췄을 수도 있는) TCP 경로로 쓰다가 막히면 안 된다.
-                    let ret = Return::Udp { sock: udp.clone(), addr: from, cid: cid.unwrap_or(0) };
-                    let _ = ret.send_frame(&inner.key, &Frame::Pong { token });
-                }
-            }
-            Frame::Data { .. } | Frame::Parity { .. } => {
-                if let Some(s) = inner.resolve_udp(from, cid, &udp) {
-                    s.touch();
-                    s.inbound(frame);
-                }
-            }
-            _ => {}
         }
     }
 }
@@ -508,77 +563,78 @@ fn server_tcp_loop(inner: Arc<ServerInner>, listener: TcpListener) {
 
 fn server_tcp_conn(inner: Arc<ServerInner>, stream: TcpStream) -> io::Result<()> {
     stream.set_nodelay(true)?;
-    // 멈춘 쓰기가 ret 잠금을 오래 쥐지 못하게 쓰기 제한을 둔다(#2).
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
-    let read = stream.try_clone()?;
-    // 짧은 타임아웃으로 종료를 폴링. TcpRx가 버퍼드라 타임아웃에 프레임이 깨지지 않는다.
-    read.set_read_timeout(Some(READ_TIMEOUT))?;
-    let mut rx = TcpRx::new(read);
-    let mut buf = [0u8; MAX_MSG];
-
-    // ClientHello(모양) 하나 읽어 버리고 ServerHello(모양) 보낸다. 핸드셰이크는 데드라인까지 기다린다.
-    let deadline = Instant::now() + HANDSHAKE_TIMEOUT.max(Duration::from_secs(3));
-    loop {
-        if Instant::now() > deadline {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "no client-hello"));
-        }
-        match rx.recv_msg(&mut buf) {
-            Ok(_) => break,
-            Err(ref e) if is_timeout(e) => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    let mut random = [0u8; 32];
-    rand_bytes(&mut random);
+    // 짧은 읽기 제한으로 데드라인·종료를 자주 확인한다(TLS 수신 반은 버퍼드라 타임아웃에 레코드가 안 깨진다).
+    stream.set_read_timeout(Some(READ_TIMEOUT))?;
     // 끝낼 때 소켓을 닫는 손잡이. tx는 세션 ret에도 들려 있어서 이 스레드가 끝나도 fd가 안 닫힐 수 있다.
     let ctl = stream.try_clone()?;
-    let tx = Arc::new(Mutex::new(TcpTx::new(stream)));
-    tx.lock().unwrap().send_raw(&server_hello(&random))?;
-    let ret = Return::Tcp { tx };
+    let stopped = || inner.stop.load(Ordering::Relaxed);
+    let (tx, mut rx) = transport::tls_server(stream, inner.tls.clone(), Instant::now() + TCP_STEP_TIMEOUT, &stopped)?;
+    let tx = Arc::new(Mutex::new(tx));
+    let ret = Return::Tcp { tx: tx.clone() };
+    let mut buf = [0u8; MAX_MSG];
 
-    let mut session: Option<Arc<Session>> = None;
+    // 첫 메시지는 올바른 HELLO여야 한다. 아니면(능동 탐침·브라우저) 평범한 웹 서버처럼 404를 주고 닫는다.
+    let deadline = Instant::now() + TCP_STEP_TIMEOUT;
+    let first = loop {
+        if Instant::now() > deadline || stopped() {
+            break None;
+        }
+        match rx.recv_msg(&mut buf) {
+            Ok(m) => break Some(m),
+            Err(ref e) if is_timeout(e) => continue,
+            Err(_) => break None,
+        }
+    };
+    let accepted = match first {
+        Some((MsgKind::Handshake, n)) => {
+            let mut msg = buf[..n].to_vec();
+            inner.accept_hello(&mut msg, ret.clone(), TCP_HS_PAD)
+        }
+        _ => None,
+    };
+    let Some((_, mut session, ack)) = accepted else {
+        tx.lock().unwrap().send_plain_and_close(HTTP_404);
+        return Ok(());
+    };
+    ret.send(MsgKind::Handshake, &ack)?;
+
     let mut last_frame = Instant::now();
-    while !inner.stop.load(Ordering::Relaxed) {
-        // 살아 있는 클라는 5초마다 PING한다. TCP_IDLE 동안 프레임이 없으면 죽은 연결(망 전환으로 FIN 없이
-        // 사라진 옛 연결, 레코드 하나 보내고 붙어만 있는 연결)로 보고 스레드·fd를 놓는다.
+    while !stopped() {
+        // 살아 있는 클라는 5초마다 PING한다. TCP_IDLE 동안 인증된 프레임이 없으면 죽은 연결로 보고 놓는다.
         if last_frame.elapsed() > TCP_IDLE {
             break;
         }
-        let n = match rx.recv_msg(&mut buf) {
-            Ok(n) => n,
+        let (kind, n) = match rx.recv_msg(&mut buf) {
+            Ok(m) => m,
             Err(ref e) if is_timeout(e) => continue,
             Err(_) => break,
         };
         let mut msg = buf[..n].to_vec();
-        let frame = match frame::decode(&mut msg, &inner.key, DIR_C2S) {
-            Some(f) => f,
-            None => continue,
-        };
-        last_frame = Instant::now();
-        match frame {
-            Frame::Hello { session: id, version } => {
-                if version != PROTOCOL_VERSION {
-                    continue;
-                }
-                if let Ok(s) = inner.attach(id, ret.clone()) {
-                    let _ = ret.send_frame(&inner.key, &Frame::HelloAck { session: id });
-                    session = Some(s);
+        match kind {
+            MsgKind::Handshake => {
+                // 같은 연결에서 다시 HELLO(드묾) — 새 세션 키로.
+                if let Some((_, s, ack)) = inner.accept_hello(&mut msg, ret.clone(), TCP_HS_PAD) {
+                    session = s;
+                    last_frame = Instant::now();
+                    let _ = ret.send(MsgKind::Handshake, &ack);
                 }
             }
-            Frame::Ping { token } => {
-                if let Some(s) = &session {
-                    s.touch();
+            MsgKind::Data => {
+                let keys = session.keys();
+                let Some(plain) = keys.open(&mut msg) else { continue };
+                let Some(frame) = frame::decode(plain) else { continue };
+                last_frame = Instant::now();
+                session.touch();
+                match frame {
                     // PONG은 이 연결로(세션 ret은 그사이 다른 경로로 바뀌었을 수 있다).
-                    let _ = ret.send_frame(&inner.key, &Frame::Pong { token });
+                    Frame::Ping { token } => {
+                        let _ = ret.send(MsgKind::Data, &seal_frame(&keys, &Frame::Pong { token }));
+                    }
+                    Frame::Data { .. } | Frame::Parity { .. } => session.inbound(frame),
+                    Frame::Pong { .. } => {}
                 }
             }
-            Frame::Data { .. } | Frame::Parity { .. } => {
-                if let Some(s) = &session {
-                    s.touch();
-                    s.inbound(frame);
-                }
-            }
-            _ => {}
         }
     }
     let _ = ctl.shutdown(std::net::Shutdown::Both);
@@ -598,19 +654,26 @@ pub struct ClientConfig {
     pub fec: FecParams,
     pub prefer: Prefer,
     pub sni: String,
+    /// 클라 고정 키 = 이 기기의 WireGuard 개인키.
+    pub identity: [u8; 32],
+    /// 서버의 WireGuard 공개키(설정의 serverPub). HELLO_ACK가 진짜 서버의 것인지 이걸로 확인한다.
+    pub server_pub: [u8; 32],
 }
 
 struct ClientInner {
-    key: [u8; 32],
+    hs: HandshakeKey,
+    static_pub: [u8; 32],
+    k_static: [u8; 32], // 내 WG 키 × 서버 WG 키
     session_id: u64,
     cfg: ClientConfig,
     local: UdpSocket,
     peer: Mutex<Option<SocketAddr>>,
     tx: Mutex<Option<Box<dyn TxHalf>>>,
     rx: Mutex<Option<Box<dyn RxHalf>>>,
+    keys: Mutex<Option<Arc<SessionKeys>>>,
     enc: Mutex<FecEncoder>, // c2s
     dec: Mutex<FecDecoder>, // s2c
-    last_rx: AtomicU64,     // 마지막 수신 시각(ms). 오래 조용하면 전송을 다시 세운다(#1)
+    last_rx: AtomicU64,     // 마지막 인증된 수신 시각(ms). 오래 조용하면 전송을 다시 세운다
     udp_bad_until: AtomicU64, // 이 시각(ms)까지는 auto에서 TCP를 먼저(붙었던 UDP가 도중에 막힌 망)
     stop: AtomicBool,
     rebind: AtomicBool,
@@ -622,11 +685,11 @@ struct ClientInner {
 
 impl ClientInner {
     fn send_frame(&self, frame: &Frame) {
-        let mut out = Vec::new();
-        frame::encode(frame, &self.key, DIR_C2S, &mut out);
+        let Some(keys) = self.keys.lock().unwrap().clone() else { return };
+        let out = seal_frame(&keys, frame);
         let mut g = self.tx.lock().unwrap();
         if let Some(tx) = g.as_mut() {
-            if tx.send_msg(&out).is_err() {
+            if tx.send_msg(MsgKind::Data, &out).is_err() {
                 self.rebind.store(true, Ordering::Relaxed);
             } else {
                 self.st_sent.fetch_add(1, Ordering::Relaxed);
@@ -642,7 +705,7 @@ impl ClientInner {
 
     fn handle_down(&self, frame: Frame) {
         match frame {
-            Frame::Data { group, gen, index, k, payload, .. } => {
+            Frame::Data { group, gen, index, k, payload } => {
                 self.deliver(payload);
                 if k >= 2 {
                     self.dec.lock().unwrap().on_data(group, gen, index, k, payload, |rec| {
@@ -669,7 +732,12 @@ impl ClientInner {
         io::Error::new(io::ErrorKind::Interrupted, "stopped")
     }
 
-    // 전송 수립(자동 선택). HELLO를 보내고 HELLO_ACK를 기다린다.
+    /// 새 HELLO(난수·시각이 매번 새로).
+    fn new_hello(&self) -> ClientHello {
+        ClientHello::new(self.session_id, self.static_pub)
+    }
+
+    // 전송 수립(자동 선택). 인증된 HELLO를 보내고, 진짜 서버의 HELLO_ACK가 오면 세션 키를 뽑는다.
     fn establish(&self) -> io::Result<Conn> {
         // auto인데 이 망에서 UDP가 붙었다 막힌 적이 있으면, 한동안은 TCP 먼저(UDP HELLO만 통과하고 데이터는
         // 막는 DPI에서 UDP 재접속만 되풀이하지 않게). TCP가 안 되면 그때 UDP.
@@ -689,90 +757,57 @@ impl ClientInner {
         self.try_tcp()
     }
 
-    fn hello_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        frame::encode(&Frame::Hello { session: self.session_id, version: PROTOCOL_VERSION },
-                      &self.key, DIR_C2S, &mut out);
-        out
-    }
-
     fn try_udp(&self) -> io::Result<Conn> {
         let server = self.cfg.server_udp;
         let bind = if server.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
         let sock = UdpSocket::bind(bind)?;
         sock.connect(server)?;
-        sock.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+        sock.set_read_timeout(Some(READ_TIMEOUT))?;
         let cid = rand_u64() as u32;
-        let mut rbuf = [0u8; MAX_MSG + 8];
+        let mut rbuf = [0u8; MAX_MSG + transport::LONG_HDR];
+        let mut wrapped = Vec::new();
         for _ in 0..HELLO_RETRIES {
             // stop()이 수립 중에도 빨리 끝나게(확장의 stopTunnel·watchdog이 join을 기다린다).
             if self.stopped() {
                 return Err(Self::stopped_err());
             }
-            let hello = self.hello_bytes();
-            let mut wrapped = Vec::new();
-            transport::udp_wrap(&hello, cid, &mut wrapped);
+            let hello = self.new_hello();
+            transport::udp_wrap(MsgKind::Handshake, &hello.seal(&self.hs, &self.k_static, UDP_HS_PAD), cid, &mut wrapped);
             sock.send(&wrapped)?;
-            match sock.recv(&mut rbuf) {
-                Ok(n) => {
-                    if let Some(inner) = transport::udp_unwrap(&rbuf[..n]) {
-                        let mut m = inner.to_vec();
-                        if let Some(Frame::HelloAck { session }) = frame::decode(&mut m, &self.key, DIR_S2C) {
-                            if session == self.session_id {
-                                sock.set_read_timeout(Some(READ_TIMEOUT))?;
-                                let rx_sock = sock.try_clone()?;
-                                return Ok((
-                                    Box::new(UdpTx::new(sock, cid)),
-                                    Box::new(UdpRx::new(rx_sock)),
-                                    Kind::Udp,
-                                ));
-                            }
-                        }
-                    }
+            let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+            while Instant::now() < deadline && !self.stopped() {
+                let n = match sock.recv(&mut rbuf) {
+                    Ok(n) => n,
+                    Err(ref e) if is_timeout(e) => continue,
+                    Err(e) => return Err(e),
+                };
+                let Some((MsgKind::Handshake, _, body)) = transport::udp_parse(&rbuf[..n]) else { continue };
+                let mut m = body.to_vec();
+                if let Some(ack) = ServerAck::open(&self.hs, &mut m, &self.k_static, &hello) {
+                    let keys = Arc::new(SessionKeys::derive(&self.k_static, &hello.random, &ack.random, true));
+                    let rx_sock = sock.try_clone()?;
+                    return Ok((Box::new(UdpTx::new(sock, cid)), Box::new(UdpRx::new(rx_sock)), Kind::Udp, keys));
                 }
-                Err(ref e) if is_timeout(e) => continue,
-                Err(e) => return Err(e),
             }
         }
         Err(io::Error::new(io::ErrorKind::TimedOut, "no udp hello-ack"))
     }
 
     fn try_tcp(&self) -> io::Result<Conn> {
-        // connect에 제한을 둬서 SYN이 사라지는 망에서 오래 매달리지 않게 한다(#6).
-        let stream = TcpStream::connect_timeout(&self.cfg.server_tcp, Duration::from_secs(3))?;
+        // connect에 제한을 둬서 SYN이 사라지는 망에서 오래 매달리지 않게 한다.
+        let stream = TcpStream::connect_timeout(&self.cfg.server_tcp, TCP_STEP_TIMEOUT)?;
         stream.set_nodelay(true)?;
-        // 짧은 읽기 제한으로 데드라인·stop을 자주 확인한다(TcpRx가 버퍼드라 타임아웃에 레코드가 안 깨진다).
+        // 짧은 읽기 제한으로 데드라인·stop을 자주 확인한다.
         stream.set_read_timeout(Some(READ_TIMEOUT))?;
-        // 멈춘 쓰기가 tx 잠금을 오래 쥐지 못하게 한다(#2).
+        // 멈춘 쓰기가 tx 잠금을 오래 쥐지 못하게 한다.
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
-        if self.stopped() {
-            return Err(Self::stopped_err());
-        }
-        let mut random = [0u8; 32];
-        rand_bytes(&mut random);
-        // ClientHello(모양) 보내고 ServerHello(모양) 한 레코드 받기.
-        let mut tx = TcpTx::new(stream.try_clone()?);
-        tx.send_raw(&transport::client_hello(&self.cfg.sni, &random))?;
-        let mut rx = TcpRx::new(stream.try_clone()?);
-        let mut buf = [0u8; MAX_MSG];
-        let deadline = Instant::now() + HANDSHAKE_TIMEOUT.max(Duration::from_secs(3));
-        loop {
-            if self.stopped() {
-                return Err(Self::stopped_err());
-            }
-            if Instant::now() > deadline {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "no server-hello"));
-            }
-            match rx.recv_msg(&mut buf) {
-                Ok(_) => break, // ServerHello 버림
-                Err(ref e) if is_timeout(e) => continue,
-                Err(e) => return Err(e),
-            }
-        }
+        let stopped = || self.stopped();
+        let (mut tx, mut rx) = transport::tls_client(stream, &self.cfg.sni, Instant::now() + TCP_STEP_TIMEOUT, &stopped)?;
 
-        // HELLO 보내고 HELLO_ACK 기다리기.
-        tx.send_msg(&self.hello_bytes())?;
-        let deadline = Instant::now() + HANDSHAKE_TIMEOUT.max(Duration::from_secs(3));
+        let hello = self.new_hello();
+        tx.send_msg(MsgKind::Handshake, &hello.seal(&self.hs, &self.k_static, TCP_HS_PAD))?;
+        let deadline = Instant::now() + TCP_STEP_TIMEOUT;
+        let mut buf = [0u8; MAX_MSG];
         loop {
             if self.stopped() {
                 return Err(Self::stopped_err());
@@ -781,20 +816,18 @@ impl ClientInner {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "no tcp hello-ack"));
             }
             match rx.recv_msg(&mut buf) {
-                Ok(n) => {
+                Ok((MsgKind::Handshake, n)) => {
                     let mut m = buf[..n].to_vec();
-                    if let Some(Frame::HelloAck { session }) = frame::decode(&mut m, &self.key, DIR_S2C) {
-                        if session == self.session_id {
-                            break;
-                        }
+                    if let Some(ack) = ServerAck::open(&self.hs, &mut m, &self.k_static, &hello) {
+                        let keys = Arc::new(SessionKeys::derive(&self.k_static, &hello.random, &ack.random, true));
+                        return Ok((Box::new(tx), Box::new(rx), Kind::Tcp, keys));
                     }
                 }
+                Ok(_) => {}
                 Err(ref e) if is_timeout(e) => continue,
                 Err(e) => return Err(e),
             }
         }
-        stream.set_read_timeout(Some(READ_TIMEOUT))?;
-        Ok((Box::new(tx), Box::new(rx), Kind::Tcp))
     }
 }
 
@@ -849,7 +882,7 @@ impl ClientStats {
     pub fn summary(&self) -> String {
         let k = match self.kind {
             Some(Kind::Udp) => "udp",
-            Some(Kind::Tcp) => "tcp",
+            Some(Kind::Tcp) => "tls",
             None => "down",
         };
         format!("{k} · tx {} · rx {} · fec+{}", self.sent, self.recv, self.recovered)
@@ -857,15 +890,22 @@ impl ClientStats {
 }
 
 pub fn run_client(cfg: ClientConfig) -> io::Result<ClientHandle> {
+    let identity = Identity::from_bytes(cfg.identity);
+    let k_static = identity
+        .shared(&cfg.server_pub)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "bad server public key"))?;
     let local = UdpSocket::bind(cfg.local_bind)?;
     local.set_read_timeout(Some(READ_TIMEOUT))?;
     let inner = Arc::new(ClientInner {
-        key: obfs::derive_key(cfg.psk.as_bytes()),
+        hs: HandshakeKey::from_psk(cfg.psk.as_bytes()),
+        static_pub: identity.public(),
+        k_static,
         session_id: rand_u64(),
         local,
         peer: Mutex::new(None),
         tx: Mutex::new(None),
         rx: Mutex::new(None),
+        keys: Mutex::new(None),
         enc: Mutex::new(FecEncoder::new(cfg.fec.k, cfg.fec.groups)),
         dec: Mutex::new(FecDecoder::new()),
         last_rx: AtomicU64::new(0),
@@ -920,9 +960,8 @@ fn client_up_loop(inner: Arc<ClientInner>) {
     let mut timeout = READ_TIMEOUT;
     while !inner.stop.load(Ordering::Relaxed) {
         match inner.local.recv_from(&mut buf) {
-            // 기기 안(루프백)에서 온 WG 모양 패킷만 받고, 그 보낸 곳을 내려받기 대상으로 삼는다. 예전엔 아무 패킷이나
-            // 마지막 송신자로 대상을 바꿔, 같은 기기의 다른 앱이 51822로 뭘 보내면 내려받기가 그쪽으로 새 끊겼다.
-            // (NepTUN이 망 전환으로 소켓을 다시 열어 포트가 바뀌어도 WG 패킷이라 바로 따라간다)
+            // 기기 안(루프백)에서 온 WG 모양 패킷만 받고, 그 보낸 곳을 내려받기 대상으로 삼는다(다른 앱이 51822로
+            // 뭘 보내도 내려받기가 그쪽으로 새지 않게). NepTUN이 소켓을 다시 열어 포트가 바뀌어도 바로 따라간다.
             Ok((n, from)) if from.ip().is_loopback() && looks_like_wg(&buf[..n]) => {
                 *inner.peer.lock().unwrap() = Some(from);
                 let payload = &buf[..n];
@@ -931,7 +970,7 @@ fn client_up_loop(inner: Arc<ClientInner>) {
                         inner.send_frame(&shard_frame(shard));
                     });
                 } else {
-                    inner.send_frame(&Frame::Data { seq: 0, group: 0, gen: 0, index: 0, k: 0, payload });
+                    inner.send_frame(&Frame::Data { group: 0, gen: 0, index: 0, k: 0, payload });
                 }
             }
             Ok(_) => {}
@@ -961,21 +1000,23 @@ fn client_down_loop(inner: Arc<ClientInner>) {
             }
         };
         match res {
-            Ok(n) => {
+            Ok((MsgKind::Data, n)) => {
                 inner.st_recv.fetch_add(1, Ordering::Relaxed);
+                let Some(keys) = inner.keys.lock().unwrap().clone() else { continue };
                 let mut m = buf[..n].to_vec();
-                if let Some(frame) = frame::decode(&mut m, &inner.key, DIR_S2C) {
-                    // 살아 있음 표시(#1 stale 판단)는 제대로 풀린 프레임에만. 어긋난 TCP 스트림의 쓰레기 바이트가
-                    // 계속 들어와도 '살아 있다'고 착각해 재접속을 안 하는 일이 없게.
+                let Some(plain) = keys.open(&mut m) else { continue }; // 위조·재전송 버림
+                if let Some(frame) = frame::decode(plain) {
+                    // 살아 있음 표시(stale 판단)는 인증된 프레임에만.
                     inner.last_rx.store(now_ms(), Ordering::Relaxed);
                     inner.handle_down(frame);
                 }
             }
+            Ok((MsgKind::Handshake, _)) => {} // 늦게 온 ACK 등 — 수립은 감독이 한다
             Err(ref e) if is_timeout(e) => {
                 thread::sleep(Duration::from_millis(10));
             }
             Err(_) => {
-                // 전송이 깨졌거나 아직 없음 → 재수립 요청하고 잠깐 쉰다.
+                // 전송이 깨짐 → 재수립 요청하고 잠깐 쉰다.
                 inner.rebind.store(true, Ordering::Relaxed);
                 thread::sleep(Duration::from_millis(50));
             }
@@ -986,7 +1027,8 @@ fn client_down_loop(inner: Arc<ClientInner>) {
 fn client_supervisor(inner: Arc<ClientInner>) {
     while !inner.stop.load(Ordering::Relaxed) {
         match inner.establish() {
-            Ok((tx, rx, kind)) => {
+            Ok((tx, rx, kind, keys)) => {
+                *inner.keys.lock().unwrap() = Some(keys);
                 *inner.tx.lock().unwrap() = Some(tx);
                 *inner.rx.lock().unwrap() = Some(rx);
                 inner.st_kind.store(match kind { Kind::Udp => 1, Kind::Tcp => 2 }, Ordering::Relaxed);
@@ -994,14 +1036,16 @@ fn client_supervisor(inner: Arc<ClientInner>) {
                 inner.rebind.store(false, Ordering::Relaxed);
             }
             Err(_) => {
-                if inner.stop.load(Ordering::Relaxed) { break; }
+                if inner.stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
         }
         let mut last_ping = Instant::now();
         // keepalive PING(5초)에 PONG이 오면 last_rx가 갱신된다. CLIENT_STALE 동안 아무것도 못 받으면
-        // 서버 재시작/NAT 변경으로 보고 전송을 다시 세운다(#1). 서울처럼 IP가 안 바뀌어도 복구된다.
+        // 서버 재시작/NAT 변경으로 보고 전송을 다시 세운다.
         while !inner.stop.load(Ordering::Relaxed) && !inner.rebind.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(200));
             if last_ping.elapsed() >= KEEPALIVE {
@@ -1020,6 +1064,7 @@ fn client_supervisor(inner: Arc<ClientInner>) {
         // 현재 전송 내려놓기(다운로드 루프가 rx 잠금을 놓을 때까지 최대 READ_TIMEOUT 대기).
         *inner.tx.lock().unwrap() = None;
         *inner.rx.lock().unwrap() = None;
+        *inner.keys.lock().unwrap() = None;
         inner.st_kind.store(0, Ordering::Relaxed);
     }
 }
@@ -1027,45 +1072,82 @@ fn client_supervisor(inner: Arc<ClientInner>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
     use std::net::Ipv4Addr;
 
     fn loopback(port: u16) -> SocketAddr {
         SocketAddr::from((Ipv4Addr::LOCALHOST, port))
     }
 
-    // 받은 걸 그대로 돌려보내는 가짜 wg0(에코)을 띄우고 주소·정지 핸들을 돌려준다.
-    fn spawn_echo() -> (SocketAddr, Arc<AtomicBool>, JoinHandle<()>) {
+    // 받은 걸 그대로 돌려보내는 가짜 wg0(에코)을 띄우고 주소·정지 핸들·받은 개수를 돌려준다.
+    fn spawn_echo() -> (SocketAddr, Arc<AtomicBool>, JoinHandle<()>, Arc<AtomicU64>) {
         let wg = UdpSocket::bind(loopback(0)).unwrap();
         let addr = wg.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
-        let stop2 = stop.clone();
+        let count = Arc::new(AtomicU64::new(0));
+        let (stop2, count2) = (stop.clone(), count.clone());
         let handle = thread::spawn(move || {
             wg.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
             let mut buf = [0u8; 2048];
             while !stop2.load(Ordering::Relaxed) {
                 if let Ok((n, from)) = wg.recv_from(&mut buf) {
+                    count2.fetch_add(1, Ordering::Relaxed);
                     let _ = wg.send_to(&buf[..n], from);
                 }
             }
         });
-        (addr, stop, handle)
+        (addr, stop, handle, count)
+    }
+
+    fn server_cfg(udp_bind: SocketAddr, tcp_bind: SocketAddr, upstream: SocketAddr, fec: FecParams, key: [u8; 32]) -> ServerConfig {
+        ServerConfig {
+            psk: "secret".into(),
+            udp_bind,
+            tcp_bind,
+            upstream,
+            fec,
+            identity: key,
+            tls_cert_pem: super::super::testcert::CERT_PEM.as_bytes().to_vec(),
+            tls_key_pem: super::super::testcert::KEY_PEM.as_bytes().to_vec(),
+        }
+    }
+
+    fn random_key() -> [u8; 32] {
+        let mut k = [0u8; 32];
+        rand_bytes(&mut k);
+        k
+    }
+
+    fn client_cfg(udp: SocketAddr, tcp: SocketAddr, local: SocketAddr, fec: FecParams, prefer: Prefer, server_key: &[u8; 32]) -> ClientConfig {
+        ClientConfig {
+            psk: "secret".into(),
+            server_udp: udp,
+            server_tcp: tcp,
+            local_bind: local,
+            fec,
+            prefer,
+            sni: "www.cloudflare.com".into(),
+            identity: random_key(),
+            server_pub: Identity::from_bytes(*server_key).public(),
+        }
+    }
+
+    fn wg_packet(i: u8) -> Vec<u8> {
+        // WG 데이터 메시지 모양(타입 4, 길이 32+16의 배수) — 클라는 WG 모양만 받는다.
+        let mut p = vec![i; 32 + 16 * (1 + i as usize % 4)];
+        p[0..4].copy_from_slice(&[4, 0, 0, 0]);
+        p
     }
 
     // 클라 로컬로 패킷을 밀어 서버(→에코 wg0)를 돌아 되돌아오는지 센다.
     fn roundtrip(prefer: Prefer, udp_bind: SocketAddr, tcp_bind: SocketAddr, local_bind: SocketAddr) -> u32 {
-        let (wg_addr, wg_stop, wg_thread) = spawn_echo();
+        let (wg_addr, wg_stop, wg_thread, _) = spawn_echo();
         let fec = FecParams { k: 4, groups: 4, enabled: true };
-        let server = run_server(ServerConfig {
-            psk: "secret".into(),
-            udp_bind, tcp_bind, upstream: wg_addr, fec,
-        }).unwrap();
-        let client = run_client(ClientConfig {
-            psk: "secret".into(),
-            server_udp: udp_bind, server_tcp: tcp_bind, local_bind, fec, prefer,
-            sni: "www.cloudflare.com".into(),
-        }).unwrap();
+        let skey = random_key();
+        let server = run_server(server_cfg(udp_bind, tcp_bind, wg_addr, fec, skey)).unwrap();
+        let client = run_client(client_cfg(udp_bind, tcp_bind, local_bind, fec, prefer, &skey)).unwrap();
 
-        thread::sleep(Duration::from_millis(500)); // 전송 수립 대기
+        thread::sleep(Duration::from_millis(600)); // 전송 수립 대기
 
         let neptun = UdpSocket::bind(loopback(0)).unwrap();
         neptun.connect(local_bind).unwrap();
@@ -1073,9 +1155,7 @@ mod tests {
 
         let mut got = 0;
         for i in 0..20u8 {
-            // WG 데이터 메시지 모양(타입 4, 길이 32+16의 배수) — 클라는 WG 모양만 받는다.
-            let mut payload = vec![i; 32 + 16 * (1 + i as usize % 4)];
-            payload[0..4].copy_from_slice(&[4, 0, 0, 0]);
+            let payload = wg_packet(i);
             neptun.send(&payload).unwrap();
             let mut rbuf = [0u8; 2048];
             if let Ok(n) = neptun.recv(&mut rbuf) {
@@ -1106,20 +1186,113 @@ mod tests {
     }
 
     #[test]
-    fn end_to_end_tcp_echo() {
+    fn end_to_end_tls_echo() {
         let got = roundtrip(Prefer::Tcp, loopback(39011), loopback(39012), loopback(39013));
-        assert!(got >= 18, "tcp 왕복 {got}/20");
+        assert!(got >= 18, "tls 왕복 {got}/20");
     }
 
-    // PSK 없이 레코드 하나만 보내고 붙어 있는 연결(또는 망 전환으로 버려진 옛 연결)을 서버가 TCP_IDLE 뒤 끊는지.
+    // 서버 WG 키를 잘못 알면(가짜 서버·MITM) 클라가 ACK를 안 믿어 세션이 안 선다.
+    #[test]
+    fn wrong_server_key_never_connects() {
+        let (wg_addr, wg_stop, wg_thread, _) = spawn_echo();
+        let fec = FecParams::default();
+        let (udp, tcp, local) = (loopback(39041), loopback(39042), loopback(39043));
+        let server = run_server(server_cfg(udp, tcp, wg_addr, fec, random_key())).unwrap();
+        let client = run_client(client_cfg(udp, tcp, local, fec, Prefer::Udp, &random_key())).unwrap();
+        thread::sleep(Duration::from_millis(1800));
+        let kind = client.stats().kind;
+        client.stop();
+        server.stop();
+        wg_stop.store(true, Ordering::Relaxed);
+        let _ = wg_thread.join();
+        assert_eq!(kind, None);
+    }
+
+    // 리플레이: 같은 HELLO를 다시 보내면 ACK가 없고, 같은 데이터 패킷을 다시 보내면 wg0에 한 번만 간다.
+    // 가로채기: 남의 session_id로 다른 WG 키의 HELLO를 보내도 그 세션에 못 붙는다.
+    #[test]
+    fn replay_and_hijack_rejected() {
+        let (wg_addr, wg_stop, wg_thread, count) = spawn_echo();
+        let fec = FecParams { k: 4, groups: 4, enabled: false };
+        let skey = random_key();
+        let server = run_server(server_cfg(loopback(0), loopback(0), wg_addr, fec, skey)).unwrap();
+        let spub = Identity::from_bytes(skey).public();
+        let hs = HandshakeKey::from_psk(b"secret");
+        let me = Identity::generate();
+        let k = me.shared(&spub).unwrap();
+
+        let sock = UdpSocket::bind(loopback(0)).unwrap();
+        sock.connect(server.udp_addr()).unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(400))).unwrap();
+        let mut rbuf = [0u8; 4096];
+        let mut wire = Vec::new();
+        let ask = |wire: &[u8], rbuf: &mut [u8]| -> Option<Vec<u8>> {
+            sock.send(wire).unwrap();
+            let n = sock.recv(rbuf).ok()?;
+            let (kind, _, body) = transport::udp_parse(&rbuf[..n])?;
+            (kind == MsgKind::Handshake).then(|| body.to_vec())
+        };
+
+        let hello = ClientHello::new(777, me.public());
+        transport::udp_wrap(MsgKind::Handshake, &hello.seal(&hs, &k, UDP_HS_PAD), 5, &mut wire);
+        assert_eq!(wire.len(), transport::QUIC_INITIAL_SIZE); // QUIC Initial 크기
+        let mut ack_body = ask(&wire, &mut rbuf).expect("첫 HELLO엔 ACK");
+        let ack = ServerAck::open(&hs, &mut ack_body, &k, &hello).expect("진짜 서버 ACK");
+        assert!(ask(&wire, &mut rbuf).is_none(), "같은 HELLO 재전송엔 ACK 없음");
+
+        // 데이터 한 개를 두 번 보낸다 → wg0엔 한 번만.
+        let keys = SessionKeys::derive(&k, &hello.random, &ack.random, true);
+        let sealed = seal_frame(&keys, &Frame::Data { group: 0, gen: 0, index: 0, k: 0, payload: b"one wg packet" });
+        transport::udp_wrap(MsgKind::Data, &sealed, 5, &mut wire);
+        sock.send(&wire).unwrap();
+        sock.send(&wire).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(count.load(Ordering::Relaxed), 1, "재전송된 데이터가 wg0까지 감");
+
+        // 다른 WG 키로 같은 session_id(777) HELLO → 가로채기 거절(ACK 없음).
+        let evil = Identity::generate();
+        let ke = evil.shared(&spub).unwrap();
+        let fake = ClientHello::new(777, evil.public());
+        transport::udp_wrap(MsgKind::Handshake, &fake.seal(&hs, &ke, UDP_HS_PAD), 6, &mut wire);
+        assert!(ask(&wire, &mut rbuf).is_none(), "남의 세션 가로채기");
+
+        // 오래된 시각의 HELLO(제대로 서명됐어도) → 거절.
+        let stale = ClientHello { ts: crypto::now_unix() - crypto::HELLO_SKEW - 30, ..ClientHello::new(778, me.public()) };
+        transport::udp_wrap(MsgKind::Handshake, &stale.seal(&hs, &k, UDP_HS_PAD), 7, &mut wire);
+        assert!(ask(&wire, &mut rbuf).is_none(), "오래된 HELLO");
+
+        server.stop();
+        wg_stop.store(true, Ordering::Relaxed);
+        let _ = wg_thread.join();
+    }
+
+    // 진짜 TLS로 붙어 nagoing이 아닌 걸 보내면(능동 탐침·브라우저) 평범한 HTTP 404가 온다.
+    #[test]
+    fn active_probe_gets_http_404() {
+        let (wg_addr, wg_stop, wg_thread, _) = spawn_echo();
+        let server = run_server(server_cfg(loopback(0), loopback(0), wg_addr, FecParams::default(), random_key())).unwrap();
+        let tcp = TcpStream::connect(server.tcp_addr()).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let conn = rustls::ClientConnection::new(
+            transport::client_config().unwrap(),
+            rustls::pki_types::ServerName::try_from("example.com").unwrap(),
+        )
+        .unwrap();
+        let mut tls = rustls::StreamOwned::new(conn, tcp);
+        tls.write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n").unwrap();
+        let mut resp = Vec::new();
+        let _ = tls.read_to_end(&mut resp);
+        assert!(resp.starts_with(b"HTTP/1.1 404"), "got {:?}", String::from_utf8_lossy(&resp));
+        server.stop();
+        wg_stop.store(true, Ordering::Relaxed);
+        let _ = wg_thread.join();
+    }
+
+    // TLS도 아닌 바이트만 보내고 붙어 있는 연결(또는 망 전환으로 버려진 연결)을 서버가 곧 끊는지.
     #[test]
     fn server_drops_idle_tcp() {
-        use std::io::{Read, Write};
-        let (wg_addr, wg_stop, wg_thread) = spawn_echo();
-        let server = run_server(ServerConfig {
-            psk: "secret".into(),
-            udp_bind: loopback(0), tcp_bind: loopback(0), upstream: wg_addr, fec: FecParams::default(),
-        }).unwrap();
+        let (wg_addr, wg_stop, wg_thread, _) = spawn_echo();
+        let server = run_server(server_cfg(loopback(0), loopback(0), wg_addr, FecParams::default(), random_key())).unwrap();
         let mut s = TcpStream::connect(server.tcp_addr()).unwrap();
         s.write_all(&[0x16, 0x03, 0x01, 0x00, 0x00]).unwrap(); // 빈 '레코드' 하나
         s.set_read_timeout(Some(Duration::from_secs(6))).unwrap();
@@ -1128,7 +1301,7 @@ mod tests {
         let closed = loop {
             match s.read(&mut buf) {
                 Ok(0) => break true,
-                Ok(_) => continue, // ServerHello
+                Ok(_) => continue,
                 Err(ref e) if is_timeout(e) => break false,
                 Err(_) => break true, // RST
             }
@@ -1143,14 +1316,18 @@ mod tests {
     // 수립 중(서버가 답을 안 함)에도 stop()이 오래 매달리지 않는지 — 확장의 stopTunnel·watchdog이 기다린다.
     #[test]
     fn client_stop_is_quick_while_establishing() {
-        // accept만 되고(백로그) 아무 답도 안 하는 서버.
+        // accept만 되고(백로그) 아무 답도 안 하는 서버 — TLS 핸드셰이크가 멈춘다.
         let mute = TcpListener::bind(loopback(0)).unwrap();
-        let client = run_client(ClientConfig {
-            psk: "secret".into(),
-            server_udp: loopback(9), server_tcp: mute.local_addr().unwrap(), local_bind: loopback(0),
-            fec: FecParams::default(), prefer: Prefer::Tcp, sni: "www.cloudflare.com".into(),
-        }).unwrap();
-        thread::sleep(Duration::from_millis(300)); // ServerHello 기다리는 중
+        let client = run_client(client_cfg(
+            loopback(9),
+            mute.local_addr().unwrap(),
+            loopback(0),
+            FecParams::default(),
+            Prefer::Tcp,
+            &random_key(),
+        ))
+        .unwrap();
+        thread::sleep(Duration::from_millis(300));
         let start = Instant::now();
         client.stop();
         assert!(start.elapsed() < Duration::from_millis(1500), "stop {:?}", start.elapsed());
@@ -1163,7 +1340,7 @@ mod tests {
         assert!(looks_like_wg(&data));
         assert!(looks_like_wg(&{ let mut h = vec![0u8; 148]; h[0] = 1; h }));
         assert!(!looks_like_wg(&{ let mut h = vec![0u8; 149]; h[0] = 1; h })); // 핸드셰이크 길이 틀림
-        assert!(!looks_like_wg(&vec![7u8; 48])); // 타입 아님
+        assert!(!looks_like_wg(&[7u8; 48])); // 타입 아님
         assert!(!looks_like_wg(&data[..40])); // 데이터 길이가 16 단위가 아님
         assert!(!looks_like_wg(b"GET / HTTP/1.1\r\n\r\n"));
     }
@@ -1171,14 +1348,12 @@ mod tests {
     // 기기 안 다른 프로그램이 로컬 포트로 WG 아닌 걸 보내도 내려받기 대상(peer)이 그쪽으로 안 바뀌는지.
     #[test]
     fn stray_local_packet_does_not_steal_peer() {
-        let (wg_addr, wg_stop, wg_thread) = spawn_echo();
+        let (wg_addr, wg_stop, wg_thread, _) = spawn_echo();
         let fec = FecParams { k: 4, groups: 4, enabled: true };
         let (udp_bind, tcp_bind, local_bind) = (loopback(39031), loopback(39032), loopback(39033));
-        let server = run_server(ServerConfig { psk: "secret".into(), udp_bind, tcp_bind, upstream: wg_addr, fec }).unwrap();
-        let client = run_client(ClientConfig {
-            psk: "secret".into(), server_udp: udp_bind, server_tcp: tcp_bind, local_bind, fec,
-            prefer: Prefer::Udp, sni: "www.cloudflare.com".into(),
-        }).unwrap();
+        let skey = random_key();
+        let server = run_server(server_cfg(udp_bind, tcp_bind, wg_addr, fec, skey)).unwrap();
+        let client = run_client(client_cfg(udp_bind, tcp_bind, local_bind, fec, Prefer::Udp, &skey)).unwrap();
         thread::sleep(Duration::from_millis(500));
         let neptun = UdpSocket::bind(loopback(0)).unwrap();
         neptun.connect(local_bind).unwrap();
@@ -1186,13 +1361,14 @@ mod tests {
         let other = UdpSocket::bind(loopback(0)).unwrap();
         let mut got = 0;
         for i in 0..10u8 {
-            let mut p = vec![i; 64];
-            p[0..4].copy_from_slice(&[4, 0, 0, 0]);
+            let p = wg_packet(i);
             neptun.send(&p).unwrap();
             other.send_to(b"not wireguard at all", local_bind).unwrap(); // 끼어들기
             let mut rbuf = [0u8; 2048];
             if let Ok(n) = neptun.recv(&mut rbuf) {
-                if rbuf[..n] == p[..] { got += 1; }
+                if rbuf[..n] == p[..] {
+                    got += 1;
+                }
             }
         }
         client.stop();
@@ -1202,31 +1378,20 @@ mod tests {
         assert!(got >= 9, "끼어든 패킷 때문에 내려받기가 샘: {got}/10");
     }
 
-    // UDP 서버가 없으면(막힌 망 흉내) 자동으로 TCP로 폴백하는지.
+    // UDP 서버가 없으면(막힌 망 흉내) 자동으로 TLS/TCP로 폴백하는지.
     #[test]
-    fn auto_falls_back_to_tcp() {
-        let (wg_addr, wg_stop, wg_thread) = spawn_echo();
+    fn auto_falls_back_to_tls() {
+        let (wg_addr, wg_stop, wg_thread, _) = spawn_echo();
         let fec = FecParams { k: 4, groups: 4, enabled: true };
         let tcp_bind = loopback(39022);
-        // udp_bind은 서버를 안 띄운 포트 → UDP HELLO가 실패하고 TCP로 내려가야 한다.
-        let dead_udp = loopback(39021);
-        let server = run_server(ServerConfig {
-            psk: "secret".into(),
-            udp_bind: loopback(39023), // 서버는 다른 UDP 포트에서 듣는다(클라는 모름)
-            tcp_bind, upstream: wg_addr, fec,
-        }).unwrap();
-        let local_bind = loopback(39024);
-        let client = run_client(ClientConfig {
-            psk: "secret".into(),
-            server_udp: dead_udp, server_tcp: tcp_bind, local_bind, fec,
-            prefer: Prefer::Auto, sni: "www.cloudflare.com".into(),
-        }).unwrap();
-
-        thread::sleep(Duration::from_millis(600));
+        let dead_udp = loopback(39021); // 서버를 안 띄운 포트 → UDP HELLO가 실패해야 한다
+        let skey = random_key();
+        let server = run_server(server_cfg(loopback(39023), tcp_bind, wg_addr, fec, skey)).unwrap();
+        let client = run_client(client_cfg(dead_udp, tcp_bind, loopback(39024), fec, Prefer::Auto, &skey)).unwrap();
         // 데드 UDP라도 핸드셰이크 타임아웃(최대 ~4.5s)까지 기다릴 수 있으므로 넉넉히.
         let mut kind = client.stats().kind;
         let start = Instant::now();
-        while kind.is_none() && start.elapsed() < Duration::from_secs(8) {
+        while kind.is_none() && start.elapsed() < Duration::from_secs(9) {
             thread::sleep(Duration::from_millis(200));
             kind = client.stats().kind;
         }
@@ -1234,6 +1399,6 @@ mod tests {
         server.stop();
         wg_stop.store(true, Ordering::Relaxed);
         let _ = wg_thread.join();
-        assert_eq!(kind, Some(Kind::Tcp), "자동 선택이 TCP로 폴백해야 한다");
+        assert_eq!(kind, Some(Kind::Tcp), "자동 선택이 TLS로 폴백해야 한다");
     }
 }

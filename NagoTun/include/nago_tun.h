@@ -20,12 +20,14 @@ size_t nago_tun_last_error(char *buf, size_t len);
 // 난독화·FEC해 server로 보낸다(UDP 51821→막히면 TCP 443). 서버엔 nagoing 서버 프록시가 떠 있어야 한다.
 typedef struct NagoingClient NagoingClient;
 
-// prefer: 0 auto(UDP→TCP), 1 udp, 2 tcp. fec_on: 0이면 끔. sni가 NULL이면 기본값.
+// prefer: 0 auto(UDP→TLS/TCP), 1 udp, 2 tcp. fec_on: 0이면 끔. sni가 NULL이면 기본값.
+// private_key·server_pub: WireGuard 설정의 클라 개인키·서버 공개키(base64) — HELLO 인증(v2)에 쓴다.
 NagoingClient *nago_nagoing_client_start(const char *psk,
                                          const char *server_ip, uint16_t udp_port, uint16_t tcp_port,
                                          const char *local_ip, uint16_t local_port,
                                          uint8_t fec_k, uint16_t fec_groups, int fec_on,
-                                         int prefer, const char *sni);
+                                         int prefer, const char *sni,
+                                         const char *private_key, const char *server_pub);
 // 와이파이↔셀룰러 전환 등 경로가 바뀌면 호출(전송을 빠르게 다시 수립).
 void nago_nagoing_network_changed(NagoingClient *client);
 // 상태 한 줄("udp · tx .. · rx .. · fec+..")을 buf에 쓴다. 돌려주는 값은 전체 길이.
