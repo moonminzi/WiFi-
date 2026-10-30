@@ -69,7 +69,7 @@ NepTUN의 endpoint를 서버 대신 **로컬 포트(127.0.0.1:local)**로 돌려
 ```bash
 cd NagoTun
 cargo run --example nagoing_loopback
-cargo test --lib                 # 23개 테스트(ChaCha20 RFC 벡터, FEC 버스트 복구, 왕복, 자동 폴백)
+cargo test --lib                 # 27개 테스트(ChaCha20 RFC 벡터, FEC 버스트 복구, 왕복, 자동 폴백)
 ```
 
 예시 출력:
@@ -133,12 +133,19 @@ cargo run --release --example nagoing_proxy -- client <psk> <server_ip> 443 443 
 - **TCP 어긋남**: 쓰기가 레코드 중간에 끊기면 연결을 닫는다. 클라의 살아 있음(stale) 판단은 제대로 풀린 프레임으로만.
 - **빠른 stop**: 수립(HELLO·ServerHello 대기) 중에도 stop을 확인 → 확장의 stopTunnel·watchdog이 오래 안 멈춘다.
 - **auto 기억**: 붙었던 UDP가 조용해지면(도중에 막힘) 5분간 TCP 먼저. 망이 바뀌면 다시 UDP부터.
+- **덜 찬 FEC 그룹**: 200ms 넘게 안 찬 그룹은 그 개수로 닫아 패리티를 낸다(디코더는 패리티의 k로 그룹을 줄임).
+  드문 트래픽(핸드셰이크·DNS·통화)도 복구되고, 대용량은 그룹이 먼저 차서 추가 비용이 없다. 옛 버전과 섞여도 무해.
+- **로컬 포트 보호**: 클라는 루프백에서 온 WG 모양 패킷만 받아 내려받기 대상으로 삼는다(같은 기기의 다른 앱이
+  51822로 보내도 안 샘).
+- **기타**: 서버 주소·cid 표는 세션당 최신 하나만(오래 붙은 세션에서 계속 커지던 것), HELLO 버전 확인,
+  모양이 이상한 UDP 패킷 하나로 재접속하지 않음, iOS stop·watchdog의 프록시 종료는 백그라운드(메인 안 막음),
+  settings에서 `--nagoing`을 끄면 저장된 프로필도 일반 WG로 되돌림.
 
 ### 아직 남은 것(5.5로 — 리뷰 🟠🟡)
 
 - **#7 리플레이/무결성**: HELLO에 시각+MAC, 리플레이 창. (지금도 cid 라우팅+클라 재접속으로 완화)
 - **#8 진짜 TLS**: TLS 검사 장비(NGFW)는 흉내를 걸러낼 수 있음 → rustls로 실제 핸드셰이크. PSK도 빌드 주입으로.
-- **🟡**: 덜 찬 FEC 그룹 플러시 타이머(통화·게임), TCP에서 FEC 끄기, HELLO로 FEC 설정 전달,
+- **🟡**: TCP에서 FEC 끄기, HELLO로 FEC 설정 전달,
   auto의 UDP/TCP 동시 시도, 부분 암호화·할당 줄이기, UDP 수신 스레드 분할.
 
 ### 남은 단계

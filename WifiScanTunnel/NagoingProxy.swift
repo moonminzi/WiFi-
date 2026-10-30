@@ -10,6 +10,9 @@ import os
 final class NagoingProxy {
     private static let log = Logger(subsystem: "nago.vpn.tunnel", category: "nagoing")
 
+    /// Rust 클라이언트 포인터. 잠금은 포인터를 읽고 바꾸는 짧은 동안만 쥔다 — 멈추는 동안(Rust join)
+    /// stats()·networkChanged()가 기다리지 않게, 멈출 땐 포인터를 먼저 꺼내 비워 두고 잠금 밖에서 멈춘다.
+    private let lock = NSLock()
     private var client: OpaquePointer?
     private var monitor: NWPathMonitor?
     private var lastInterfaces: [String]?
@@ -35,7 +38,7 @@ final class NagoingProxy {
             throw NSError(domain: "nago.nagoing", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "nagoing: \(Self.lastError())"])
         }
-        client = handle
+        withClient { $0 = handle }
         Self.log.info("started → \(serverIP, privacy: .public):\(udpPort)/\(tcpPort) local \(localPort)")
 
         // 와이파이↔셀룰러 전환 때 전송을 빠르게 다시 세운다(NeptunEngine과 같은 방식).
@@ -45,17 +48,23 @@ final class NagoingProxy {
         self.monitor = monitor
     }
 
+    private func withClient<T>(_ body: (inout OpaquePointer?) -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&client)
+    }
+
     private func pathChanged(_ path: Network.NWPath) {
         let interfaces = path.availableInterfaces.map(\.name)
         defer { lastInterfaces = interfaces }
-        guard let client, path.status == .satisfied, let last = lastInterfaces, last != interfaces else { return }
+        guard path.status == .satisfied, let last = lastInterfaces, last != interfaces else { return }
         Self.log.info("network changed \(last, privacy: .public) → \(interfaces, privacy: .public)")
-        nago_nagoing_network_changed(client)
+        networkChanged()
     }
 
-    /// 경로가 바뀌었다고 알려 전송을 다시 세운다(watchdog/NWPathMonitor에서 호출).
+    /// 경로가 바뀌었다고 알려 전송을 다시 세운다(watchdog/NWPathMonitor에서 호출). 바로 돌아온다.
     func networkChanged() {
-        queue.sync {
+        withClient { client in
             if let client {
                 nago_nagoing_network_changed(client)
             }
@@ -64,23 +73,31 @@ final class NagoingProxy {
 
     /// 상태 한 줄("udp · tx .. · rx .. · fec+..").
     func stats() -> String? {
-        queue.sync {
+        let text: String? = withClient { client in
             guard let client else { return nil }
             var buf = [CChar](repeating: 0, count: 256)
             _ = nago_nagoing_stats(client, &buf, buf.count)
-            let text = String(cString: buf)
-            return text.isEmpty ? nil : text
+            return String(cString: buf)
         }
+        return text?.isEmpty == false ? text : nil
     }
 
-    func stop() {
-        queue.sync {
-            monitor?.cancel()
-            monitor = nil
-            if let client {
-                nago_nagoing_client_stop(client)
-            }
+    /// 멈추고 로컬 포트를 놓는다. Rust 쪽 join(연결 수립 중이면 최대 몇 초)을 백그라운드에서 기다리므로
+    /// 메인 액터(stopTunnel·watchdog·앱 메시지 처리)를 막지 않는다. 끝나면 같은 포트로 다시 start할 수 있다.
+    func shutdown() async {
+        monitor?.cancel()
+        monitor = nil
+        let taken: OpaquePointer? = withClient { client in
+            let old = client
             client = nil
+            return old
+        }
+        guard let client = taken else { return }
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                nago_nagoing_client_stop(client)
+                done.resume()
+            }
         }
     }
 

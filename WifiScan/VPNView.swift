@@ -938,7 +938,7 @@ struct VPNView: View {
             let ns = NagoingSettings.fromDefaults()
             step("\(region.rawValue): nagoing → \(target.address):\(ns.udpPort)")
             try await vpn.saveNagoing(privateKey: reg.privateKey, address: reg.address + "/32",
-                                      serverPub: serverPub, serverIP: target.address, dns: wgDNS,
+                                      serverPub: serverPub, serverIP: target.address, wgPort: target.wgPort, dns: wgDNS,
                                       loops: wgLoops, region: region.rawValue, apiKey: key, settings: ns,
                                       autoConnect: autoConnect, killSwitch: killSwitch, allowLAN: allowLAN)
             try vpn.connectTunnel()

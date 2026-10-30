@@ -173,9 +173,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         if let nagoing {
-            // 프록시를 내린다(바로 아래에서 NepTUN도 멈춘다).
+            // NepTUN을 먼저 멈추고, 프록시는 백그라운드에서 내린 뒤 끝을 알린다(Rust join이 메인 액터를 막지 않게).
             self.nagoing = nil
-            nagoing.stop()
+            neptun?.stop()
+            neptun = nil
+            Task { @MainActor in
+                await nagoing.shutdown()
+                completionHandler()
+            }
+            return
         }
         if let neptun {
             neptun.stop()
@@ -491,7 +497,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             if let proxy = nagoing, var state = nagoingState {
                 let serverPub = target.wgPub ?? s.serverPub
                 if target.address != state.serverIP {
-                    proxy.stop()
+                    // 옛 프록시가 로컬 포트를 놓을 때까지 기다리되, 메인 액터는 막지 않는다.
+                    await proxy.shutdown()
+                    // 기다리는 사이 터널이 멈췄으면(stop이 watchdog을 취소) 새로 띄우지 않는다.
+                    guard !Task.isCancelled, self.neptun != nil else { return }
                     let fresh = NagoingProxy()
                     do {
                         try fresh.start(psk: NagoingSettings.psk, serverIP: target.address, udpPort: state.udpPort,

@@ -292,7 +292,7 @@ final class VPNManager {
     /// nagoing 설정을 저장한다. nagotun(neptun)과 같은 WG를 쓰되 mode가 "nagoing"이라, 확장이 NepTUN을
     /// 로컬 프록시(127.0.0.1:localPort)로 붙이고 그 프록시가 서버(443)로 난독화 전송한다. WireGuard 자체는 그대로.
     /// serverIP는 프록시가 실제로 붙을 서버 주소.
-    func saveNagoing(privateKey: String, address: String, serverPub: String, serverIP: String,
+    func saveNagoing(privateKey: String, address: String, serverPub: String, serverIP: String, wgPort: Int,
                      dns: [String], loops: Int, region: String, apiKey: String, settings: NagoingSettings,
                      autoConnect: VPNAutoConnect, killSwitch: Bool, allowLAN: Bool) async throws {
         let tunnel = try await NETunnelProviderManager.loadAllFromPreferences().first ?? NETunnelProviderManager()
@@ -316,6 +316,8 @@ final class VPNManager {
             "serverIP": serverIP,
             "udpPort": settings.udpPort,
             "tcpPort": settings.tcpPort,
+            // 토글을 끄면 이 프로필을 일반 WG(serverIP:wgPort)로 되돌릴 때 쓴다(revertNagoing).
+            "wgPort": wgPort,
             "localPort": settings.localPort,
             NagoingSettings.configurationKey: settings.configurationValue,
         ]
@@ -331,6 +333,49 @@ final class VPNManager {
         self.tunnel = tunnel
         tunnelProto = .wireguard   // nagoing은 wg를 감싼 것 — 상태 표시는 wg로
         isConfigured = true
+        refreshStatus()
+    }
+
+    /// settings에서 `--nagoing`을 끄면 부른다. 저장된 프로필이 nagoing이면 같은 서버·키의 일반 WireGuard 프로필로
+    /// 되돌린다 — 안 그러면 앱에서 다시 연결하기 전까지 iOS 설정·자동 연결(on-demand)이 계속 nagoing으로 붙는다.
+    /// 지금 연결돼 있으면 건드리지 않는다(다음에 앱에서 연결할 때 일반 WG로 저장된다).
+    func revertNagoing() async {
+        guard let saved = try? await NETunnelProviderManager.loadAllFromPreferences().first,
+              let proto = saved.protocolConfiguration as? NETunnelProviderProtocol,
+              let config = proto.providerConfiguration,
+              config["mode"] as? String == NagoingSettings.mode,
+              saved.connection.status == .disconnected || saved.connection.status == .invalid
+        else { return }
+        guard let serverIP = config["serverIP"] as? String, let wgPort = config["wgPort"] as? Int else {
+            // 2.1.5 build 35 이전에 저장된 프로필엔 WG 포트가 없다 → 자동 연결만 꺼 둔다(앱에서 연결하면 일반 WG로 저장됨).
+            saved.isOnDemandEnabled = false
+            try? await saved.saveToPreferences()
+            NagoLog.add("nagoing off: on-demand paused until next connect")
+            refreshStatus()
+            return
+        }
+        let endpoint = "\(serverIP):\(wgPort)"
+        var plain = config
+        for key in ["serverIP", "udpPort", "tcpPort", "localPort", "wgPort", NagoingSettings.configurationKey] {
+            plain.removeValue(forKey: key)
+        }
+        plain["mode"] = "wireguard"
+        plain["endpoint"] = endpoint
+        plain["mtu"] = 1420
+        plain["engine"] = "neptun"
+        proto.providerConfiguration = plain
+        proto.serverAddress = endpoint
+        saved.protocolConfiguration = proto
+        saved.localizedDescription = "NAGO VPN (WireGuard)"
+        do {
+            try await saved.saveToPreferences()
+            try await saved.loadFromPreferences()
+            NagoLog.add("nagoing off: profile → wg \(endpoint)")
+        } catch {
+            NagoLog.add("✗ nagoing off: \(error.localizedDescription)")
+        }
+        tunnel = saved
+        tunnelProto = .wireguard
         refreshStatus()
     }
 

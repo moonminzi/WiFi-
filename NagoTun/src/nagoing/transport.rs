@@ -173,14 +173,17 @@ impl UdpRx {
 
 impl RxHalf for UdpRx {
     fn recv_msg(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.sock.recv(&mut self.rbuf)?;
-        let inner = udp_unwrap(&self.rbuf[..n])
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad udp header"))?;
-        if inner.len() > buf.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "msg too large"));
+        // 모양이 안 맞는 데이터그램은 버리고 다음 것을 기다린다. UDP에선 패킷 하나가 이상하다고 전송이 깨진 게
+        // 아니므로, 에러로 올려 재접속(rebind)을 부르지 않는다. 기다림은 소켓 읽기 제한(타임아웃)이 끊는다.
+        loop {
+            let n = self.sock.recv(&mut self.rbuf)?;
+            let Some(inner) = udp_unwrap(&self.rbuf[..n]) else { continue };
+            if inner.len() > buf.len() {
+                continue;
+            }
+            buf[..inner.len()].copy_from_slice(inner);
+            return Ok(inner.len());
         }
-        buf[..inner.len()].copy_from_slice(inner);
-        Ok(inner.len())
     }
 }
 

@@ -48,6 +48,11 @@ const MAX_TCP_CONNS: usize = 1024;
 const MAX_SESSIONS: usize = 4096;
 /// auto에서 UDP가 붙었다가 조용해지면(=도중에 막힘) 이 시간 동안은 TCP를 먼저 해 본다.
 const UDP_PENALTY: Duration = Duration::from_secs(300);
+/// 덜 찬 FEC 그룹은 이만큼 기다린 뒤 그 개수로 닫아 패리티를 낸다(드문 트래픽도 복구되게).
+/// 대용량 전송은 그룹이 이보다 먼저 차서 추가 비용이 없다.
+const FEC_MAX_AGE: Duration = Duration::from_millis(200);
+/// 덜 찬 그룹이 있을 때 읽기 제한을 이만큼으로 줄여 FEC_MAX_AGE를 제때 확인한다(없으면 READ_TIMEOUT).
+const FEC_TICK: Duration = Duration::from_millis(20);
 
 /// 단조 증가 ms(유휴 판단용).
 fn now_ms() -> u64 {
@@ -249,32 +254,60 @@ impl ServerInner {
         let cid = cid?;
         let id = self.by_cid.lock().unwrap().get(&cid).copied()?;
         let s = self.sessions.lock().unwrap().get(&id).cloned()?;
-        self.by_udp.lock().unwrap().insert(from, id);
+        self.bind_udp(id, from, None);
         *s.ret.lock().unwrap() = Return::Udp { sock: udp.clone(), addr: from, cid };
         Some(s)
+    }
+
+    /// 세션의 UDP 주소(와 cid)를 등록한다. 같은 세션의 옛 항목은 지운다 — 클라는 UDP 소켓을 한 번에 하나만 쓰므로,
+    /// 안 지우면 NAT가 포트를 바꾸거나 망을 옮길 때마다 표가 쌓여 오래 붙은 세션에서 메모리가 계속 는다.
+    fn bind_udp(&self, id: u64, from: SocketAddr, cid: Option<u32>) {
+        {
+            let mut by_udp = self.by_udp.lock().unwrap();
+            by_udp.retain(|_, v| *v != id);
+            by_udp.insert(from, id);
+        }
+        if let Some(c) = cid {
+            let mut by_cid = self.by_cid.lock().unwrap();
+            by_cid.retain(|_, v| *v != id);
+            by_cid.insert(c, id);
+        }
     }
 
     /// wg0→client 펌프: wg0에서 읽은 응답을 FEC로 조각내 클라이언트에게 보낸다.
     fn spawn_downpump(self: Arc<Self>, session: Arc<Session>) -> io::Result<()> {
         thread::Builder::new().name("nagoing-down".into()).spawn(move || {
             let mut buf = [0u8; MAX_MSG];
+            let key = &self.key;
+            let mut timeout = READ_TIMEOUT;
             while session.alive.load(Ordering::Relaxed) && !self.stop.load(Ordering::Relaxed) {
                 match session.wg.recv(&mut buf) {
                     Ok(n) => {
                         let payload = &buf[..n];
                         if session.fec_on {
-                            let key = &self.key;
                             session.enc.lock().unwrap().push(payload, |shard| {
                                 let _ = session.send_frame(key, &shard_frame(shard));
                             });
                         } else {
-                            let _ = session.send_frame(&self.key, &Frame::Data {
+                            let _ = session.send_frame(key, &Frame::Data {
                                 seq: 0, group: 0, gen: 0, index: 0, k: 0, payload,
                             });
                         }
                     }
-                    Err(e) if is_timeout(&e) => continue,
+                    Err(e) if is_timeout(&e) => {}
                     Err(_) => break,
+                }
+                if session.fec_on {
+                    // 덜 찬 그룹을 제때 닫고, 남은 게 있으면 짧은 주기로 다시 확인한다.
+                    let mut enc = session.enc.lock().unwrap();
+                    enc.flush_stale(FEC_MAX_AGE, |shard| {
+                        let _ = session.send_frame(key, &shard_frame(shard));
+                    });
+                    let want = if enc.has_pending() { FEC_TICK } else { READ_TIMEOUT };
+                    drop(enc);
+                    if want != timeout && session.wg.set_read_timeout(Some(want)).is_ok() {
+                        timeout = want;
+                    }
                 }
             }
         })?;
@@ -403,15 +436,16 @@ fn server_udp_loop(inner: Arc<ServerInner>, udp: Arc<UdpSocket>) {
             None => continue,
         };
         match frame {
-            Frame::Hello { session, .. } => {
+            Frame::Hello { session, version } => {
+                // 모르는 프로토콜 버전은 받지 않는다(답이 없으면 클라는 실패/폴백 — 섞여서 오동작하지 않게).
+                if version != PROTOCOL_VERSION {
+                    continue;
+                }
                 let ret_cid = cid.unwrap_or_else(|| rand_u64() as u32);
                 let ret = Return::Udp { sock: udp.clone(), addr: from, cid: ret_cid };
                 match inner.attach(session, ret.clone()) {
                     Ok(_) => {
-                        inner.by_udp.lock().unwrap().insert(from, session);
-                        if let Some(c) = cid {
-                            inner.by_cid.lock().unwrap().insert(c, session);
-                        }
+                        inner.bind_udp(session, from, cid);
                         // 답은 HELLO가 온 그 경로로 바로(세션 ret을 거치면 그사이 바뀐 TCP 경로로 갈 수 있다).
                         let _ = ret.send_frame(&inner.key, &Frame::HelloAck { session });
                     }
@@ -522,7 +556,10 @@ fn server_tcp_conn(inner: Arc<ServerInner>, stream: TcpStream) -> io::Result<()>
         };
         last_frame = Instant::now();
         match frame {
-            Frame::Hello { session: id, .. } => {
+            Frame::Hello { session: id, version } => {
+                if version != PROTOCOL_VERSION {
+                    continue;
+                }
                 if let Ok(s) = inner.attach(id, ret.clone()) {
                     let _ = ret.send_frame(&inner.key, &Frame::HelloAck { session: id });
                     session = Some(s);
@@ -862,23 +899,53 @@ pub fn run_client(cfg: ClientConfig) -> io::Result<ClientHandle> {
     Ok(ClientHandle { inner, threads })
 }
 
+/// WireGuard 메시지처럼 생겼는가: 첫 바이트 타입 1~4 + 0 세 개, 타입별 길이(핸드셰이크 148/92, 쿠키 64,
+/// 데이터 32+16의 배수). 로컬 포트로 들어온 다른 것(같은 기기의 다른 앱 등)을 걸러 낸다.
+fn looks_like_wg(p: &[u8]) -> bool {
+    if p.len() < 32 || p[1..4] != [0, 0, 0] {
+        return false;
+    }
+    match p[0] {
+        1 => p.len() == 148,
+        2 => p.len() == 92,
+        3 => p.len() == 64,
+        4 => p.len() & 15 == 0, // 32 + 16의 배수 = 16의 배수(32 이상은 위에서 확인)
+        _ => false,
+    }
+}
+
 fn client_up_loop(inner: Arc<ClientInner>) {
     let mut buf = [0u8; MAX_MSG];
     let fec_on = inner.cfg.fec.enabled;
+    let mut timeout = READ_TIMEOUT;
     while !inner.stop.load(Ordering::Relaxed) {
-        let (n, from) = match inner.local.recv_from(&mut buf) {
-            Ok(v) => v,
-            Err(ref e) if is_timeout(e) => continue,
-            Err(_) => continue,
-        };
-        *inner.peer.lock().unwrap() = Some(from);
-        let payload = &buf[..n];
+        match inner.local.recv_from(&mut buf) {
+            // 기기 안(루프백)에서 온 WG 모양 패킷만 받고, 그 보낸 곳을 내려받기 대상으로 삼는다. 예전엔 아무 패킷이나
+            // 마지막 송신자로 대상을 바꿔, 같은 기기의 다른 앱이 51822로 뭘 보내면 내려받기가 그쪽으로 새 끊겼다.
+            // (NepTUN이 망 전환으로 소켓을 다시 열어 포트가 바뀌어도 WG 패킷이라 바로 따라간다)
+            Ok((n, from)) if from.ip().is_loopback() && looks_like_wg(&buf[..n]) => {
+                *inner.peer.lock().unwrap() = Some(from);
+                let payload = &buf[..n];
+                if fec_on {
+                    inner.enc.lock().unwrap().push(payload, |shard| {
+                        inner.send_frame(&shard_frame(shard));
+                    });
+                } else {
+                    inner.send_frame(&Frame::Data { seq: 0, group: 0, gen: 0, index: 0, k: 0, payload });
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {} // 타임아웃 포함
+        }
         if fec_on {
-            inner.enc.lock().unwrap().push(payload, |shard| {
-                inner.send_frame(&shard_frame(shard));
-            });
-        } else {
-            inner.send_frame(&Frame::Data { seq: 0, group: 0, gen: 0, index: 0, k: 0, payload });
+            // 덜 찬 그룹을 제때 닫고(드문 트래픽도 복구), 남은 게 있으면 짧은 주기로 다시 확인한다.
+            let mut enc = inner.enc.lock().unwrap();
+            enc.flush_stale(FEC_MAX_AGE, |shard| inner.send_frame(&shard_frame(shard)));
+            let want = if enc.has_pending() { FEC_TICK } else { READ_TIMEOUT };
+            drop(enc);
+            if want != timeout && inner.local.set_read_timeout(Some(want)).is_ok() {
+                timeout = want;
+            }
         }
     }
 }
@@ -1006,7 +1073,9 @@ mod tests {
 
         let mut got = 0;
         for i in 0..20u8 {
-            let payload = vec![i; 40 + i as usize];
+            // WG 데이터 메시지 모양(타입 4, 길이 32+16의 배수) — 클라는 WG 모양만 받는다.
+            let mut payload = vec![i; 32 + 16 * (1 + i as usize % 4)];
+            payload[0..4].copy_from_slice(&[4, 0, 0, 0]);
             neptun.send(&payload).unwrap();
             let mut rbuf = [0u8; 2048];
             if let Ok(n) = neptun.recv(&mut rbuf) {
@@ -1085,6 +1154,52 @@ mod tests {
         let start = Instant::now();
         client.stop();
         assert!(start.elapsed() < Duration::from_millis(1500), "stop {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn wg_shape_filter() {
+        let mut data = vec![0u8; 48];
+        data[0] = 4;
+        assert!(looks_like_wg(&data));
+        assert!(looks_like_wg(&{ let mut h = vec![0u8; 148]; h[0] = 1; h }));
+        assert!(!looks_like_wg(&{ let mut h = vec![0u8; 149]; h[0] = 1; h })); // 핸드셰이크 길이 틀림
+        assert!(!looks_like_wg(&vec![7u8; 48])); // 타입 아님
+        assert!(!looks_like_wg(&data[..40])); // 데이터 길이가 16 단위가 아님
+        assert!(!looks_like_wg(b"GET / HTTP/1.1\r\n\r\n"));
+    }
+
+    // 기기 안 다른 프로그램이 로컬 포트로 WG 아닌 걸 보내도 내려받기 대상(peer)이 그쪽으로 안 바뀌는지.
+    #[test]
+    fn stray_local_packet_does_not_steal_peer() {
+        let (wg_addr, wg_stop, wg_thread) = spawn_echo();
+        let fec = FecParams { k: 4, groups: 4, enabled: true };
+        let (udp_bind, tcp_bind, local_bind) = (loopback(39031), loopback(39032), loopback(39033));
+        let server = run_server(ServerConfig { psk: "secret".into(), udp_bind, tcp_bind, upstream: wg_addr, fec }).unwrap();
+        let client = run_client(ClientConfig {
+            psk: "secret".into(), server_udp: udp_bind, server_tcp: tcp_bind, local_bind, fec,
+            prefer: Prefer::Udp, sni: "www.cloudflare.com".into(),
+        }).unwrap();
+        thread::sleep(Duration::from_millis(500));
+        let neptun = UdpSocket::bind(loopback(0)).unwrap();
+        neptun.connect(local_bind).unwrap();
+        neptun.set_read_timeout(Some(Duration::from_millis(800))).unwrap();
+        let other = UdpSocket::bind(loopback(0)).unwrap();
+        let mut got = 0;
+        for i in 0..10u8 {
+            let mut p = vec![i; 64];
+            p[0..4].copy_from_slice(&[4, 0, 0, 0]);
+            neptun.send(&p).unwrap();
+            other.send_to(b"not wireguard at all", local_bind).unwrap(); // 끼어들기
+            let mut rbuf = [0u8; 2048];
+            if let Ok(n) = neptun.recv(&mut rbuf) {
+                if rbuf[..n] == p[..] { got += 1; }
+            }
+        }
+        client.stop();
+        server.stop();
+        wg_stop.store(true, Ordering::Relaxed);
+        let _ = wg_thread.join();
+        assert!(got >= 9, "끼어든 패킷 때문에 내려받기가 샘: {got}/10");
     }
 
     // UDP 서버가 없으면(막힌 망 흉내) 자동으로 TCP로 폴백하는지.

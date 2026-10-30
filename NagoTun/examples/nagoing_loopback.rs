@@ -111,8 +111,10 @@ fn roundtrip_count(client_local: SocketAddr, n: u16) -> usize {
     let sender = neptun.try_clone().unwrap();
     thread::spawn(move || {
         for i in 0..n {
-            let mut payload = vec![0u8; 60];
-            payload[0..2].copy_from_slice(&i.to_le_bytes());
+            // WG 데이터 메시지 모양(타입 4 + 0 세 개, 길이 32+16의 배수) — 클라는 WG 모양만 받는다.
+            let mut payload = vec![0u8; 64];
+            payload[0] = 4;
+            payload[4..6].copy_from_slice(&i.to_le_bytes());
             let _ = sender.send(&payload);
             thread::sleep(Duration::from_millis(2));
         }
@@ -125,8 +127,8 @@ fn roundtrip_count(client_local: SocketAddr, n: u16) -> usize {
     let mut buf = [0u8; 2048];
     while Instant::now() < deadline && got.len() < n as usize {
         match neptun.recv(&mut buf) {
-            Ok(m) if m >= 2 => {
-                got.insert(u16::from_le_bytes([buf[0], buf[1]]));
+            Ok(m) if m >= 6 => {
+                got.insert(u16::from_le_bytes([buf[4], buf[5]]));
             }
             _ => {}
         }

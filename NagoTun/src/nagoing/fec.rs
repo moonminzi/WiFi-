@@ -12,6 +12,7 @@
 //! 데이터 조각은 받은 즉시 위로 넘기고(이 모듈은 건드리지 않음), 이 모듈은 **빠진 것만** 되살려 넘긴다.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// 조각 하나. Data는 입력 payload를 빌려 쓰고(복사 없음), Parity는 계산한 버퍼를 빌려 쓴다.
 pub enum ShardRef<'a> {
@@ -22,7 +23,8 @@ pub enum ShardRef<'a> {
 struct GroupEnc {
     gen: u16,
     count: u8,
-    acc: Vec<u8>, // 조각들의 [len:u16 LE][bytes] XOR 누적
+    acc: Vec<u8>,           // 조각들의 [len:u16 LE][bytes] XOR 누적
+    first: Option<Instant>, // 이 세대 첫 조각을 넣은 시각(덜 찬 그룹 내보내기용)
 }
 
 pub struct FecEncoder {
@@ -37,7 +39,7 @@ impl FecEncoder {
     pub fn new(k: u8, groups: u16) -> Self {
         let k = k.max(2);
         let groups = groups.max(1);
-        let state = (0..groups).map(|_| GroupEnc { gen: 0, count: 0, acc: Vec::new() }).collect();
+        let state = (0..groups).map(|_| GroupEnc { gen: 0, count: 0, acc: Vec::new(), first: None }).collect();
         FecEncoder { k, groups, seq: 0, state }
     }
 
@@ -65,14 +67,36 @@ impl FecEncoder {
             st.acc[2 + i] ^= b;
         }
         st.count += 1;
+        st.first.get_or_insert_with(Instant::now);
 
         if st.count >= self.k {
-            emit(ShardRef::Parity { group: g as u16, gen, k: self.k, payload: &st.acc });
-            // 그룹 리셋, 세대 올림
-            st.acc.clear();
-            st.count = 0;
-            st.gen = st.gen.wrapping_add(1);
+            Self::close(st, g as u16, &mut emit);
         }
+    }
+
+    /// 그룹의 패리티를 내보내고(k = 지금까지 넣은 조각 수) 다음 세대로 넘어간다.
+    fn close<F: FnMut(ShardRef)>(st: &mut GroupEnc, group: u16, emit: &mut F) {
+        emit(ShardRef::Parity { group, gen: st.gen, k: st.count, payload: &st.acc });
+        st.acc.clear();
+        st.count = 0;
+        st.first = None;
+        st.gen = st.gen.wrapping_add(1);
+    }
+
+    /// 덜 찬 채로 max_age 넘게 기다린 그룹의 패리티를 지금 내보낸다(그 그룹은 그 개수로 닫힌다).
+    /// 트래픽이 드물면(핸드셰이크·DNS·통화) 그룹이 k개로 차기까지 한참 걸려 복구가 너무 늦거나 아예 안 됐다.
+    /// 대용량 전송은 그룹이 max_age 전에 차므로 추가 비용이 없다.
+    pub fn flush_stale<F: FnMut(ShardRef)>(&mut self, max_age: Duration, mut emit: F) {
+        for (g, st) in self.state.iter_mut().enumerate() {
+            if st.first.is_some_and(|t| t.elapsed() >= max_age) {
+                Self::close(st, g as u16, &mut emit);
+            }
+        }
+    }
+
+    /// 아직 패리티를 안 낸(덜 찬) 그룹이 있는가 — 있으면 호출자가 짧은 주기로 flush_stale을 불러야 한다.
+    pub fn has_pending(&self) -> bool {
+        self.state.iter().any(|st| st.count > 0)
     }
 }
 
@@ -164,6 +188,12 @@ impl FecDecoder {
         });
         if entry.done {
             return;
+        }
+        // 덜 찬 채 닫힌 그룹(flush_stale)은 패리티의 k가 데이터 조각들의 k보다 작다 → 그 개수로 줄인다.
+        if k >= 1 && k < entry.k {
+            entry.k = k;
+            entry.data.truncate(k as usize);
+            entry.have_data = entry.data.iter().filter(|d| d.is_some()).count() as u8;
         }
         if entry.parity.is_none() {
             entry.parity = Some(payload.to_vec());
@@ -331,6 +361,53 @@ mod tests {
             }
         }
         assert_eq!(recovered, vec![payloads[0].clone()]);
+    }
+
+    // 드문 트래픽: 그룹이 k개로 안 차도 flush_stale이 그 개수로 닫아 패리티를 내보내고, 빠진 조각을 되살린다.
+    #[test]
+    fn partial_group_flush_recovers() {
+        let mut enc = FecEncoder::new(8, 4);
+        // 3개만 보냄 → 그룹 0,1,2에 하나씩(덜 참). 아직 패리티 없음.
+        let payloads: Vec<Vec<u8>> = (0..3u8).map(|i| vec![i + 1; 50 + i as usize]).collect();
+        let mut shards = collect(&mut enc, &payloads);
+        assert!(shards.iter().all(|s| matches!(s, Owned::Data { .. })));
+        assert!(enc.has_pending());
+        enc.flush_stale(Duration::ZERO, |s| {
+            if let ShardRef::Parity { group, gen, k, payload } = s {
+                shards.push(Owned::Parity { group, gen, k, payload: payload.to_vec() });
+            }
+        });
+        assert!(!enc.has_pending());
+        // 두 번째 데이터(그룹 1의 유일한 조각)를 잃어도 그룹 1의 패리티(k=1)로 되살린다.
+        let rec = run(&shards, &[1]);
+        assert_eq!(rec, vec![payloads[1].clone()]);
+
+        // 그룹에 두 조각이 있다가 flush되는 경우(k=2): 하나를 잃어도 복구.
+        let mut enc = FecEncoder::new(8, 1);
+        let two = vec![vec![7u8; 40], vec![9u8; 60]];
+        let mut shards = collect(&mut enc, &two);
+        enc.flush_stale(Duration::ZERO, |s| {
+            if let ShardRef::Parity { group, gen, k, payload } = s {
+                assert_eq!(k, 2);
+                shards.push(Owned::Parity { group, gen, k, payload: payload.to_vec() });
+            }
+        });
+        assert_eq!(run(&shards, &[0]), vec![two[0].clone()]);
+        // 다음 세대는 다시 k=8 그룹으로 정상 동작.
+        let eight: Vec<Vec<u8>> = (0..8u8).map(|i| vec![i; 30]).collect();
+        let shards = collect(&mut enc, &eight);
+        assert_eq!(run(&shards, &[3]), vec![eight[3].clone()]);
+    }
+
+    // 막 넣은 그룹은 max_age 전에는 내보내지 않는다(대용량에서 추가 비용 없음).
+    #[test]
+    fn fresh_group_not_flushed() {
+        let mut enc = FecEncoder::new(8, 2);
+        enc.push(&[1, 2, 3], |_| {});
+        let mut n = 0;
+        enc.flush_stale(Duration::from_secs(60), |_| n += 1);
+        assert_eq!(n, 0);
+        assert!(enc.has_pending());
     }
 
     #[test]

@@ -87,6 +87,10 @@ struct SettingsView: View {
             // 끄면 저장된 설정에도 바로 반영한다(다음 연결까지 기다리면 그동안 통신이 계속 막힐 수 있다).
             if !on { Task { await vpn.releaseKillSwitch() } }
         }
+        .onChange(of: nagoOn) { _, on in
+            // 끄면 저장된 nagoing 프로필도 일반 WG로 되돌린다(iOS 설정·자동 연결이 계속 nagoing으로 붙지 않게).
+            if !on { Task { await vpn.revertNagoing() } }
+        }
         .onChange(of: needsOurTunnel) { _, needed in
             if needed, !proto.usesTunnel { proto = .wireguard }
         }
