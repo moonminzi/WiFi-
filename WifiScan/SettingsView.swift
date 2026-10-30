@@ -141,7 +141,7 @@ struct SettingsView: View {
             if proto == .auto || proto == .wireguard {
                 TermDivider()
                 row("engine") {
-                    TermChoice(options: [(label: "nagotun", value: "neptun"), (label: "go", value: "go")],
+                    TermChoice(options: [(label: "NagoTun", value: "neptun"), (label: "go", value: "go")],
                                selection: $wgEngine)
                 }
                 if wgEngine == "neptun" {
@@ -290,7 +290,7 @@ struct SettingsView: View {
         TermBlock(label: "about") {
             Text("nago vpn \(Self.version) · \(Edition.label)")
             if !Edition.isUser {
-                Text("nagotun 2.2.3-nago.1 (neptun ce18515) · wireguard-go 1.0.16")
+                Text("NagoTun 2.2.3-nago.1 (NepTUN ce18515) · wireguard-go 1.0.16")
                     .foregroundStyle(Term.muted)
             }
         }

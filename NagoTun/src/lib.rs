@@ -74,25 +74,9 @@ fn errno_of(response: &str) -> c_int {
 /// 애플에서는 NepTUN이 이 값을 쓰지 않아서 iOS 터널 확장(NeptunEngine.swift)이 소켓을 찾아 직접 키운다.
 const SOCKET_BUFFER: usize = 7 << 20;
 
-/// 터널을 시작한다. 실패하면 NULL.
-/// - `tun_fd`: iOS utun 또는 안드로이드 TUN 디스크립터(네트워크 설정을 적용한 뒤에 넘겨야 MTU가 맞다). 엔진이 닫는다
-/// - `uapi`: "set=1\nprivate_key=…\npublic_key=…\nendpoint=…\nallowed_ip=…\n\n"
-/// - `threads`: 이벤트 루프 스레드 수(아이폰 기본 2, 안드로이드 4).
-///   애플은 패킷을 이벤트 루프에서 바로 처리한다(읽기→암호화→보내기 / 받기→복호화→쓰기). utun 읽기와 UDP 받기는
-///   kqueue EV_DISPATCH라 한 번에 한 스레드만 잡으므로, 2개면 올리기(받는 중의 ACK 포함)와 내려받기가 다른 코어에서 돈다.
-///   피어 잠금은 암·복호화하는 동안만 잡고 send/write는 잠금 밖이라 둘이 겹친다
-/// - `queue`: 애플 밖(안드로이드·리눅스)에서만 쓰는 스레드 사이 대기열 묶음 수(0이면 8).
-///   애플에선 NepTUN이 이 대기열(packet_workers)을 아예 만들지 않아서 값이 아무 영향이 없다
-#[no_mangle]
-pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u32, queue: u32) -> *mut NagoTun {
-    let Some(cmd) = text(uapi).map(|c| normalize(&c)) else {
-        return fail("uapi is not utf-8".into());
-    };
-    let tun = match TunSocket::new_from_fd(tun_fd) {
-        Ok(t) => t,
-        Err(e) => return fail(format!("tun fd {tun_fd}: {e:?}")),
-    };
-    let config = DeviceConfig {
+/// 엔진 설정(앱·시험이 같이 쓴다).
+fn device_config(threads: u32, queue: u32) -> DeviceConfig {
+    DeviceConfig {
         n_threads: threads.clamp(1, 4) as usize,
         // NordVPN(libtelio)과 같게: 애플은 끄고, 안드로이드는 서버마다 connect한 소켓을 쓴다
         use_connected_socket: cfg!(target_os = "android"),
@@ -111,7 +95,30 @@ pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u3
         // 애플 밖: queue가 0이면 패킷을 이벤트 루프에서 바로 처리한다(작업 스레드 없음, NagoTun 기본).
         // 1 이상이면 NepTUN처럼 그 크기의 대기열로 작업 스레드에 넘긴다(비교용)
         inline_packets: queue == 0,
+        // nagoing을 바로 붙이면(nago_nagoing_attach) 여기 꽂힌다. 비어 있으면 UDP 소켓 그대로.
+        external_net: Default::default(),
+    }
+}
+
+/// 터널을 시작한다. 실패하면 NULL.
+/// - `tun_fd`: iOS utun 또는 안드로이드 TUN 디스크립터(네트워크 설정을 적용한 뒤에 넘겨야 MTU가 맞다). 엔진이 닫는다
+/// - `uapi`: "set=1\nprivate_key=…\npublic_key=…\nendpoint=…\nallowed_ip=…\n\n"
+/// - `threads`: 이벤트 루프 스레드 수(아이폰 기본 2, 안드로이드 4).
+///   애플은 패킷을 이벤트 루프에서 바로 처리한다(읽기→암호화→보내기 / 받기→복호화→쓰기). utun 읽기와 UDP 받기는
+///   kqueue EV_DISPATCH라 한 번에 한 스레드만 잡으므로, 2개면 올리기(받는 중의 ACK 포함)와 내려받기가 다른 코어에서 돈다.
+///   피어 잠금은 암·복호화하는 동안만 잡고 send/write는 잠금 밖이라 둘이 겹친다
+/// - `queue`: 애플 밖(안드로이드·리눅스)에서만 쓰는 스레드 사이 대기열 묶음 수(0이면 8).
+///   애플에선 NepTUN이 이 대기열(packet_workers)을 아예 만들지 않아서 값이 아무 영향이 없다
+#[no_mangle]
+pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u32, queue: u32) -> *mut NagoTun {
+    let Some(cmd) = text(uapi).map(|c| normalize(&c)) else {
+        return fail("uapi is not utf-8".into());
     };
+    let tun = match TunSocket::new_from_fd(tun_fd) {
+        Ok(t) => t,
+        Err(e) => return fail(format!("tun fd {tun_fd}: {e:?}")),
+    };
+    let config = device_config(threads, queue);
     let handle = match DeviceHandle::new_with_tun(tun, config) {
         Ok(h) => h,
         Err(e) => return fail(format!("device: {e:?}")),
@@ -266,6 +273,37 @@ pub extern "C" fn nago_nagoing_client_start(
     }
 }
 
+/// 엔진 → nagoing: 엔진이 암호화한 WG 데이터그램을 nagoing 송신으로 바로 넘긴다(엔진 스레드에서).
+struct NagoingNet(nagoing::DatagramSender);
+
+impl engine::device::ExternalNet for NagoingNet {
+    fn send(&self, packet: &[u8]) {
+        self.0.send(packet);
+    }
+}
+
+/// 엔진(nago_tun)과 nagoing을 바로 잇는다 — 로컬 UDP 홉(127.0.0.1) 없이 엔진이 암호화한 패킷을 nagoing이 바로
+/// 봉인해 보내고, 받은 건 바로 복호화해 tun에 쓴다. 0이면 성공. 붙이기 전·뗀 뒤엔 로컬 UDP 포트로 그대로 돈다.
+/// 엔진이나 nagoing 어느 쪽을 먼저 멈춰도 된다(nagoing이 멈출 땐 엔진에서 스스로 떨어진다).
+#[no_mangle]
+pub extern "C" fn nago_nagoing_attach(client: *mut NagoingClient, tun: *mut NagoTun) -> c_int {
+    let (Some(client), Some(tun)) = (unsafe { client.as_ref() }, unsafe { tun.as_ref() }) else {
+        return -1;
+    };
+    // 엔진 쪽(보내기)을 먼저 꽂는다. 받기(sink)를 먼저 꽂으면 그사이 받은 패킷이 '바깥 전송 없음'으로 버려진다
+    // (반대 순서면 그사이엔 로컬 UDP로 받아 그대로 처리된다).
+    tun.handle.set_external_net(Some(Arc::new(NagoingNet(client.handle.sender()))));
+    let rx = tun.handle.external_receiver();
+    let detach_rx = rx.clone();
+    client.handle.attach(
+        Arc::new(move |p: &[u8]| {
+            rx.receive(p);
+        }),
+        Box::new(move || detach_rx.detach()),
+    );
+    0
+}
+
 /// 와이파이↔셀룰러 전환 등 경로가 바뀌면 부른다(전송을 빠르게 다시 수립).
 #[no_mangle]
 pub extern "C" fn nago_nagoing_network_changed(client: *mut NagoingClient) {
@@ -303,7 +341,114 @@ pub extern "C" fn nago_nagoing_client_stop(client: *mut NagoingClient) {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize;
+    use super::*;
+
+    // 엔진 두 개(클라·서버 wg0)를 가짜 tun으로 띄우고 사이에 nagoing을 둔다. 클라 엔진의 UDP 엔드포인트는 일부러
+    // 아무도 안 듣는 포트(127.0.0.1:9)라, WG 핸드셰이크와 데이터가 오가면 nago_nagoing_attach의 직결 경로로만 간 것이다.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn engine_attached_to_nagoing_end_to_end() {
+        use std::os::fd::IntoRawFd;
+        use std::os::unix::net::UnixDatagram;
+        use std::time::{Duration, Instant};
+
+        fn hex(b: &[u8]) -> String {
+            b.iter().map(|x| format!("{x:02x}")).collect()
+        }
+        fn mock_tun() -> (TunSocket, UnixDatagram) {
+            let (near, far) = UnixDatagram::pair().unwrap();
+            near.set_nonblocking(true).unwrap();
+            far.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            (TunSocket::new_mock_from_fd(near.into_raw_fd()), far)
+        }
+        // 최소 IPv4 헤더 + 페이로드(엔진은 목적지로 피어를, 출발지로 allowed_ip를 본다).
+        fn ipv4(src: [u8; 4], dst: [u8; 4], payload: &[u8]) -> Vec<u8> {
+            let mut p = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 17, 0, 0];
+            p.extend_from_slice(&src);
+            p.extend_from_slice(&dst);
+            p.extend_from_slice(payload);
+            let len = p.len() as u16;
+            p[2..4].copy_from_slice(&len.to_be_bytes());
+            p
+        }
+
+        let mut ck = [0u8; 32];
+        let mut sk = [0u8; 32];
+        nagoing::rand_bytes(&mut ck);
+        nagoing::rand_bytes(&mut sk);
+        let (cpub, spub) = (nagoing::Identity::from_bytes(ck).public(), nagoing::Identity::from_bytes(sk).public());
+
+        // 서버 wg0(엔진, UDP 47820)
+        let (stun, sfar) = mock_tun();
+        let server_wg = DeviceHandle::new_with_mock_tun(stun, 1420, device_config(1, 0)).unwrap();
+        assert_eq!(errno_of(&server_wg.send_uapi_cmd(&format!(
+            "set=1\nprivate_key={}\nlisten_port=47820\npublic_key={}\nallowed_ip=10.9.0.2/32\n\n", hex(&sk), hex(&cpub)
+        ))), 0);
+        let relay = nagoing::run_server(nagoing::ServerConfig {
+            psk: "p".into(),
+            udp_bind: "127.0.0.1:0".parse().unwrap(),
+            tcp_bind: "127.0.0.1:0".parse().unwrap(),
+            upstream: "127.0.0.1:47820".parse().unwrap(),
+            fec: nagoing::FecParams::default(),
+            identity: sk,
+            tls_cert_pem: nagoing::testcert::CERT_PEM.into(),
+            tls_key_pem: nagoing::testcert::KEY_PEM.into(),
+        })
+        .unwrap();
+
+        // 클라: nagoing(로컬 포트는 폴백용으로만) + 엔진(엔드포인트 = 죽은 포트)
+        let client = nagoing::run_client(nagoing::ClientConfig {
+            psk: "p".into(),
+            server_udp: relay.udp_addr(),
+            server_tcp: relay.tcp_addr(),
+            local_bind: "127.0.0.1:0".parse().unwrap(),
+            fec: nagoing::FecParams::default(),
+            prefer: nagoing::Prefer::Udp,
+            sni: "x".into(),
+            identity: ck,
+            server_pub: spub,
+        })
+        .unwrap();
+        let (ctun, cfar) = mock_tun();
+        let client_wg = DeviceHandle::new_with_mock_tun(ctun, 1380, device_config(1, 0)).unwrap();
+        assert_eq!(errno_of(&client_wg.send_uapi_cmd(&format!(
+            "set=1\nprivate_key={}\npublic_key={}\nendpoint=127.0.0.1:9\nallowed_ip=10.9.0.1/32\n\n", hex(&ck), hex(&spub)
+        ))), 0);
+        let tun = Box::into_raw(Box::new(NagoTun { handle: client_wg }));
+        let ncl = Box::into_raw(Box::new(NagoingClient { handle: client }));
+        let start = Instant::now();
+        while unsafe { &*ncl }.handle.stats().kind.is_none() && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(nago_nagoing_attach(ncl, tun), 0);
+
+        // 올리기: 클라 tun → 엔진 암호화 → (직결) nagoing → 서버 → wg0 복호화 → 서버 tun
+        let up = ipv4([10, 9, 0, 2], [10, 9, 0, 1], b"hello over attached nagoing");
+        let mut buf = [0u8; 2048];
+        let mut got_up = None;
+        for _ in 0..20 {
+            cfar.send(&up).unwrap(); // 첫 패킷은 핸드셰이크 대기열에 들어간다 — 몇 번 보낸다
+            sfar.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+            if let Ok(n) = sfar.recv(&mut buf) {
+                got_up = Some(buf[..n].to_vec());
+                break;
+            }
+        }
+        assert_eq!(got_up.as_deref(), Some(&up[..]), "올리기가 직결 경로로 안 감");
+
+        // 내리기: 서버 tun → wg0 → nagoing → (직결) 엔진 복호화 → 클라 tun
+        let down = ipv4([10, 9, 0, 1], [10, 9, 0, 2], b"and back down");
+        sfar.send(&down).unwrap();
+        let n = cfar.recv(&mut buf).expect("내리기가 직결 경로로 안 옴");
+        assert_eq!(&buf[..n], &down[..]);
+
+        // 클라를 먼저 멈춰도(엔진에서 스스로 떨어짐) 엔진은 멀쩡하다.
+        nago_nagoing_client_stop(ncl);
+        cfar.send(&up).unwrap(); // 이제 UDP(죽은 포트)로 가서 버려질 뿐, 터지지 않는다
+        nago_tun_stop(tun);
+        relay.stop();
+        server_wg.trigger_exit();
+    }
 
     #[test]
     fn base64_keys_become_hex() {

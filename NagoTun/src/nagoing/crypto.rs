@@ -9,6 +9,9 @@
 //! - **리플레이 방어(핸드셰이크)**: HELLO에 시각(±HELLO_SKEW)과 16바이트 난수를 넣고, 서버가 창 안의 난수를 기억한다.
 //! - **세션 AEAD**: 연결(HELLO)마다 양쪽 난수로 새 세션 키를 뽑아 ChaCha20-Poly1305(ring, SIMD)로 프레임을 봉인한다.
 //!   nonce는 64비트 카운터라 겹칠 수 없고, 받는 쪽은 2048칸 리플레이 창으로 같은 패킷의 재전송을 버린다.
+//!   v3: 큰 프레임은 앞 64바이트(nagoing 헤더 + WG 헤더)만 봉인하고 나머지(이미 WG 암호문)는 그대로 싣는다. 카운터·
+//!   헤더는 인증되므로 재전송·위조 방어는 같고, 뒤쪽을 바꾸면 안쪽 WireGuard가 버린다(경로상 공격자가 패킷을 버리는
+//!   것과 같음). 대신 nagoing이 바이트마다 하던 두 번째 암호화가 사라진다.
 //! - **카운터 가리기**: 카운터를 평문으로 두면 증가하는 숫자가 지문이 되므로, QUIC 헤더 보호처럼 태그를 표본으로
 //!   만든 마스크로 XOR해 싣는다.
 //!
@@ -18,22 +21,36 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use ring::aead::quic::{self, HeaderProtectionKey};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 use ring::{hkdf, hmac};
 use x25519_dalek::{PublicKey, StaticSecret};
 
-use super::obfs::chacha20_block;
 use super::rand_bytes;
 
 pub const TAG_LEN: usize = 16;
-/// 세션 메시지 앞의 (가린) 카운터 길이.
-pub const CTR_LEN: usize = 8;
+/// 세션 메시지 앞의 (가린) 카운터 길이 — 64비트 카운터의 아래 40비트만 싣고 받는 쪽이 복원한다(QUIC 패킷 번호처럼).
+/// 마스크는 ring의 QUIC 헤더 보호(ChaCha20, 어셈블리)가 정확히 5바이트를 준다.
+pub const CTR_LEN: usize = 5;
+const CTR_BITS: u32 = 40;
 /// 핸드셰이크 메시지 앞의 무작위 nonce 길이.
 const HS_NONCE_LEN: usize = 12;
 /// 세션 메시지가 붙이는 바이트(카운터 + 태그).
 pub const SESSION_OVERHEAD: usize = CTR_LEN + TAG_LEN;
 
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
+
+/// 이 길이 이하의 평문 프레임은 통째로 봉인한다(컨트롤·작은 DATA — 패딩까지 다 가려진다).
+const FULL_SEAL_MAX: usize = 320;
+/// 그보다 큰 프레임은 앞 이만큼만 봉인한다(nagoing 프레임 헤더 + WG 헤더 16바이트 + 여유).
+/// 나머지는 이미 WireGuard가 암호화·인증한 바이트(또는 그 XOR 패리티)라 다시 암호화할 필요가 없다 —
+/// v2는 1400바이트를 통째로 한 번 더 암호화해서 폰 CPU의 큰 몫을 썼다(callgrind: AEAD가 사용자 명령의 ~78%).
+const SEAL_HEAD: usize = 64;
+
+/// 봉인할 앞부분 길이.
+fn sealed_len(plain_len: usize) -> usize {
+    if plain_len <= FULL_SEAL_MAX { plain_len } else { SEAL_HEAD }
+}
 const HELLO: u8 = 0x01;
 const ACK: u8 = 0x02;
 /// HELLO 시각 허용 오차(초). 폰 시계는 NTP로 맞춰져 있어 넉넉하다.
@@ -294,6 +311,11 @@ impl Default for ReplayWindow {
 }
 
 impl ReplayWindow {
+    /// 다음에 올 것으로 보는 카운터(아무것도 안 받았으면 0).
+    fn expected(&self) -> u64 {
+        if self.any { self.top + 1 } else { 0 }
+    }
+
     fn bit(ctr: u64) -> (usize, u64) {
         let i = ctr % WINDOW;
         ((i / 64) as usize, 1u64 << (i % 64))
@@ -332,8 +354,8 @@ impl ReplayWindow {
 pub struct SessionKeys {
     tx: LessSafeKey,
     rx: LessSafeKey,
-    tx_hp: [u8; 32],
-    rx_hp: [u8; 32],
+    tx_hp: HeaderProtectionKey,
+    rx_hp: HeaderProtectionKey,
     tx_ctr: AtomicU64,
     window: Mutex<ReplayWindow>,
 }
@@ -352,38 +374,47 @@ impl SessionKeys {
         SessionKeys {
             tx: aead_key(&tx),
             rx: aead_key(&rx),
-            tx_hp,
-            rx_hp,
+            tx_hp: HeaderProtectionKey::new(&quic::CHACHA20, &tx_hp).expect("hp key"),
+            rx_hp: HeaderProtectionKey::new(&quic::CHACHA20, &rx_hp).expect("hp key"),
             tx_ctr: AtomicU64::new(0),
             window: Mutex::new(ReplayWindow::default()),
         }
     }
 
-    /// 태그(맨 끝 16바이트)를 표본으로 카운터를 가리는 8바이트 마스크(QUIC 헤더 보호와 같은 생각).
-    fn mask(hp: &[u8; 32], tag: &[u8]) -> [u8; 8] {
-        let ctr = u32::from_le_bytes([tag[0], tag[1], tag[2], tag[3]]);
-        let mut nonce = [0u8; 12];
-        nonce.copy_from_slice(&tag[4..16]);
-        let block = chacha20_block(hp, ctr, &nonce);
-        let mut m = [0u8; 8];
-        m.copy_from_slice(&block[..8]);
-        m
+    /// 태그(맨 끝 16바이트)를 표본으로 카운터를 가리는 5바이트 마스크(QUIC 헤더 보호 그대로, ring 어셈블리).
+    fn mask(hp: &HeaderProtectionKey, tag: &[u8]) -> [u8; CTR_LEN] {
+        hp.new_mask(tag).unwrap_or([0; CTR_LEN])
     }
 
-    /// 평문 프레임을 봉인해 out에 `[가린 카운터 8][암호문][태그 16]`으로 쓴다.
+    /// 아래 40비트만 받은 카운터를 다음에 올 값(창의 맨 위 + 1)에 가장 가까운 64비트 값으로 복원한다(RFC 9000 A.3).
+    fn expand_ctr(expected: u64, low: u64) -> u64 {
+        let win = 1u64 << CTR_BITS;
+        let half = win / 2;
+        let cand = (expected & !(win - 1)) | low;
+        if cand.saturating_add(half) <= expected {
+            cand + win
+        } else if cand > expected.saturating_add(half) && cand >= win {
+            cand - win
+        } else {
+            cand
+        }
+    }
+
+    /// 평문 프레임을 봉인해 out에 `[가린 카운터 8][봉인한 앞부분][나머지 그대로][태그 16]`으로 쓴다.
     pub fn seal(&self, plain: &[u8], out: &mut Vec<u8>) {
         let ctr = self.tx_ctr.fetch_add(1, Ordering::Relaxed);
+        let head = sealed_len(plain.len());
         out.clear();
         out.reserve(SESSION_OVERHEAD + plain.len());
         out.extend_from_slice(&[0u8; CTR_LEN]);
         out.extend_from_slice(plain);
         let tag = self
             .tx
-            .seal_in_place_separate_tag(ctr_nonce(ctr), Aad::empty(), &mut out[CTR_LEN..])
+            .seal_in_place_separate_tag(ctr_nonce(ctr), Aad::empty(), &mut out[CTR_LEN..CTR_LEN + head])
             .expect("seal");
         out.extend_from_slice(tag.as_ref());
         let mask = Self::mask(&self.tx_hp, tag.as_ref());
-        for (i, b) in ctr.to_le_bytes().iter().enumerate() {
+        for (i, b) in ctr.to_le_bytes()[..CTR_LEN].iter().enumerate() {
             out[i] = b ^ mask[i];
         }
     }
@@ -394,17 +425,23 @@ impl SessionKeys {
             return None;
         }
         let mask = Self::mask(&self.rx_hp, &msg[msg.len() - TAG_LEN..]);
-        let mut cb = [0u8; CTR_LEN];
+        let mut cb = [0u8; 8];
         for i in 0..CTR_LEN {
             cb[i] = msg[i] ^ mask[i];
         }
-        let ctr = u64::from_le_bytes(cb);
-        let plain = self.rx.open_in_place(ctr_nonce(ctr), Aad::empty(), &mut msg[CTR_LEN..]).ok()?;
+        let expected = self.window.lock().unwrap().expected();
+        let ctr = Self::expand_ctr(expected, u64::from_le_bytes(cb));
+        let end = msg.len() - TAG_LEN;
+        let tag = ring::aead::Tag::try_from(&msg[end..]).ok()?;
+        let head = sealed_len(end - CTR_LEN);
+        self.rx
+            .open_in_place_separate_tag(ctr_nonce(ctr), Aad::empty(), tag, &mut msg[CTR_LEN..CTR_LEN + head], 0..)
+            .ok()?;
         // 인증된 뒤에만 창에 기록한다(위조 패킷이 창을 밀어 진짜를 막지 못하게).
         if !self.window.lock().unwrap().accept(ctr) {
             return None;
         }
-        Some(&*plain)
+        Some(&msg[CTR_LEN..end])
     }
 }
 
@@ -485,7 +522,43 @@ mod tests {
         ck.seal(b"same", &mut a);
         ck.seal(b"same", &mut b);
         assert_ne!(a, b);
-        assert_ne!(&a[..8], &3u64.to_le_bytes()); // a의 카운터는 3
+        assert_ne!(&a[..CTR_LEN], &3u64.to_le_bytes()[..CTR_LEN]); // a의 카운터는 3
+    }
+
+    // 큰 프레임은 앞부분만 봉인: 앞(헤더)을 건드리면 거절, 평문 뒤쪽은 선 위에 그대로(=이미 WG 암호문이라 괜찮음),
+    // 작은 프레임은 통째로 봉인. 어느 쪽이든 왕복은 정확해야 한다.
+    #[test]
+    fn partial_seal_large_frames() {
+        let (c, s) = pair();
+        let k = c.shared(&s.public()).unwrap();
+        let ck = SessionKeys::derive(&k, &[3; 16], &[4; 16], true);
+        let sk = SessionKeys::derive(&k, &[3; 16], &[4; 16], false);
+        let big: Vec<u8> = (0..1400u32).map(|i| (i * 7) as u8).collect();
+        let mut w = Vec::new();
+        ck.seal(&big, &mut w);
+        assert_eq!(w.len(), SESSION_OVERHEAD + big.len());
+        assert_eq!(&w[CTR_LEN + SEAL_HEAD..w.len() - TAG_LEN], &big[SEAL_HEAD..]); // 뒤쪽은 그대로
+        assert_ne!(&w[CTR_LEN..CTR_LEN + SEAL_HEAD], &big[..SEAL_HEAD]); // 앞쪽은 가려짐
+        assert_eq!(sk.open(&mut w.clone()).unwrap(), &big[..]);
+        let mut t = w.clone();
+        t[CTR_LEN + 3] ^= 1; // 헤더 변조 → 거절
+        assert!(sk.open(&mut t).is_none());
+
+        let small = vec![0u8; 300]; // 0으로 채운 패딩도 통째로 가려져야 한다
+        let mut w2 = Vec::new();
+        ck.seal(&small, &mut w2);
+        assert!(w2[CTR_LEN..w2.len() - TAG_LEN].iter().any(|&b| b != 0));
+        assert_eq!(sk.open(&mut w2).unwrap(), &small[..]);
+    }
+
+    #[test]
+    fn counter_expands_from_40_bits() {
+        let w = 1u64 << 40;
+        assert_eq!(SessionKeys::expand_ctr(0, 0), 0);
+        assert_eq!(SessionKeys::expand_ctr(10, 7), 7); // 조금 늦게 온 것
+        assert_eq!(SessionKeys::expand_ctr(w + 5, 3), w + 3); // 40비트를 넘긴 뒤
+        assert_eq!(SessionKeys::expand_ctr(w - 2, 1), w + 1); // 경계를 막 넘은 것
+        assert_eq!(SessionKeys::expand_ctr(w + 1, w - 3), w - 3); // 경계 앞에서 늦게 온 것
     }
 
     #[test]

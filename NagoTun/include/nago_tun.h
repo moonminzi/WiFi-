@@ -28,6 +28,9 @@ NagoingClient *nago_nagoing_client_start(const char *psk,
                                          uint8_t fec_k, uint16_t fec_groups, int fec_on,
                                          int prefer, const char *sni,
                                          const char *private_key, const char *server_pub);
+// 엔진(nago_tun)과 nagoing을 바로 잇는다(로컬 UDP 홉 없음 — 패킷마다 시스템 호출 둘·스레드 넘김이 빠진다).
+// 0이면 성공. 붙이기 전·뗀 뒤엔 로컬 UDP 포트로 그대로 돈다. nagoing을 멈추면 엔진에서 스스로 떨어진다.
+int nago_nagoing_attach(NagoingClient *client, NagoTun *tun);
 // 와이파이↔셀룰러 전환 등 경로가 바뀌면 호출(전송을 빠르게 다시 수립).
 void nago_nagoing_network_changed(NagoingClient *client);
 // 상태 한 줄("udp · tx .. · rx .. · fec+..")을 buf에 쓴다. 돌려주는 값은 전체 길이.

@@ -359,7 +359,7 @@ struct VPNView: View {
         case .unicorn?: return "unicorn"
         case .ikev2?: return "ikev2 · \(savedRegion.rawValue)"
         default:
-            let engine = wgEngine == "neptun" ? "wg/nagotun ×\(wgLoops)" : "wg/\(wgEngine)"
+            let engine = wgEngine == "neptun" ? "wg/NagoTun ×\(wgLoops)" : "wg/\(wgEngine)"
             return "\(engine) · \(savedRegion.rawValue)"
         }
     }
@@ -576,9 +576,9 @@ struct VPNView: View {
         return km < 150 ? "local" : "\(RouteMath.grouped(Int(km))) km"
     }
 
-    /// 설정 값 "neptun"(예전 이름 그대로 저장)은 화면에 우리 엔진 이름 nagotun으로
+    /// 설정 값 "neptun"(예전 이름 그대로 저장)은 화면에 우리 엔진 이름 NagoTun으로
     static func engineName(_ value: String) -> String {
-        value == "neptun" ? "nagotun" : value
+        value == "neptun" ? "NagoTun" : value
     }
 
     /// 1:02:03 / 12:34

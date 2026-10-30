@@ -33,6 +33,11 @@ base64 = "0.22"
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", default-features = false }
 
+# 시험·벤치(리눅스)에서 엔진을 가짜 tun으로 띄워 nagoing 직결(nago_nagoing_attach)까지 끝에서 끝으로 확인한다.
+# dev 빌드(test·example)에서만 켜진다 — 앱(staticlib)·서버 빌드엔 안 들어간다.
+[dev-dependencies]
+engine = { package = "nagotun_engine", path = "engine", features = ["device", "mock-tun"] }
+
 [profile.release]
 lto = true
 codegen-units = 1

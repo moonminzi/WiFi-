@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -109,13 +109,25 @@ fn shard_frame<'a>(shard: ShardRef<'a>) -> Frame<'a> {
     }
 }
 
-/// 프레임을 평문으로 만들고 세션 키로 봉인한다.
+thread_local! {
+    /// 봉인용 버퍼(평문·봉인본). 패킷마다 Vec 둘을 새로 잡지 않게 스레드마다 하나씩 다시 쓴다.
+    static SEAL_BUFS: std::cell::RefCell<(Vec<u8>, Vec<u8>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
+/// 프레임을 평문으로 만들고 세션 키로 봉인해 `f`에 넘긴다(버퍼는 스레드마다 재사용 — `f` 안에서 다시 봉인하지 말 것).
+fn with_sealed<R>(keys: &SessionKeys, frame: &Frame, f: impl FnOnce(&[u8]) -> R) -> R {
+    SEAL_BUFS.with(|b| {
+        let (plain, out) = &mut *b.borrow_mut();
+        frame::encode(frame, plain);
+        keys.seal(plain, out);
+        f(out)
+    })
+}
+
+/// 시험용: 봉인본을 새 Vec으로.
+#[cfg(test)]
 fn seal_frame(keys: &SessionKeys, frame: &Frame) -> Vec<u8> {
-    let mut plain = Vec::new();
-    frame::encode(frame, &mut plain);
-    let mut out = Vec::new();
-    keys.seal(&plain, &mut out);
-    out
+    with_sealed(keys, frame, |b| b.to_vec())
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -135,6 +147,11 @@ pub struct ServerConfig {
     pub tls_key_pem: Vec<u8>,
 }
 
+thread_local! {
+    /// UDP 바깥 포장 버퍼(스레드마다 재사용).
+    static WRAP_BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// 클라이언트로 돌려보낼 경로. 복제가 싸서(Arc) 잠금 안에서는 복제만 하고 실제 전송은 잠금 밖에서 한다.
 #[derive(Clone)]
 enum Return {
@@ -145,12 +162,12 @@ enum Return {
 impl Return {
     fn send(&self, kind: MsgKind, inner: &[u8]) -> io::Result<()> {
         match self {
-            Return::Udp { sock, addr, cid } => {
-                let mut wrapped = Vec::new();
-                transport::udp_wrap(kind, inner, *cid, &mut wrapped);
-                sock.send_to(&wrapped, *addr)?;
+            Return::Udp { sock, addr, cid } => WRAP_BUF.with(|w| {
+                let wrapped = &mut *w.borrow_mut();
+                transport::udp_wrap(kind, inner, *cid, wrapped);
+                sock.send_to(wrapped, *addr)?;
                 Ok(())
-            }
+            }),
             Return::Tcp { tx } => tx.lock().unwrap().send_msg(kind, inner),
         }
     }
@@ -179,7 +196,7 @@ impl Session {
     /// 같은 세션의 HELLO(망 전환)로 ret을 바꾸려는 UDP 루프가 그동안 멈춰 모든 UDP 클라가 선다.
     fn send_frame(&self, frame: &Frame) -> io::Result<()> {
         let ret = self.ret.lock().unwrap().clone();
-        ret.send(MsgKind::Data, &seal_frame(&self.keys(), frame))
+        with_sealed(&self.keys(), frame, |b| ret.send(MsgKind::Data, b))
     }
 
     fn touch(&self) {
@@ -491,11 +508,13 @@ fn server_udp_loop(inner: Arc<ServerInner>, udp: Arc<UdpSocket>) {
             Err(_) => continue, // 타임아웃 포함
         };
         let Some((kind, cid, body)) = transport::udp_parse(&buf[..n]) else { continue };
-        let mut msg = body.to_vec();
+        // 안쪽 메시지가 buf의 어디인지(제자리에서 열려고 — 패킷마다 복사·할당하지 않게).
+        let (start, len) = (body.as_ptr() as usize - buf.as_ptr() as usize, body.len());
+        let msg = &mut buf[start..start + len];
         match kind {
             MsgKind::Handshake => {
                 let ret = Return::Udp { sock: udp.clone(), addr: from, cid };
-                if let Some((id, _, ack)) = inner.accept_hello(&mut msg, ret.clone(), UDP_HS_PAD) {
+                if let Some((id, _, ack)) = inner.accept_hello(msg, ret.clone(), UDP_HS_PAD) {
                     inner.bind_udp(id, from, cid);
                     // 답은 HELLO가 온 그 경로로 바로.
                     let _ = ret.send(MsgKind::Handshake, &ack);
@@ -504,7 +523,7 @@ fn server_udp_loop(inner: Arc<ServerInner>, udp: Arc<UdpSocket>) {
             MsgKind::Data => {
                 let Some((id, s)) = inner.find_udp(from, cid) else { continue };
                 let keys = s.keys();
-                let Some(plain) = keys.open(&mut msg) else { continue }; // 위조·변조·재전송은 여기서 버림
+                let Some(plain) = keys.open(msg) else { continue }; // 위조·변조·재전송은 여기서 버림
                 let Some(frame) = frame::decode(plain) else { continue };
                 // 인증된 패킷이 새 주소에서 왔으면(NAT 리바인드) 반환 경로를 그리로 옮긴다.
                 let moved = !matches!(&*s.ret.lock().unwrap(), Return::Udp { addr, .. } if *addr == from);
@@ -517,7 +536,7 @@ fn server_udp_loop(inner: Arc<ServerInner>, udp: Arc<UdpSocket>) {
                     Frame::Ping { token } => {
                         // PONG은 PING이 온 주소로 바로(이 루프는 모든 클라가 같이 쓰므로 TCP 경로로 쓰다 막히면 안 됨).
                         let direct = Return::Udp { sock: udp.clone(), addr: from, cid };
-                        let _ = direct.send(MsgKind::Data, &seal_frame(&keys, &Frame::Pong { token }));
+                        let _ = with_sealed(&keys, &Frame::Pong { token }, |b| direct.send(MsgKind::Data, b));
                     }
                     Frame::Data { .. } | Frame::Parity { .. } => s.inbound(frame),
                     Frame::Pong { .. } => {}
@@ -629,7 +648,7 @@ fn server_tcp_conn(inner: Arc<ServerInner>, stream: TcpStream) -> io::Result<()>
                 match frame {
                     // PONG은 이 연결로(세션 ret은 그사이 다른 경로로 바뀌었을 수 있다).
                     Frame::Ping { token } => {
-                        let _ = ret.send(MsgKind::Data, &seal_frame(&keys, &Frame::Pong { token }));
+                        let _ = with_sealed(&keys, &Frame::Pong { token }, |b| ret.send(MsgKind::Data, b));
                     }
                     Frame::Data { .. } | Frame::Parity { .. } => session.inbound(frame),
                     Frame::Pong { .. } => {}
@@ -668,6 +687,10 @@ struct ClientInner {
     cfg: ClientConfig,
     local: UdpSocket,
     peer: Mutex<Option<SocketAddr>>,
+    /// 엔진에 바로 붙었을 때 받은 WG 데이터그램을 넘길 곳(로컬 UDP 대신). 비어 있으면 로컬 소켓으로.
+    sink: RwLock<Option<Sink>>,
+    /// 엔진에서 떼어 낼 때 부를 것(엔진 쪽 바깥 전송 자리를 비운다). stop에서 부른다.
+    detach: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     tx: Mutex<Option<Box<dyn TxHalf>>>,
     rx: Mutex<Option<Box<dyn RxHalf>>>,
     keys: Mutex<Option<Arc<SessionKeys>>>,
@@ -686,20 +709,35 @@ struct ClientInner {
 impl ClientInner {
     fn send_frame(&self, frame: &Frame) {
         let Some(keys) = self.keys.lock().unwrap().clone() else { return };
-        let out = seal_frame(&keys, frame);
-        let mut g = self.tx.lock().unwrap();
-        if let Some(tx) = g.as_mut() {
-            if tx.send_msg(MsgKind::Data, &out).is_err() {
-                self.rebind.store(true, Ordering::Relaxed);
-            } else {
-                self.st_sent.fetch_add(1, Ordering::Relaxed);
+        with_sealed(&keys, frame, |out| {
+            let mut g = self.tx.lock().unwrap();
+            if let Some(tx) = g.as_mut() {
+                if tx.send_msg(MsgKind::Data, out).is_err() {
+                    self.rebind.store(true, Ordering::Relaxed);
+                } else {
+                    self.st_sent.fetch_add(1, Ordering::Relaxed);
+                }
             }
-        }
+        });
     }
 
     fn deliver(&self, payload: &[u8]) {
+        // 엔진에 바로 붙어 있으면 시스템 호출 없이 엔진에 넣는다(로컬 UDP 홉 없음).
+        if let Some(sink) = self.sink.read().unwrap().clone() {
+            sink(payload);
+            return;
+        }
         if let Some(addr) = *self.peer.lock().unwrap() {
             let _ = self.local.send_to(payload, addr);
+        }
+    }
+
+    /// WG 데이터그램 하나를 FEC로 조각내 봉인해 보낸다(로컬 소켓에서 받았든 엔진이 바로 넘겼든 같은 길).
+    fn send_wg(&self, payload: &[u8]) {
+        if self.cfg.fec.enabled {
+            self.enc.lock().unwrap().push(payload, |shard| self.send_frame(&shard_frame(shard)));
+        } else {
+            self.send_frame(&Frame::Data { group: 0, gen: 0, index: 0, k: 0, payload });
         }
     }
 
@@ -831,12 +869,48 @@ impl ClientInner {
     }
 }
 
+/// 받은 WG 데이터그램을 엔진에 넣는 함수(엔진에 바로 붙일 때).
+pub type Sink = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
+/// 엔진이 내보낸 WG 데이터그램을 nagoing으로 바로 보내는 손잡이(엔진 스레드에서 부른다).
+#[derive(Clone)]
+pub struct DatagramSender(Arc<ClientInner>);
+
+impl DatagramSender {
+    pub fn send(&self, payload: &[u8]) {
+        if !self.0.stop.load(Ordering::Relaxed) {
+            self.0.send_wg(payload);
+        }
+    }
+}
+
 pub struct ClientHandle {
     inner: Arc<ClientInner>,
     threads: Vec<JoinHandle<()>>,
 }
 
 impl ClientHandle {
+    /// 엔진에 바로 붙일 때 엔진 쪽에 꽂을 송신 손잡이.
+    pub fn sender(&self) -> DatagramSender {
+        DatagramSender(self.inner.clone())
+    }
+
+    /// 엔진에 바로 붙인다: 받은 WG 데이터그램은 `sink`로(로컬 UDP 대신), 떼어 낼 땐 `detach`를 부른다.
+    /// 붙이기 전·뗀 뒤에는 로컬 UDP 포트로 그대로 동작한다(폴백).
+    pub fn attach(&self, sink: Sink, detach: Box<dyn FnOnce() + Send>) {
+        self.detach_engine();
+        *self.inner.detach.lock().unwrap() = Some(detach);
+        *self.inner.sink.write().unwrap() = Some(sink);
+    }
+
+    /// 엔진에서 떼어 낸다(로컬 UDP로 돌아감).
+    pub fn detach_engine(&self) {
+        *self.inner.sink.write().unwrap() = None;
+        if let Some(detach) = self.inner.detach.lock().unwrap().take() {
+            detach();
+        }
+    }
+
     /// 와이파이↔LTE 전환 등 경로가 바뀌었을 때 호출 → 전송을 새로 수립한다(③ 빠른 전환).
     pub fn network_changed(&self) {
         // 새 망에서는 UDP를 다시 먼저 해 본다(옛 망에서 막혔던 기억은 버림).
@@ -864,6 +938,8 @@ impl ClientHandle {
     }
 
     pub fn stop(mut self) {
+        // 엔진이 더는 이 클라를 부르지 않게(그리고 엔진이 쥔 참조를 놓게) 먼저 떼어 낸다.
+        self.detach_engine();
         self.inner.stop.store(true, Ordering::Relaxed);
         for t in self.threads.drain(..) {
             let _ = t.join();
@@ -903,6 +979,8 @@ pub fn run_client(cfg: ClientConfig) -> io::Result<ClientHandle> {
         session_id: rand_u64(),
         local,
         peer: Mutex::new(None),
+        sink: RwLock::new(None),
+        detach: Mutex::new(None),
         tx: Mutex::new(None),
         rx: Mutex::new(None),
         keys: Mutex::new(None),
@@ -940,7 +1018,9 @@ pub fn run_client(cfg: ClientConfig) -> io::Result<ClientHandle> {
 }
 
 /// WireGuard 메시지처럼 생겼는가: 첫 바이트 타입 1~4 + 0 세 개, 타입별 길이(핸드셰이크 148/92, 쿠키 64,
-/// 데이터 32+16의 배수). 로컬 포트로 들어온 다른 것(같은 기기의 다른 앱 등)을 걸러 낸다.
+/// 데이터 32 이상). 로컬 포트로 들어온 다른 것(같은 기기의 다른 앱 등)을 걸러 낸다.
+/// ★ 데이터 길이를 16의 배수로 보면 안 된다 — 규격은 16바이트 패딩을 권하지만 NepTUN(BoringTun)은 패딩하지 않아서
+///   (engine/src/noise/session.rs의 TODO) 대부분의 데이터 패킷이 버려졌다(2.1.5 build 36~2.1.6의 버그).
 fn looks_like_wg(p: &[u8]) -> bool {
     if p.len() < 32 || p[1..4] != [0, 0, 0] {
         return false;
@@ -949,7 +1029,7 @@ fn looks_like_wg(p: &[u8]) -> bool {
         1 => p.len() == 148,
         2 => p.len() == 92,
         3 => p.len() == 64,
-        4 => p.len() & 15 == 0, // 32 + 16의 배수 = 16의 배수(32 이상은 위에서 확인)
+        4 => true, // 32 이상은 위에서 확인. 패딩이 없어 길이는 아무 값
         _ => false,
     }
 }
@@ -964,14 +1044,7 @@ fn client_up_loop(inner: Arc<ClientInner>) {
             // 뭘 보내도 내려받기가 그쪽으로 새지 않게). NepTUN이 소켓을 다시 열어 포트가 바뀌어도 바로 따라간다.
             Ok((n, from)) if from.ip().is_loopback() && looks_like_wg(&buf[..n]) => {
                 *inner.peer.lock().unwrap() = Some(from);
-                let payload = &buf[..n];
-                if fec_on {
-                    inner.enc.lock().unwrap().push(payload, |shard| {
-                        inner.send_frame(&shard_frame(shard));
-                    });
-                } else {
-                    inner.send_frame(&Frame::Data { group: 0, gen: 0, index: 0, k: 0, payload });
-                }
+                inner.send_wg(&buf[..n]);
             }
             Ok(_) => {}
             Err(_) => {} // 타임아웃 포함
@@ -1003,8 +1076,8 @@ fn client_down_loop(inner: Arc<ClientInner>) {
             Ok((MsgKind::Data, n)) => {
                 inner.st_recv.fetch_add(1, Ordering::Relaxed);
                 let Some(keys) = inner.keys.lock().unwrap().clone() else { continue };
-                let mut m = buf[..n].to_vec();
-                let Some(plain) = keys.open(&mut m) else { continue }; // 위조·재전송 버림
+                // 받은 버퍼에서 바로 연다(복사 없음).
+                let Some(plain) = keys.open(&mut buf[..n]) else { continue }; // 위조·재전송 버림
                 if let Some(frame) = frame::decode(plain) {
                     // 살아 있음 표시(stale 판단)는 인증된 프레임에만.
                     inner.last_rx.store(now_ms(), Ordering::Relaxed);
@@ -1133,8 +1206,8 @@ mod tests {
     }
 
     fn wg_packet(i: u8) -> Vec<u8> {
-        // WG 데이터 메시지 모양(타입 4, 길이 32+16의 배수) — 클라는 WG 모양만 받는다.
-        let mut p = vec![i; 32 + 16 * (1 + i as usize % 4)];
+        // WG 데이터 메시지 모양(타입 4). NepTUN처럼 패딩 없는 아무 길이로 — 16의 배수만 쓰면 길이 필터 버그를 놓친다.
+        let mut p = vec![i; 33 + 7 * i as usize];
         p[0..4].copy_from_slice(&[4, 0, 0, 0]);
         p
     }
@@ -1341,7 +1414,7 @@ mod tests {
         assert!(looks_like_wg(&{ let mut h = vec![0u8; 148]; h[0] = 1; h }));
         assert!(!looks_like_wg(&{ let mut h = vec![0u8; 149]; h[0] = 1; h })); // 핸드셰이크 길이 틀림
         assert!(!looks_like_wg(&[7u8; 48])); // 타입 아님
-        assert!(!looks_like_wg(&data[..40])); // 데이터 길이가 16 단위가 아님
+        assert!(looks_like_wg(&data[..41])); // 패딩 없는 데이터(NepTUN)도 받아야 한다 — 16 단위로 보면 대부분 버려진다
         assert!(!looks_like_wg(b"GET / HTTP/1.1\r\n\r\n"));
     }
 

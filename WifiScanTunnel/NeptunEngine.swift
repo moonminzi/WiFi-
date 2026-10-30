@@ -9,6 +9,8 @@ final class NeptunEngine {
     private static let log = Logger(subsystem: "nago.vpn.tunnel", category: "neptun")
 
     private var tun: OpaquePointer?
+    /// nagoing을 엔진에 바로 붙일 때(nago_nagoing_attach) 쓰는 엔진 포인터. 멈춘 뒤엔 nil.
+    var rawHandle: OpaquePointer? { tun }
     private var monitor: NWPathMonitor?
     private var lastInterfaces: [String]?
     private let queue = DispatchQueue(label: "nago.neptun")
@@ -45,7 +47,7 @@ final class NeptunEngine {
         // 마지막 인자(스레드 사이 대기열)는 애플에서 쓰이지 않는다
         guard let handle = uapi.withCString({ nago_tun_start(tunFD, $0, threads, 0) }) else {
             throw NSError(domain: "nago.neptun", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "nagotun: \(Self.lastError())"])
+                          userInfo: [NSLocalizedDescriptionKey: "NagoTun: \(Self.lastError())"])
         }
         tun = handle
         Self.log.info("started with \(threads) loops")
@@ -134,12 +136,12 @@ final class NeptunEngine {
     func replacePeer(serverPub: String, endpoint: String) throws {
         try queue.sync {
             guard let tun else { throw NSError(domain: "nago.neptun", code: 3,
-                                               userInfo: [NSLocalizedDescriptionKey: "nagotun: not running"]) }
+                                               userInfo: [NSLocalizedDescriptionKey: "NagoTun: not running"]) }
             let rc = Self.uapi(privateKey: nil, serverPub: serverPub, endpoint: endpoint)
                 .withCString { nago_tun_set(tun, $0) }
             if rc != 0 {
                 throw NSError(domain: "nago.neptun", code: Int(rc),
-                              userInfo: [NSLocalizedDescriptionKey: "nagotun: uapi set errno \(rc)"])
+                              userInfo: [NSLocalizedDescriptionKey: "NagoTun: uapi set errno \(rc)"])
             }
         }
     }

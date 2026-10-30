@@ -50,7 +50,7 @@ NepTUN의 endpoint를 서버 대신 **로컬 포트(127.0.0.1:local)**로 돌려
 - 클라이언트는 세션을 `session_id`로 식별한다. 주소가 바뀌어 재접속해도 서버는 **같은 세션**으로 알아보고
   **같은 wg0 소켓**을 계속 쓴다. 그래서 서버가 보는 WG 피어 엔드포인트가 안 바뀌어 **WG 재핸드셰이크 없이** 이어진다.
 
-## 선 프로토콜 (v2)
+## 선 프로토콜 (v3)
 
 메시지는 두 종류다. 전송별 바깥 포장만 다르다(UDP: QUIC long/short header, TCP: TLS 1.3 안의 `[len u16][kind][body]`).
 
@@ -66,9 +66,9 @@ NepTUN의 endpoint를 서버 대신 **로컬 포트(127.0.0.1:local)**로 돌려
 - 서버는 같은 session_id를 **처음 붙은 WG 키로만** 다시 붙게 하고, HELLO 시각이 ±180초 밖이거나 이미 본 난수면
   답하지 않는다(재전송 공격 방어).
 
-**데이터** — `[가린 카운터 8][AEAD_session(프레임)][태그 16]`. 세션 키 = HKDF(같은 고정 비밀, 클라 난수 ‖ 서버 난수)로
-HELLO마다 새로 뽑는다. nonce는 64비트 카운터(절대 안 겹침), 받는 쪽은 **2048칸 리플레이 창**으로 재전송을 버린다.
-카운터는 태그를 표본으로 한 마스크로 가린다(QUIC 헤더 보호와 같은 생각 — 증가하는 숫자가 지문이 되지 않게).
+**데이터** — `[가린 카운터 5][봉인한 앞부분][나머지 그대로][태그 16]`(v3: 큰 프레임은 앞 64바이트만 봉인, 320바이트 이하는 통째로). 세션 키 = HKDF(같은 고정 비밀, 클라 난수 ‖ 서버 난수)로
+HELLO마다 새로 뽑는다. nonce는 64비트 카운터(절대 안 겹침, 선에는 아래 40비트만), 받는 쪽은 **2048칸 리플레이 창**으로 재전송을 버린다.
+카운터는 태그를 표본으로 한 마스크로 가린다(ring의 QUIC 헤더 보호 — 증가하는 숫자가 지문이 되지 않게).
 서버는 **인증된** 패킷이 온 주소로만 반환 경로를 옮긴다(위조 패킷으로 경로를 못 돌림).
 
 | 프레임(봉인된 평문) | 뜻 |
@@ -169,6 +169,32 @@ cargo run --release --example nagoing_proxy -- client <psk> <server_ip> 51821 44
   nagoing이 아닌 TLS 접속엔 HTTP 404. UDP 핸드셰이크도 QUIC Initial 모양(long header, 1200바이트).
 - **v1과 호환 안 됨**: 서버를 v2로 올리면 2.1.5 앱의 nagoing은 붙지 않는다 → 2.1.6으로 같이 올린다.
 
+### v3 (2.1.7): NagoTun 직결 + 부분 봉인 — 폰 CPU 줄이기
+
+- **엔진 직결** (`nago_nagoing_attach`): NagoTun 엔진에 바깥 전송 자리(`DeviceConfig::external_net`)를 만들어, 엔진이
+  암호화한 WG 데이터그램을 127.0.0.1 UDP 대신 nagoing이 바로 받아 보내고, 받은 건 `receive_external`로 바로 복호화→tun.
+  패킷마다 sendto/recvfrom 둘과 스레드 넘김이 빠진다. 비어 있으면(nagoing 끔) 엔진은 원래 UDP 그대로.
+  엔진→nagoing은 강한 참조, nagoing→엔진은 약한 참조라 어느 쪽을 먼저 멈춰도 소켓이 남지 않고, 붙기 전·뗀 뒤엔 로컬 UDP로 폴백.
+- **부분 봉인(v3)**: 큰 프레임은 앞 64바이트(nagoing 헤더 + WG 헤더)만 봉인하고 나머지(이미 WG 암호문)는 그대로 싣는다.
+  320바이트 이하 프레임(컨트롤·작은 DATA, 패딩 포함)은 통째로. 카운터·헤더는 인증되므로 재전송·위조 방어는 같다.
+  카운터는 아래 40비트만 싣고(QUIC 패킷 번호처럼 복원) ring의 QUIC 헤더 보호로 가린다.
+- **FEC 디코더**: 받은 조각을 저장하지 않고 그룹마다 XOR 누적 하나만(패킷마다 할당·복사 없음), 표 정리는 세대가 바뀔 때만,
+  XOR은 8바이트씩.
+- **버그 수정**: 로컬 포트 보호가 WG 데이터 길이를 16의 배수로 봐서 NepTUN(패딩 안 함)의 데이터 패킷 대부분을 버렸다
+  (2.1.5 build 36 ~ 2.1.6). 데이터는 32바이트 이상이면 받는다.
+- v2와 호환 안 됨 → 서버와 앱(2.1.7)을 같이 올린다.
+
+**클라 CPU (리눅스 벤치 `examples/nagoing_attach_bench.rs`, 클라·서버 다른 프로세스·다른 코어, MTU 1380 왕복, FEC 켬)**
+
+| | 처리량(각 방향) | 클라 1GB당 CPU초 |
+|---|---|---|
+| WG만(nagoing 없음, 바닥) | ~890 Mbps | ~5.3 |
+| 2.1.6 방식(로컬 홉 + 전체 재암호화 + 옛 FEC) | ~350 Mbps | ~15.0 |
+| **2.1.7 (직결 + 부분 봉인 + 새 FEC)** | **~555 Mbps** | **~8.6 (−43%)** |
+
+남은 차이(WG만 대비)는 받는 쪽이 엔진 루프가 아니라 nagoing 스레드에서 돌아 생기는 깨움·넘김이다. callgrind로 보면 사용자 공간
+명령의 대부분은 이제 WG 자신의 암호화(ChaCha20-Poly1305)다.
+
 ### 아직 남은 것
 
 - PSK(`nago-obfs-v1`)가 공개 소스에 있다 — v2에선 HELLO를 가리는 용도뿐이라 보안 영향은 작지만, DPI가 HELLO를 풀어
@@ -183,4 +209,4 @@ cargo run --release --example nagoing_proxy -- client <psk> <server_ip> 51821 44
 - **안드로이드** — iOS와 같은 FFI로 `NeptunVpnService`에 nagoing 경로 추가.
 - **운영 강화** — 브라우저 지문(uTLS)/진짜 QUIC, r>1 Reed–Solomon(2개 이상 동시 손실), 혼잡 제어.
 
-코드: `NagoTun/src/nagoing/`(`obfs`·`frame`·`fec`·`transport`·`proxy`), 예제 `NagoTun/examples/nagoing_*.rs`.
+코드: `NagoTun/src/nagoing/`(`crypto`·`frame`·`fec`·`transport`·`proxy`), 예제 `NagoTun/examples/nagoing_*.rs`.

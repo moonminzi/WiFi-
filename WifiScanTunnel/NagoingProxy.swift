@@ -67,6 +67,16 @@ final class NagoingProxy {
         networkChanged()
     }
 
+    /// NagoTun 엔진에 바로 붙인다 — 엔진이 암호화한 WG 패킷을 로컬 UDP(127.0.0.1) 대신 이 프록시가 바로 받아 보내고,
+    /// 받은 건 바로 엔진에 넣는다(패킷마다 시스템 호출 둘·스레드 넘김이 빠짐). 실패하면 로컬 UDP로 그대로 돈다.
+    @discardableResult
+    func attach(to engine: NeptunEngine) -> Bool {
+        withClient { client in
+            guard let client, let tun = engine.rawHandle else { return false }
+            return nago_nagoing_attach(client, tun) == 0
+        }
+    }
+
     /// 경로가 바뀌었다고 알려 전송을 다시 세운다(watchdog/NWPathMonitor에서 호출). 바로 돌아온다.
     func networkChanged() {
         withClient { client in

@@ -7,7 +7,6 @@
 //!
 //! 구성:
 //! - `crypto`    v2 보안: WG 키로 인증한 HELLO, 세션 AEAD(ChaCha20-Poly1305), 리플레이 창
-//! - `obfs`      ChaCha20 블록 함수(카운터 가리기 마스크용)
 //! - `frame`     평문 프레임 인코드/디코드
 //! - `fec`       인터리브 XOR 손실 보정
 //! - `transport` UDP(QUIC long/short 헤더)·TCP(rustls TLS 1.3) 전송
@@ -19,14 +18,13 @@
 pub mod crypto;
 pub mod fec;
 pub mod frame;
-pub mod obfs;
 pub mod proxy;
 pub mod testcert;
 pub mod transport;
 
 pub use proxy::{
-    run_client, run_server, ClientConfig, ClientHandle, ClientStats, FecParams, Prefer,
-    ServerConfig, ServerHandle,
+    run_client, run_server, ClientConfig, ClientHandle, ClientStats, DatagramSender, FecParams, Prefer,
+    ServerConfig, ServerHandle, Sink,
 };
 pub use crypto::Identity;
 pub use transport::Kind;

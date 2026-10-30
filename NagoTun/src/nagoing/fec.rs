@@ -63,9 +63,7 @@ impl FecEncoder {
         let lb = (payload.len() as u16).to_le_bytes();
         st.acc[0] ^= lb[0];
         st.acc[1] ^= lb[1];
-        for (i, &b) in payload.iter().enumerate() {
-            st.acc[2 + i] ^= b;
-        }
+        xor_into(&mut st.acc[2..], payload);
         st.count += 1;
         st.first.get_or_insert_with(Instant::now);
 
@@ -100,12 +98,50 @@ impl FecEncoder {
     }
 }
 
+/// dst ^= src (dst가 src보다 길거나 같다). 8바이트씩 — 컴파일러가 SIMD로 펴서 바이트 루프보다 훨씬 빠르다.
+fn xor_into(dst: &mut [u8], src: &[u8]) {
+    let dst = &mut dst[..src.len()];
+    let mut d8 = dst.chunks_exact_mut(8);
+    let mut s8 = src.chunks_exact(8);
+    for (d, s) in (&mut d8).zip(&mut s8) {
+        let v = u64::from_ne_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]])
+            ^ u64::from_ne_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
+        d.copy_from_slice(&v.to_ne_bytes());
+    }
+    for (d, s) in d8.into_remainder().iter_mut().zip(s8.remainder()) {
+        *d ^= s;
+    }
+}
+
+/// 한 그룹(세대)의 복구 상태. 받은 조각을 따로 저장하지 않고 **XOR 누적 하나**만 든다:
+/// acc = 패리티 ⊕ 받은 데이터들 → 데이터가 k-1개 왔으면 acc가 곧 빠진 조각이다(패킷마다 할당·복사 없음).
 struct GroupDec {
     k: u8,
-    data: Vec<Option<Vec<u8>>>, // index -> [len:u16][payload] 형태로 저장
+    seen: [u64; 4], // 받은 데이터 index 비트(k ≤ 255)
     have_data: u8,
-    parity: Option<Vec<u8>>,
+    have_parity: bool,
+    acc: Vec<u8>, // [len:u16][payload] 표현들의 XOR(짧은 건 0으로 늘린 것)
     done: bool,
+}
+
+impl GroupDec {
+    fn new(k: u8) -> Self {
+        GroupDec { k, seen: [0; 4], have_data: 0, have_parity: false, acc: Vec::new(), done: false }
+    }
+
+    fn mix(&mut self, len_prefix: Option<u16>, bytes: &[u8]) {
+        let off = if len_prefix.is_some() { 2 } else { 0 };
+        let need = off + bytes.len();
+        if self.acc.len() < need {
+            self.acc.resize(need, 0);
+        }
+        if let Some(l) = len_prefix {
+            let lb = l.to_le_bytes();
+            self.acc[0] ^= lb[0];
+            self.acc[1] ^= lb[1];
+        }
+        xor_into(&mut self.acc[off..], bytes);
+    }
 }
 
 #[derive(Default)]
@@ -135,15 +171,21 @@ impl FecDecoder {
     fn touch(&mut self, group: u16, gen: u16) {
         let latest = self.latest_gen.entry(group).or_insert(gen);
         if gen_distance(gen, *latest) < 0x8000 {
+            if gen == *latest {
+                return; // 같은 세대 — 정리할 것 없음(패킷마다 표를 훑지 않게)
+            }
             *latest = gen;
         } else if gen_distance(*latest, gen) > RESET_GAP {
             // 지금보다 한참 '과거' 세대 = 상대 인코더가 새로 시작했다(서버 재시작·세션 재생성으로 gen이 0부터).
             // 옛 기준을 들고 있으면 새 세대가 전부 '오래된 것'으로 지워져 FEC가 영영 안 된다 → 이 그룹을 새로 시작.
             *latest = gen;
             self.groups.retain(|&kk, _| (kk >> 16) as u16 != group);
+            return;
+        } else {
+            return; // 조금 늦게 온 옛 세대 — 그대로 둔다
         }
-        // 오래된 세대 정리: 같은 그룹에서 현재 세대보다 4 이상 오래된 것 버림(메모리 상한).
-        let cur = *self.latest_gen.get(&group).unwrap();
+        // 세대가 넘어갈 때만: 같은 그룹에서 현재 세대보다 4 이상 오래된 것 버림(메모리 상한).
+        let cur = gen;
         self.groups.retain(|&kk, _| {
             let g = (kk >> 16) as u16;
             let ge = (kk & 0xFFFF) as u16;
@@ -151,95 +193,63 @@ impl FecDecoder {
         });
     }
 
-    /// 데이터 조각 도착. (받은 조각 자체는 호출자가 이미 위로 넘겼다고 가정; 여기서는 복구용으로만 모은다.)
+    /// 데이터 조각 도착. (받은 조각 자체는 호출자가 이미 위로 넘겼다고 가정; 여기서는 복구용으로만 섞는다.)
     /// 복구되는 빠진 조각이 있으면 deliver로 넘긴다.
     pub fn on_data<F: FnMut(&[u8])>(&mut self, group: u16, gen: u16, index: u8, k: u8, payload: &[u8], deliver: F) {
         self.touch(group, gen);
-        let entry = self.groups.entry(key_of(group, gen)).or_insert_with(|| GroupDec {
-            k,
-            data: (0..k).map(|_| None).collect(),
-            have_data: 0,
-            parity: None,
-            done: false,
-        });
-        if entry.done || index as usize >= entry.data.len() {
+        let entry = self.groups.entry(key_of(group, gen)).or_insert_with(|| GroupDec::new(k));
+        if entry.done || index >= entry.k {
             return;
         }
-        if entry.data[index as usize].is_none() {
-            // [len:u16][payload]로 저장(복구 계산과 같은 표현)
-            let mut buf = Vec::with_capacity(2 + payload.len());
-            buf.extend_from_slice(&(payload.len() as u16).to_le_bytes());
-            buf.extend_from_slice(payload);
-            entry.data[index as usize] = Some(buf);
-            entry.have_data += 1;
+        let (w, bit) = ((index / 64) as usize, 1u64 << (index % 64));
+        if entry.seen[w] & bit != 0 {
+            return; // 중복
         }
+        entry.seen[w] |= bit;
+        entry.have_data += 1;
+        entry.mix(Some(payload.len() as u16), payload);
         Self::try_recover(entry, deliver);
     }
 
     /// 패리티 조각 도착. 복구 가능하면 deliver로 넘긴다.
     pub fn on_parity<F: FnMut(&[u8])>(&mut self, group: u16, gen: u16, k: u8, payload: &[u8], deliver: F) {
         self.touch(group, gen);
-        let entry = self.groups.entry(key_of(group, gen)).or_insert_with(|| GroupDec {
-            k,
-            data: (0..k).map(|_| None).collect(),
-            have_data: 0,
-            parity: None,
-            done: false,
-        });
-        if entry.done {
+        let entry = self.groups.entry(key_of(group, gen)).or_insert_with(|| GroupDec::new(k));
+        if entry.done || entry.have_parity {
             return;
         }
         // 덜 찬 채 닫힌 그룹(flush_stale)은 패리티의 k가 데이터 조각들의 k보다 작다 → 그 개수로 줄인다.
         if k >= 1 && k < entry.k {
             entry.k = k;
-            entry.data.truncate(k as usize);
-            entry.have_data = entry.data.iter().filter(|d| d.is_some()).count() as u8;
+            let mut n = 0u32;
+            for i in 0..k {
+                if entry.seen[(i / 64) as usize] & (1u64 << (i % 64)) != 0 {
+                    n += 1;
+                }
+            }
+            entry.have_data = n as u8;
         }
-        if entry.parity.is_none() {
-            entry.parity = Some(payload.to_vec());
-        }
+        entry.have_parity = true;
+        entry.mix(None, payload);
         Self::try_recover(entry, deliver);
     }
 
-    /// 패리티 + (k-1)개 데이터가 있으면 빠진 하나를 복구한다.
+    /// 패리티 + (k-1)개 데이터가 섞였으면 누적이 곧 빠진 하나다.
     fn try_recover<F: FnMut(&[u8])>(entry: &mut GroupDec, mut deliver: F) {
-        if entry.done {
+        if entry.done || !entry.have_parity {
             return;
         }
-        let parity = match &entry.parity {
-            Some(p) => p,
-            None => return,
-        };
-        if entry.have_data + 1 != entry.k {
-            return; // 빠진 게 0개(복구 불필요)거나 2개 이상(복구 불가)
-        }
-        // 빠진 index 찾기
-        let missing = match entry.data.iter().position(|d| d.is_none()) {
-            Some(i) => i,
-            None => return,
-        };
-        // recovered = parity XOR (나머지 데이터들), 모두 [len:u16][payload] 표현, 0으로 확장
-        let mut rec = parity.clone();
-        for d in entry.data.iter().flatten() {
-            if rec.len() < d.len() {
-                rec.resize(d.len(), 0);
-            }
-            for (i, &b) in d.iter().enumerate() {
-                rec[i] ^= b;
-            }
-        }
-        // 앞 2바이트 = 원래 길이
-        if rec.len() < 2 {
-            entry.done = true;
+        if entry.have_data >= entry.k {
+            entry.done = true; // 다 왔다 — 복구할 것 없음
             return;
         }
-        let len = u16::from_le_bytes([rec[0], rec[1]]) as usize;
-        if 2 + len <= rec.len() {
-            deliver(&rec[2..2 + len]);
+        if entry.have_data + 1 != entry.k || entry.acc.len() < 2 {
+            return; // 2개 이상 빠짐(복구 불가) — 더 오길 기다린다
         }
-        // 복구한 조각을 채워 넣고 완료 표시
-        entry.data[missing] = Some(rec);
-        entry.have_data += 1;
+        let len = u16::from_le_bytes([entry.acc[0], entry.acc[1]]) as usize;
+        if 2 + len <= entry.acc.len() {
+            deliver(&entry.acc[2..2 + len]);
+        }
         entry.done = true;
     }
 }

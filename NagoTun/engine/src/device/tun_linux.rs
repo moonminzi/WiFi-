@@ -127,8 +127,9 @@ impl TunSocket {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn new_mock_from_fd(fd: RawFd) -> TunSocket {
+    /// 가짜 tun(ioctl 없이 fd를 그대로). 엔진 시험과, `mock-tun` 기능을 켠 nago_tun 시험·벤치에서만.
+    #[cfg(any(test, feature = "mock-tun"))]
+    pub fn new_mock_from_fd(fd: RawFd) -> TunSocket {
         TunSocket {
             fd,
             name: "mock".to_owned(),

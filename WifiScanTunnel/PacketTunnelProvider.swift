@@ -138,7 +138,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             startNagoing(settings, configuration: configuration, onDemand: onDemand, completionHandler: completionHandler)
             return
         }
-        let engineLabel = settings.engine == "go" ? "go" : "nagotun ×\(settings.loops)"
+        let engineLabel = settings.engine == "go" ? "go" : "NagoTun ×\(settings.loops)"
         journal.add("start \(engineLabel) → \(settings.endpoint)" + (onDemand ? " · on-demand" : ""))
         let done: (Error?) -> Void = { [weak self] error in
             Task { @MainActor in
@@ -339,6 +339,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     try engine.start(tunFD: fd, privateKey: s.privateKey, serverPub: s.serverPub,
                                      endpoint: s.endpoint, loops: s.loops)
                     self.neptun = engine
+                    // 엔진 ↔ nagoing 직결(로컬 UDP 홉 없음). 안 되면 로컬 포트로 그대로 돈다.
+                    self.journal.add(proxy.attach(to: engine) ? "nagoing: attached to NagoTun" : "nagoing: local hop")
                     self.startWatchdog(quick: onDemand)
                     self.startSampler()
                     completionHandler(nil)
@@ -364,7 +366,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
                 guard let fd = NeptunEngine.utunFileDescriptor() else {
                     completionHandler(NSError(domain: "nago.neptun", code: 2,
-                                              userInfo: [NSLocalizedDescriptionKey: "nagotun: utun not found"]))
+                                              userInfo: [NSLocalizedDescriptionKey: "NagoTun: utun not found"]))
                     return
                 }
                 let engine = NeptunEngine()
@@ -509,6 +511,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                                         tcpPort: state.tcpPort, localPort: state.localPort, settings: state.settings,
                                         privateKey: s.privateKey, serverPub: serverPub)
                         self.nagoing = fresh
+                        if let engine = self.neptun {
+                            fresh.attach(to: engine)
+                        }
                         state.serverIP = target.address
                         self.nagoingState = state
                         journal.add("\(code): nagoing → \(target.address)")
