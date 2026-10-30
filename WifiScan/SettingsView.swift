@@ -152,6 +152,9 @@ struct SettingsView: View {
                     TermDivider()
                     toggle("--nagoing", isOn: $nagoOn)
                     if nagoOn {
+                        Text("tunnels wireguard through networks that block vpns: quic-style udp first, real tls 1.3 on tcp 443 if udp is blocked. turn on only where wg won't connect — it costs some speed and battery.")
+                            .font(Term.mono(12))
+                            .foregroundStyle(Term.muted)
                         row("prefer") {
                             TermChoice(options: NagoingSettings.Prefer.allCases.map { (label: $0.label, value: $0) },
                                        selection: $nagoPrefer)
