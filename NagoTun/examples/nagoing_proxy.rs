@@ -113,6 +113,7 @@ fn main() {
                 sni: "www.cloudflare.com".into(),
                 identity,
                 server_pub: key32(&args[8], "server_pub"),
+                protect: None,
             };
             let handle = run_client(cfg).unwrap_or_else(|e| {
                 eprintln!("클라 시작 실패: {e}");

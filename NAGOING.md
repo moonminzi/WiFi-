@@ -206,7 +206,7 @@ cargo run --release --example nagoing_proxy -- client <psk> <server_ip> 51821 44
 
 - **서버에 실제 롤아웃** — 위 스크립트를 kr/jp/us/uk 4대에 적용 + SG 열기. **이게 돼야 iOS의 nagoing이 실제로 붙는다**
   (지금은 앱에서 고를 수 있고 양쪽 다 빌드·검증되지만, 서버에 프록시가 떠 있어야 연결된다).
-- **안드로이드** — iOS와 같은 FFI로 `NeptunVpnService`에 nagoing 경로 추가.
+- ~~안드로이드~~ — 2.1.7에서 됨: `NagoingNative.kt` → `src/android.rs`, 엔진에 바로 붙이고 소켓은 `VpnService.protect()`로 터널 밖에.
 - **운영 강화** — 브라우저 지문(uTLS)/진짜 QUIC, r>1 Reed–Solomon(2개 이상 동시 손실), 혼잡 제어.
 
 코드: `NagoTun/src/nagoing/`(`crypto`·`frame`·`fec`·`transport`·`proxy`), 예제 `NagoTun/examples/nagoing_*.rs`.

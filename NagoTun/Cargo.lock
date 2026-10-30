@@ -566,6 +566,7 @@ dependencies = [
  "nagotun_engine",
  "ring",
  "rustls",
+ "socket2",
  "x25519-dalek",
 ]
 

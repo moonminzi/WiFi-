@@ -6,6 +6,9 @@ on:
     paths: ['android/**', 'NagoTun/**', '.github/workflows/build-apk.yml']
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -60,3 +63,39 @@ jobs:
         with:
           name: NagoVPN-release-apk
           path: android/app/build/outputs/apk/release/app-release.apk
+
+      # 버전마다 릴리스 하나(android-2.1.7 같은 태그). 같은 버전을 다시 빌드하면 그 릴리스의 APK·설명만 바꾼다.
+      # 서명 키가 있으면 서명한 release APK(기존 앱 위에 덮어 깔림), 없으면 디버그 APK(com.nago.vpn.debug, 따로 깔림).
+      # 둘 다 비밀번호는 들어 있지 않다(앱 settings에서 입력). 설명은 release-notes/android-<버전>.md가 있으면 그것 + 설치 안내.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^ *versionName = "\(.*\)"/\1/p' android/app/build.gradle.kts)
+          code=$(sed -n 's/^ *versionCode = \([0-9]*\)/\1/p' android/app/build.gradle.kts)
+          tag="android-${version}"
+          if [ "$HAS_KEY" = "true" ]; then
+            asset="NAGO-VPN-${version}.apk"
+            cp android/app/build/outputs/apk/release/app-release.apk "$asset"
+            kind="서명한 release APK(com.nago.vpn) — 예전에 깐 NAGO VPN 위에 그대로 덮어 깔립니다."
+          else
+            asset="NAGO-VPN-${version}-debug.apk"
+            cp android/app/build/outputs/apk/debug/app-debug.apk "$asset"
+            kind="디버그 APK(com.nago.vpn.debug) — 서명 키가 달라 예전 앱과 따로 깔립니다."
+          fi
+          {
+            if [ -f "release-notes/android-${version}.md" ]; then cat "release-notes/android-${version}.md"; echo; fi
+            echo "---"
+            echo "- \`${asset}\` — ${kind}"
+            echo
+            echo "NAGO VPN Android ${version} (${code}) · \`${GITHUB_SHA::7}\`"
+            echo
+            echo "비밀번호는 들어 있지 않습니다 — 앱 settings → account에서 입력하세요. Android 13 이상, ARM 폰(arm64-v8a · armeabi-v7a)."
+          } > notes.md
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset" --clobber
+            gh release edit "$tag" --title "NAGO VPN Android ${version}" --notes-file notes.md
+          else
+            gh release create "$tag" "$asset" --target "$GITHUB_SHA" \
+              --title "NAGO VPN Android ${version}" --notes-file notes.md
+          fi

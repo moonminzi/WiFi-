@@ -677,7 +677,13 @@ pub struct ClientConfig {
     pub identity: [u8; 32],
     /// 서버의 WireGuard 공개키(설정의 serverPub). HELLO_ACK가 진짜 서버의 것인지 이걸로 확인한다.
     pub server_pub: [u8; 32],
+    /// 서버로 가는 소켓을 만들 때마다 부른다(연결 전). 안드로이드는 앱도 VPN 안에 있어서
+    /// `VpnService.protect(fd)`로 이 소켓만 터널 밖으로 뺀다. 다른 곳은 None.
+    pub protect: Option<Protect>,
 }
+
+/// 소켓을 터널 밖으로 빼는 함수(안드로이드 `VpnService.protect`). false면 못 뺀 것.
+pub type Protect = Arc<dyn Fn(i32) -> bool + Send + Sync>;
 
 struct ClientInner {
     hs: HandshakeKey,
@@ -795,10 +801,21 @@ impl ClientInner {
         self.try_tcp()
     }
 
+    /// 서버로 가는 소켓을 터널 밖으로 뺀다(안드로이드). 못 빼면 그 소켓은 터널로 돌아 들어가니 실패로 본다.
+    fn protect(&self, sock: &impl std::os::fd::AsRawFd) -> io::Result<()> {
+        match &self.cfg.protect {
+            Some(protect) if !protect(sock.as_raw_fd()) => {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "protect failed"))
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn try_udp(&self) -> io::Result<Conn> {
         let server = self.cfg.server_udp;
         let bind = if server.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
         let sock = UdpSocket::bind(bind)?;
+        self.protect(&sock)?;
         sock.connect(server)?;
         sock.set_read_timeout(Some(READ_TIMEOUT))?;
         let cid = rand_u64() as u32;
@@ -833,7 +850,12 @@ impl ClientInner {
 
     fn try_tcp(&self) -> io::Result<Conn> {
         // connect에 제한을 둬서 SYN이 사라지는 망에서 오래 매달리지 않게 한다.
-        let stream = TcpStream::connect_timeout(&self.cfg.server_tcp, TCP_STEP_TIMEOUT)?;
+        // 터널 밖으로 빼야 하면(protect) 연결하기 전에 빼야 해서 소켓을 먼저 만든다.
+        let server = self.cfg.server_tcp;
+        let socket = socket2::Socket::new(socket2::Domain::for_address(server), socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+        self.protect(&socket)?;
+        socket.connect_timeout(&server.into(), TCP_STEP_TIMEOUT)?;
+        let stream: TcpStream = socket.into();
         stream.set_nodelay(true)?;
         // 짧은 읽기 제한으로 데드라인·stop을 자주 확인한다.
         stream.set_read_timeout(Some(READ_TIMEOUT))?;
@@ -1202,6 +1224,7 @@ mod tests {
             sni: "www.cloudflare.com".into(),
             identity: random_key(),
             server_pub: Identity::from_bytes(*server_key).public(),
+            protect: None,
         }
     }
 

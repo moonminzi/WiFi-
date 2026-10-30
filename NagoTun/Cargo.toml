@@ -28,6 +28,8 @@ engine = { package = "nagotun_engine", path = "engine", features = ["device"] }
 # 0.2.187부터 iOS에서 sockaddr_ctl 등을 macOS 전용으로 막아 nix(neptun 의존성)가 iOS로 안 빌드됨. NepTUN이 쓰는 버전으로 고정.
 libc = "=0.2.186"
 base64 = "0.22"
+# nagoing TCP 소켓을 연결 전에 만들어 두려고(안드로이드 protect는 connect 전에 해야 한다). 엔진과 같은 버전.
+socket2 = "0.6"
 
 # 안드로이드 앱(Kotlin)에서 부르는 JNI 함수용(src/android.rs)
 [target.'cfg(target_os = "android")'.dependencies]

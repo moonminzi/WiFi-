@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use base64::Engine;
 
 use engine::device::tun::TunSocket;
-use engine::device::{DeviceConfig, DeviceHandle, MakeExternalNeptunNoop};
+use engine::device::{DeviceConfig, DeviceHandle, MakeExternalNeptun, MakeExternalNeptunNoop};
 
 #[cfg(target_os = "android")]
 mod android;
@@ -111,6 +111,18 @@ fn device_config(threads: u32, queue: u32) -> DeviceConfig {
 ///   애플에선 NepTUN이 이 대기열(packet_workers)을 아예 만들지 않아서 값이 아무 영향이 없다
 #[no_mangle]
 pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u32, queue: u32) -> *mut NagoTun {
+    tun_start(tun_fd, uapi, threads, queue, Arc::new(MakeExternalNeptunNoop))
+}
+
+/// [`nago_tun_start`]에 소켓 빼기(`protect`)를 더한 것. 엔진이 서버로 가는 UDP 소켓을 만들 때마다 부른다
+/// (안드로이드: 앱도 VPN 안에 있어서 엔진 소켓만 `VpnService.protect`로 터널 밖으로 뺀다).
+pub(crate) fn tun_start(
+    tun_fd: c_int,
+    uapi: *const c_char,
+    threads: u32,
+    queue: u32,
+    protect: Arc<dyn MakeExternalNeptun>,
+) -> *mut NagoTun {
     let Some(cmd) = text(uapi).map(|c| normalize(&c)) else {
         return fail("uapi is not utf-8".into());
     };
@@ -118,7 +130,8 @@ pub extern "C" fn nago_tun_start(tun_fd: c_int, uapi: *const c_char, threads: u3
         Ok(t) => t,
         Err(e) => return fail(format!("tun fd {tun_fd}: {e:?}")),
     };
-    let config = device_config(threads, queue);
+    let mut config = device_config(threads, queue);
+    config.protect = protect;
     let handle = match DeviceHandle::new_with_tun(tun, config) {
         Ok(h) => h,
         Err(e) => return fail(format!("device: {e:?}")),
@@ -236,6 +249,30 @@ pub extern "C" fn nago_nagoing_client_start(
     private_key: *const c_char,
     server_pub: *const c_char,
 ) -> *mut NagoingClient {
+    nagoing_start(
+        psk, server_ip, udp_port, tcp_port, local_ip, local_port, fec_k, fec_groups, fec_on, prefer, sni, private_key,
+        server_pub, None,
+    )
+}
+
+/// [`nago_nagoing_client_start`]에 소켓 빼기(`protect`, 안드로이드)를 더한 것.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn nagoing_start(
+    psk: *const c_char,
+    server_ip: *const c_char,
+    udp_port: u16,
+    tcp_port: u16,
+    local_ip: *const c_char,
+    local_port: u16,
+    fec_k: u8,
+    fec_groups: u16,
+    fec_on: c_int,
+    prefer: c_int,
+    sni: *const c_char,
+    private_key: *const c_char,
+    server_pub: *const c_char,
+    protect: Option<nagoing::proxy::Protect>,
+) -> *mut NagoingClient {
     let (Some(psk), Some(server_ip), Some(local_ip)) = (text(psk), text(server_ip), text(local_ip)) else {
         return fail("nagoing: psk/server_ip/local_ip not utf-8".into());
     };
@@ -266,6 +303,7 @@ pub extern "C" fn nago_nagoing_client_start(
         sni: text(sni).unwrap_or_else(|| "www.cloudflare.com".into()),
         identity,
         server_pub,
+        protect,
     };
     match nagoing::run_client(cfg) {
         Ok(handle) => Box::into_raw(Box::new(NagoingClient { handle })),
@@ -407,6 +445,7 @@ mod tests {
             sni: "x".into(),
             identity: ck,
             server_pub: spub,
+            protect: None,
         })
         .unwrap();
         let (ctun, cfar) = mock_tun();

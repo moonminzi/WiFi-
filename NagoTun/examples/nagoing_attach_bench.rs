@@ -132,6 +132,7 @@ fn client(mode: &str, secs: u64, window: usize) {
         sni: "x".into(),
         identity: CKEY,
         server_pub: spub,
+        protect: None,
     })
     .unwrap();
     let (tun, far) = mock_tun();

@@ -155,7 +155,7 @@ fn main() {
             fec: FecParams::default(),
         }).unwrap();
         let client = run_client(ClientConfig {
-            identity: CKEY, server_pub: Identity::from_bytes(SKEY).public(),
+            identity: CKEY, server_pub: Identity::from_bytes(SKEY).public(), protect: None,
             psk: psk.into(),
             server_udp: server.udp_addr(), server_tcp: server.tcp_addr(),
             local_bind: lo(0), fec: FecParams::default(), prefer: Prefer::Udp,
@@ -182,7 +182,7 @@ fn main() {
         // 핸드셰이크(앞 8개)는 통과, 이후 20개마다 3개 연속 손실(약 15%, 버스트).
         let (relay, relay_stop, dropped) = spawn_lossy_relay(server.udp_addr(), 8, 20, 3);
         let client = run_client(ClientConfig {
-            identity: CKEY, server_pub: Identity::from_bytes(SKEY).public(),
+            identity: CKEY, server_pub: Identity::from_bytes(SKEY).public(), protect: None,
             psk: psk.into(),
             server_udp: relay, server_tcp: server.tcp_addr(),
             local_bind: lo(0), fec, prefer: Prefer::Udp,
@@ -211,7 +211,7 @@ fn main() {
         // 클라에게 알려 주는 UDP 주소는 아무도 안 듣는 죽은 포트 → UDP 핸드셰이크 실패 → TCP로.
         let dead_udp = lo(1); // 포트 1: 바인드 안 됨
         let client = run_client(ClientConfig {
-            identity: CKEY, server_pub: Identity::from_bytes(SKEY).public(),
+            identity: CKEY, server_pub: Identity::from_bytes(SKEY).public(), protect: None,
             psk: psk.into(),
             server_udp: dead_udp, server_tcp: server.tcp_addr(),
             local_bind: lo(0), fec: FecParams::default(), prefer: Prefer::Auto,
