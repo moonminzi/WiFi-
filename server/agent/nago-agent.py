@@ -54,7 +54,7 @@ TOP_KEEP = 500
 HOME_STALE = 180          # 핸드셰이크가 이보다 오래 없으면 집 출구가 끊긴 것
 RULE_PRIO = 5000
 TABLE_BASE = 2000
-LEVELS = {"light": 1, "normal": 2, "strict": 3}
+LEVELS = {"light": 1, "normal": 2, "strict": 3, "extreme": 4}
 MAX_RULES = 500
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z0-9-]{2,63}$")
 
@@ -73,7 +73,7 @@ filters = {}              # 주소 → {"level", "block": set, "allow": set, "se
 def load_lists():
     """목록 파일이 바뀌었으면 다시 읽는다(하루 한 번 nago-dns-update). 못 읽으면 예전 것 그대로"""
     global blocklist, global_allow, lists_stamp
-    files = [(1, "light.txt"), (2, "normal.txt"), (3, "strict.txt")]
+    files = [(1, "light.txt"), (2, "normal.txt"), (3, "strict.txt"), (4, "extreme.txt")]
     stamp = []
     for _, name in files:
         try:
@@ -291,19 +291,79 @@ def recv_exact(s, n):
     return buf
 
 
+def read_name(msg, i):
+    """압축(포인터)까지 풀어 이름 하나를 읽는다 → (이름, 다음 위치). 이상하면 (None, None)"""
+    labels, end, hops = [], None, 0
+    while i < len(msg):
+        n = msg[i]
+        if n == 0:
+            return ".".join(labels).lower(), (end if end is not None else i + 1)
+        if n & 0xC0 == 0xC0:
+            if i + 1 >= len(msg) or hops > 20:
+                return None, None
+            if end is None:
+                end = i + 2
+            i, hops = ((n & 0x3F) << 8) | msg[i + 1], hops + 1
+            continue
+        if n & 0xC0 or i + 1 + n > len(msg):
+            return None, None
+        labels.append(msg[i + 1:i + 1 + n].decode("ascii", "replace"))
+        i += 1 + n
+    return None, None
+
+
+def cnames(msg):
+    """응답의 CNAME 목적지들(추적기가 사이트 하위 도메인으로 숨는 걸 잡으려고)"""
+    out = []
+    try:
+        qd, an = struct.unpack(">HH", msg[4:8])
+        i = 12
+        for _ in range(qd):
+            _, i = read_name(msg, i)
+            if i is None:
+                return out
+            i += 4
+        for _ in range(an):
+            _, i = read_name(msg, i)
+            if i is None or i + 10 > len(msg):
+                return out
+            rtype, _, _, rdlen = struct.unpack(">HHIH", msg[i:i + 10])
+            i += 10
+            if rtype == 5:
+                target, _ = read_name(msg, i)
+                if target:
+                    out.append(target)
+            i += rdlen
+    except (struct.error, IndexError):
+        pass
+    return out
+
+
 def resolve(pkt, ip, tcp):
     q = question(pkt)
-    if q and ip != ADDR and not ip.startswith("127."):
-        name, qtype, qend = q
-        blocked, reason = verdict(ip, name)
-        with lock:
-            record(ip, name, qtype, blocked, reason)
-            f = filters.get(ip)
-            if f:
-                f["seen"] = time.time()
-        if blocked:
-            return nxdomain(pkt, qend)
-    return forward(pkt, tcp)
+    if not q or ip == ADDR or ip.startswith("127."):
+        return forward(pkt, tcp)
+    name, qtype, qend = q
+    blocked, reason = verdict(ip, name)
+    f = filters.get(ip)
+    reply, forwarded = None, False
+    # extreme: 답의 CNAME 목적지까지 본다(내가 이 이름을 풀어 둔 경우는 빼고)
+    if not blocked and f and LEVELS.get(f["level"], 2) >= 4:
+        labels = name.split(".")
+        mine_allowed = any(".".join(labels[i:]) in f["allow"] for i in range(len(labels)))
+        reply, forwarded = forward(pkt, tcp), True
+        if reply and not mine_allowed:
+            for target in cnames(reply):
+                if verdict(ip, target)[0]:
+                    blocked, reason = True, "cname"
+                    break
+    with lock:
+        record(ip, name, qtype, blocked, reason)
+        if f:
+            f["seen"] = time.time()
+    if blocked:
+        return nxdomain(pkt, qend)
+    return reply if forwarded else forward(pkt, tcp)
 
 
 def serve_udp():

@@ -76,7 +76,7 @@ final class NagoAgent {
         let t: TimeInterval
         let d: String
         let b: Bool
-        /// 막힌 까닭: "list"(차단 목록) · "mine"(내 규칙)
+        /// 막힌 까닭: "list"(차단 목록) · "mine"(내 규칙) · "cname"(실제 목적지가 차단 목록, extreme)
         var r: String? = nil
         var id: Int { s }
     }

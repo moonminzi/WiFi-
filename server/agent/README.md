@@ -7,15 +7,16 @@ VPN 안쪽에서만 닿는 작은 HTTP 서버(`10.53.53.53:8053`, 표준 라이�
 |---|---|
 | `GET /v1/me` | 오늘(KST) DNS 조회·차단 수, 많이 막힌 도메인, 내 강도·규칙(`filter`), 지금 출구, 집 출구 목록 |
 | `GET /v1/feed?after=N` | 실시간 도메인 흐름(최근 300개) |
-| `POST /v1/dns {"level": "light"\|"normal"\|"strict", "block": […], "allow": […]}` | 내 광고 차단 강도·내 규칙(나만 막기·풀기, 각 500개까지) |
+| `POST /v1/dns {"level": "light"\|"normal"\|"strict"\|"extreme", "block": […], "allow": […]}` | 내 광고 차단 강도·내 규칙(나만 막기·풀기, 각 500개까지) |
 | `POST /v1/exit {"via": "server" \| "h240"}` | 출구 바꾸기(wg 주소만 — IKEv2 주소는 연결마다 바뀜) |
 | `POST /v1/home {"name": "…"}` / `{"off": true}` | 집 노드가 자기를 출구로 알림 / 내림 |
 
 - **DNS(사람별 광고 차단)**: 에이전트가 `10.53.53.53:53`(UDP·TCP)을 직접 받는다. 출발 주소로 사람을 알아서
   그 사람의 강도·규칙으로 판단하고, 막으면 NXDOMAIN, 아니면 뒤의 dnsmasq(`127.0.0.1:5354`, 목록 없는 캐시·전달)로 넘긴다.
   - 판단 순서: 내 풀기 → 내 막기 → 모두에게 풀기(`/etc/nago-dns/allow.conf`) → 강도별 목록. 하위 도메인까지(`ads.x.com`이면 `a.ads.x.com`도)
-  - 목록(매일 `nago-dns-update`, `/var/lib/nago-dns`): light = OISD small · normal = OISD big + YousList + HaGeZi Pop-Up Ads(팝업·리다이렉트) · strict = normal + HaGeZi Pro++.
+  - 목록(매일 `nago-dns-update`, `/var/lib/nago-dns`): light = OISD small · normal = OISD big + YousList + HaGeZi Pop-Up Ads(팝업·리다이렉트) · strict = normal + HaGeZi Pro++ · extreme = strict + HaGeZi Ultimate + TIF medium(악성·피싱·사기) + DoH·VPN 우회.
     받다 끊긴 목록은 버리고 이전 것을 쓴다. 에이전트는 파일이 바뀌면 1분 안에 다시 읽는다
+  - extreme은 답의 CNAME 목적지까지 본다 — 사이트 하위 이름으로 숨은 추적기(feed `r: "cname"`). 그 이름을 내가 풀어 뒀으면 건너뜀
   - 아무것도 안 보낸 사람(예전 앱·안드로이드·IKEv2 adblock)은 normal — 예전과 같다. 피어를 다시 설정할 필요 없다
   - wg 사람의 강도·규칙은 `state.json`에 남는다(IKEv2는 주소가 바뀌어 메모리에만, 앱이 붙을 때마다 다시 보낸다)
   - 사람별 숫자·도메인 흐름은 메모리에만(재시작하면 0). 디스크·journald에 도메인이 남지 않는다

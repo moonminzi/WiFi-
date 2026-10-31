@@ -6,13 +6,14 @@ import Foundation
 /// 다음 refresh 때 다시 맞춘다
 enum AdblockFilter {
     enum Level: String, CaseIterable {
-        case light, normal, strict
+        case light, normal, strict, extreme
 
         var note: String {
             switch self {
             case .light: return "ads only · fewest broken sites"
             case .normal: return "ads + trackers + korean ads + pop-up redirects"
             case .strict: return "+ more trackers · may break some sites"
+            case .extreme: return "+ malware, scams, hidden trackers, dns bypass · breaks things · allow in live"
             }
         }
     }

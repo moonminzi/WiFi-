@@ -9,7 +9,7 @@
 #   normal 목록, 10.53.53.53)를 띄운다 — 광고 차단 쓰는 사람의 인터넷이 멈추지 않게. 되돌리기: 이 스크립트를 다시 실행
 #
 # - 목록(매일): light = OISD small · normal = OISD big + YousList(한국 광고) + HaGeZi Pop-Up Ads(팝업·리다이렉트)
-#   · strict = normal + HaGeZi Pro++
+#   · strict = normal + HaGeZi Pro++ · extreme = strict + HaGeZi Ultimate + TIF medium + DoH/VPN 우회, 답의 CNAME까지 검사
 # - 숫자·도메인 흐름은 에이전트 메모리에만(디스크·journald에 안 남음). 저장하는 건 집 출구와 wg 사람의 강도·규칙뿐
 # - 사용: sudo bash setup-agent.sh   (같은 폴더의 nago-agent.py를 깐다)
 set -euo pipefail
@@ -19,7 +19,7 @@ DNS_IP=10.53.53.53
 mkdir -p /var/lib/nago-dns /var/lib/nago-agent /etc/nago-dns
 touch /var/lib/nago-dns/block.conf
 
-echo ">> 목록 받기(light · normal · strict)"
+echo ">> 목록 받기(light · normal · strict · extreme)"
 cat > /usr/local/sbin/nago-dns-update <<'SH'
 #!/bin/bash
 # 차단 목록을 새로 받는다. 받은 게 이상하면(너무 적음) 그 단계는 이전 목록을 그대로 둔다.
@@ -58,6 +58,18 @@ oisd small "$T/small" \
   && local_of < "$T/small" | tr 'A-Z' 'a-z' | sort -u > "$T/light.txt" && keep "$T/light.txt" light 20000
 get https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro.plus-onlydomains.txt 180 "$T/pro" \
   && grep -E '^[A-Za-z0-9_.-]+$' "$T/pro" | tr 'A-Z' 'a-z' | sort -u > "$T/strict.txt" && keep "$T/strict.txt" strict 100000
+# extreme = strict + HaGeZi Ultimate + 위협(TIF medium: 악성·피싱·사기) + DoH·VPN 우회(앱이 제 DNS로 빠져나가는 것)
+# 셋 다 받아졌을 때만 바꾼다(하나라도 실패면 이전 것을 그대로, 처음이면 extreme 없이)
+H=https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard
+if get $H/ultimate-onlydomains.txt 180 "$T/ult" && get $H/tif.medium-onlydomains.txt 180 "$T/tif" \
+   && get $H/doh-vpn-proxy-bypass-onlydomains.txt 120 "$T/doh"; then
+  # one.one.one.one은 앱 net scan이 DNS 바꿔치기를 확인할 때 쓴다(막으면 거짓 경고)
+  cat "$T/ult" "$T/tif" "$T/doh" | grep -E '^[A-Za-z0-9_.-]+$' | tr 'A-Z' 'a-z' | grep -vx 'one\.one\.one\.one' \
+    | sort -u > "$T/extreme.txt"
+  keep "$T/extreme.txt" extreme 300000 || true
+else
+  logger -t nago-dns "update: extreme lists download failed, keeping the old one"
+fi
 # 비상용 dnsmasq가 떠 있으면 새 목록으로(평소엔 꺼져 있다 — 에이전트는 파일이 바뀌면 스스로 다시 읽는다)
 systemctl is-active -q nago-dns-fallback && systemctl restart nago-dns-fallback
 logger -t nago-dns "update: $(cat "$D/count" 2>/dev/null) normal domains"
@@ -67,6 +79,7 @@ chmod 755 /usr/local/sbin/nago-dns-update
 for f in light normal strict; do
   [ -s /var/lib/nago-dns/$f.txt ] || { echo "$f 목록을 못 받았다 — 바꾸지 않고 멈춤" >&2; exit 1; }
 done
+[ -s /var/lib/nago-dns/extreme.txt ] || echo "! extreme 목록을 못 받았다 — extreme은 strict처럼 막힌다(다음 날 다시 받음)" >&2
 
 echo ">> dnsmasq: 평소엔 캐시·전달만(127.0.0.1:5354), 비상용은 예전처럼 normal 목록(10.53.53.53)"
 cat > /etc/nago-dns/dnsmasq.conf <<'EOF'

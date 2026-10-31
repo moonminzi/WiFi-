@@ -226,8 +226,9 @@ struct LiveView: View {
                 .foregroundStyle(item.b ? Term.red : Term.text)
                 .lineLimit(1)
                 .truncationMode(.middle)
-            if item.r == "mine" {
-                Text("mine").foregroundStyle(Term.muted)
+            if item.r == "mine" || item.r == "cname" {
+                // mine: 내 규칙 · cname: 이 이름은 괜찮은데 실제 목적지(CNAME)가 추적기라서(extreme)
+                Text(item.r ?? "").foregroundStyle(Term.muted)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
