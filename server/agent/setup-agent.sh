@@ -8,7 +8,8 @@
 #   nago-dns-guard(20초마다): 에이전트 DNS가 1분 동안 답이 없으면 에이전트를 멈추고 예전 dnsmasq(nago-dns-fallback,
 #   normal 목록, 10.53.53.53)를 띄운다 — 광고 차단 쓰는 사람의 인터넷이 멈추지 않게. 되돌리기: 이 스크립트를 다시 실행
 #
-# - 목록(매일): light = OISD small · normal = OISD big + YousList(한국 광고) · strict = normal + HaGeZi Pro++
+# - 목록(매일): light = OISD small · normal = OISD big + YousList(한국 광고) + HaGeZi Pop-Up Ads(팝업·리다이렉트)
+#   · strict = normal + HaGeZi Pro++
 # - 숫자·도메인 흐름은 에이전트 메모리에만(디스크·journald에 안 남음). 저장하는 건 집 출구와 wg 사람의 강도·규칙뿐
 # - 사용: sudo bash setup-agent.sh   (같은 폴더의 nago-agent.py를 깐다)
 set -euo pipefail
@@ -37,14 +38,18 @@ keep() {   # keep <받은 파일> <목록 이름> <최소 줄 수>
 get() { curl -fsSL --compressed --retry 2 --max-time "$2" -o "$3" "$1"; }
 oisd() { get "https://raw.githubusercontent.com/sjhgvr/oisd/main/dnsmasq2_$1.txt" 120 "$2" \
   || get "https://$1.oisd.nl/dnsmasq2" 600 "$2"; }
-big=0; yous=0
+big=0; yous=0; pop=0
 oisd big "$T/big" && big=1 || logger -t nago-dns "update: oisd big download failed"
 get https://raw.githubusercontent.com/yous/YousList/master/hosts.txt 120 "$T/yous" && yous=1 \
   || logger -t nago-dns "update: youslist download failed"
-# normal = OISD big + YousList. OISD가 안 받아졌으면 그대로 두고, YousList만 실패면 이전 목록이 없을 때만 OISD만으로
-if [ $big = 1 ] && { [ $yous = 1 ] || [ ! -s "$D/normal.txt" ]; }; then
+get https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/popupads-onlydomains.txt 120 "$T/pop" && pop=1 \
+  || logger -t nago-dns "update: hagezi pop-up ads download failed"
+# normal = OISD big + YousList + HaGeZi 팝업·리다이렉트 광고. OISD가 안 받아졌으면 그대로 두고,
+# 나머지 중 하나만 실패면 이전 목록이 없을 때만 받은 것만으로(있으면 이전 것을 그대로)
+if [ $big = 1 ] && { [ $yous = 1 ] && [ $pop = 1 ] || [ ! -s "$D/normal.txt" ]; }; then
   { local_of < "$T/big"
     [ $yous = 1 ] && awk '($1=="0.0.0.0"||$1=="127.0.0.1") && $2 ~ /^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$/ {print $2}' "$T/yous"
+    [ $pop = 1 ] && grep -E '^[A-Za-z0-9_.-]+$' "$T/pop"
   } | tr 'A-Z' 'a-z' | sort -u > "$T/normal.txt"
   keep "$T/normal.txt" normal 100000 && sed 's#.*#local=/&/#' "$T/normal.txt" > "$D/block.conf" \
     && wc -l < "$T/normal.txt" > "$D/count"

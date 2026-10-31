@@ -11,7 +11,7 @@ enum AdblockFilter {
         var note: String {
             switch self {
             case .light: return "ads only · fewest broken sites"
-            case .normal: return "ads + trackers + korean ads"
+            case .normal: return "ads + trackers + korean ads + pop-up redirects"
             case .strict: return "+ more trackers · may break some sites"
             }
         }
