@@ -16,8 +16,8 @@ struct SettingsView: View {
     @AppStorage("vpnAdblock") private var adblock = false
     /// 광고 차단 강도·내 규칙(AdblockFilter). 연결 중에도 바꿀 수 있고 바로 서버에 보낸다
     @AppStorage(AdblockFilter.Key.level) private var dnsLevel: AdblockFilter.Level = .normal
-    @AppStorage(AdblockFilter.Key.block) private var dnsBlock = ""
-    @AppStorage(AdblockFilter.Key.allow) private var dnsAllow = ""
+    @AppStorage(AdblockFilter.Key.block) private var ruleBlock = ""
+    @AppStorage(AdblockFilter.Key.allow) private var ruleAllow = ""
     @State private var newRule = ""
     @AppStorage("vpnAutoConnect") private var autoConnect: VPNAutoConnect = .off
     @AppStorage("vpnKillSwitch") private var killSwitch = false
@@ -101,7 +101,7 @@ struct SettingsView: View {
         .onChange(of: needsOurTunnel) { _, needed in
             if needed, !proto.usesTunnel { proto = .wireguard }
         }
-        .onChange(of: "\(dnsLevel.rawValue)|\(dnsBlock)|\(dnsAllow)") { _, _ in
+        .onChange(of: "\(dnsLevel.rawValue)|\(ruleBlock)|\(ruleAllow)") { _, _ in
             // 붙어 있으면 바로 서버에 보낸다(안 붙어 있으면 다음 연결 때 vpn 탭이 맞춘다)
             Task { await NagoAgent.shared.syncFilter() }
         }
@@ -284,8 +284,8 @@ struct SettingsView: View {
                     }
                 }
                 .disabled(AdblockFilter.clean(newRule) == nil)
-                let blocked = dnsBlock.split(separator: "\n").map(String.init)
-                let allowed = dnsAllow.split(separator: "\n").map(String.init)
+                let blocked = ruleBlock.split(separator: "\n").map(String.init)
+                let allowed = ruleAllow.split(separator: "\n").map(String.init)
                 if blocked.isEmpty && allowed.isEmpty {
                     Text("none yet · or long-press a domain in live")
                         .font(Term.mono(11.5))
@@ -326,8 +326,8 @@ struct SettingsView: View {
 
     /// AdblockFilter가 UserDefaults에 직접 쓰므로 @AppStorage 값을 다시 읽어 화면을 맞춘다
     private func reloadRules() {
-        dnsBlock = AdblockFilter.list(AdblockFilter.Key.block).joined(separator: "\n")
-        dnsAllow = AdblockFilter.list(AdblockFilter.Key.allow).joined(separator: "\n")
+        ruleBlock = AdblockFilter.list(AdblockFilter.Key.block).joined(separator: "\n")
+        ruleAllow = AdblockFilter.list(AdblockFilter.Key.allow).joined(separator: "\n")
     }
 
     private var customDNSRow: some View {
