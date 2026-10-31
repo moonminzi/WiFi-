@@ -31,6 +31,10 @@ server=8.8.8.8
 cache-size=10000
 conf-file=/var/lib/nago-dns/block.conf
 conf-file=/etc/nago-dns/allow.conf
+# nago-agent(server/agent): 질의 기록은 tmpfs에만(에이전트가 읽고 비움)
+log-queries=extra
+log-async=50
+log-facility=/run/nago-dns/queries.log
 EOF
 
 cat > /usr/local/sbin/nago-dns-update <<'SH'
@@ -68,6 +72,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+ExecStartPre=/bin/mkdir -p /run/nago-dns
+ExecStartPre=/bin/chown nobody:nogroup /run/nago-dns
 ExecStartPre=-/usr/sbin/ip link add nago-dns type dummy
 ExecStartPre=-/usr/sbin/ip addr add ${DNS_IP}/32 dev nago-dns
 ExecStartPre=/usr/sbin/ip link set nago-dns up

@@ -52,6 +52,10 @@ struct VPNView: View {
     @State private var scan = NetScan()
     /// 속도 측정(설정을 바꿔 가며 비교)
     @State private var speed = SpeedTest()
+    /// 서버 안 nago-agent: 광고 차단 통계 · 실시간 도메인 · 친구 집 출구(연결돼 있을 때만)
+    @State private var agent = NagoAgent()
+    @AppStorage("foldAdblock") private var foldAdblock = true
+    @State private var showLive = false
 
     struct Step: Identifiable {
         let id = UUID()
@@ -132,6 +136,7 @@ struct VPNView: View {
             linkStats = Demo.linkStats
             traffic.fillDemo()
             speed.showDemo()
+            agent.fillDemo()
         case "scan":
             region = .jp
             scan.showDemo(running: true)
@@ -296,10 +301,23 @@ struct VPNView: View {
                     .padding(.top, -6)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
+            // 친구 집 노드가 서버에 붙어 있으면: 서버로 나갈지, 그 집 회선으로 나갈지
+            if vpn.status == .connected, !onDevice {
+                HomeExitRow(agent: agent, server: savedRegion.rawValue) {
+                    Task { await recheckExit() }
+                }
+            }
             if onDevice {
                 unicornPanel
             } else {
                 exitPanel
+            }
+            // 서버 광고 차단 DNS가 오늘 막은 것(펴면 많이 막힌 도메인 · live)
+            if vpn.status == .connected, !onDevice, agent.me != nil {
+                AdblockPanel(agent: agent, adblockOn: adblock && !savedRegion.onDemand, folded: $foldAdblock) {
+                    showLive = true
+                }
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
             if scan.running || !scan.checks.isEmpty {
                 scanPanel
@@ -315,6 +333,15 @@ struct VPNView: View {
         .animation(.snappy(duration: 0.35), value: errorText)
         .animation(.snappy(duration: 0.35), value: scan.running)
         .sheet(isPresented: $showLogs) { LogsView(vpn: vpn) }
+        .sheet(isPresented: $showLive) { LiveView(agent: agent) }
+        .animation(.snappy(duration: 0.35), value: agent.me != nil)
+    }
+
+    /// 출구를 바꾼 뒤 밖에서 보이는 IP를 다시 본다(경로가 바뀌는 데 잠깐 걸린다)
+    private func recheckExit() async {
+        exitInfo = nil
+        try? await Task.sleep(for: .seconds(1.5))
+        exitInfo = await ExitInfo.fetch()
     }
 
     /// 검사가 끝나면 등급에 따라 햅틱(문제 없음 성공 · 있으면 경고)
@@ -800,11 +827,18 @@ struct VPNView: View {
     private func pollLink() async {
         guard vpn.status == .connected else {
             linkStats = nil
-            if !Demo.on { traffic.reset() }
+            if !Demo.on {
+                traffic.reset()
+                agent.reset()
+            }
             return
         }
         guard !Demo.on else { return }
+        var tick = 0
         while !Task.isCancelled {
+            // 서버 에이전트(광고 차단 숫자·집 출구)는 5초마다. 유니콘은 서버가 없다
+            if tick % 5 == 0, vpn.activeProto != .unicorn { await agent.refresh() }
+            tick += 1
             if let report = await vpn.tunnelReport() {
                 if let stats = report.stats, !stats.isEmpty { linkStats = stats }
                 if let rx = report.rx, let tx = report.tx {
