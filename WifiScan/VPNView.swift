@@ -53,7 +53,7 @@ struct VPNView: View {
     /// 속도 측정(설정을 바꿔 가며 비교)
     @State private var speed = SpeedTest()
     /// 서버 안 nago-agent: 광고 차단 통계 · 실시간 도메인 · 친구 집 출구(연결돼 있을 때만)
-    @State private var agent = NagoAgent()
+    @State private var agent = NagoAgent.shared
     @AppStorage("foldAdblock") private var foldAdblock = true
     @State private var showLive = false
 

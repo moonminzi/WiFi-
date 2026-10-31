@@ -1,39 +1,50 @@
 #!/usr/bin/env python3
-"""nago-agent: VPN 안쪽에서만 닿는 작은 HTTP 서버(10.53.53.53:8053). 표준 라이브러리만 쓴다.
+"""nago-agent: VPN 안쪽에서만 닿는 광고 차단 DNS(10.53.53.53:53)와 작은 HTTP(10.53.53.53:8053). 표준 라이브러리만 쓴다.
 
-앱(연결된 폰)이 터널 안에서 묻는다. 누가 묻는지는 요청의 출발 주소(터널 주소: wg 10.9.0.x · IKEv2 10.10.10.x)로 안다 —
-그 주소는 WireGuard 키나 IKEv2 비밀번호로 이미 인증된 것이라 따로 로그인이 없고, 남의 기록은 볼 수 없다.
+누가 묻는지는 출발 주소(터널 주소: wg 10.9.0.x · IKEv2 10.10.10.x)로 안다 — 그 주소는 WireGuard 키나 IKEv2 비밀번호로
+이미 인증된 것이라 따로 로그인이 없고, 남의 기록·설정은 볼 수 없다.
 
-1) 광고 차단 통계 · 실시간 도메인 (adblock DNS를 쓰는 사람만)
-   dnsmasq가 /run/nago-dns/queries.log(tmpfs, 디스크에 안 남음)에 쓰는 질의 기록을 읽어 사람별로 메모리에만 센다:
-   오늘(KST) 질의·차단 수, 많이 막힌 도메인, 최근 300개 도메인 흐름. 읽은 기록은 지운다(파일이 계속 비워짐).
-     GET  /v1/me            → 오늘 숫자 · 많이 막힌 도메인 · 지금 출구 · 집 출구 목록
-     GET  /v1/feed?after=N  → N 다음부터 도메인 흐름
-
-2) 친구 집 출구(home exit) — 서울(kr)처럼 늘 켜 둔 서버에서
+1) 광고 차단 DNS — 사람마다 강도와 내 규칙
+   - 강도: light(OISD small) · normal(OISD big + YousList, 기본) · strict(normal + HaGeZi Pro++)
+     목록은 nago-dns-update가 매일 /var/lib/nago-dns/{light,normal,strict}.txt로 받아 두고, 바뀌면 다시 읽는다
+   - 내 규칙: 나만 막기(block) · 나만 풀기(allow). 하위 도메인까지. 서버 공용 예외(/etc/nago-dns/allow.conf)도 따른다
+   - 막으면 NXDOMAIN, 아니면 dnsmasq(127.0.0.1:5354 — 차단 목록 없는 캐시·전달)로 넘긴다
+   - 설정은 앱이 정본이다: 붙을 때마다 앱이 POST /v1/dns로 보낸다(서버가 여러 대라). wg 주소 것만 저장
+2) 통계 · 실시간 도메인: 오늘(KST) 질의·차단 수, 많이 막힌 도메인, 최근 300개 흐름. 메모리에만(디스크에 안 남김)
+     GET  /v1/me            → 오늘 숫자 · 많이 막힌 도메인 · 내 강도·규칙 · 지금 출구 · 집 출구 목록
+     GET  /v1/feed?after=N  → N 다음부터 도메인 흐름(막힌 건 왜 막혔는지: list · mine)
+     POST /v1/dns {"level": "light|normal|strict", "block": [...], "allow": [...]}
+3) 친구 집 출구(home exit) — 서울(kr)처럼 늘 켜 둔 서버에서
    친구 리눅스 PC(nago-home.sh)가 이 서버의 wg 피어로 붙어 "출구"로 자기를 알린다. 서버는 그 피어와 터널 안쪽
    IP-in-IP(nagoh<n>)를 만들고, 그 출구를 고른 사람의 트래픽만 정책 라우팅으로 거기 넘긴다(친구 집이 NAT해서 내보냄).
    새 포트를 열지 않는다(이미 열린 wg 안에서 IP-in-IP). 출구가 끊기면(핸드셰이크 3분 넘게 없음) 서버로 되돌아가고,
-   다시 붙으면 저절로 다시 넘긴다. 고르는 건 wg(고정 주소)만 — IKEv2 주소는 연결마다 바뀌어 남에게 넘어갈 수 있다.
+   다시 붙으면 저절로 다시 넘긴다. 서버 피어 목록에서 지워진 집은 저절로 내린다. 고르는 건 wg(고정 주소)만.
      POST /v1/exit {"via": "server" | "<집 id>"}
      POST /v1/home {"name": "minji-pc"}   (집 노드가 자기를 출구로 알림) · {"off": true}  (내림)
 
-상태(집 목록 · 누가 어느 출구)는 /var/lib/nago-agent/state.json — 도메인 기록은 저장하지 않는다.
+상태(집 목록 · 출구 선택 · wg 사람의 강도·규칙)는 /var/lib/nago-agent/state.json — 도메인 기록은 저장하지 않는다.
+이 프로그램이 멎으면 nago-dns-guard가 예전 dnsmasq(normal 목록)로 바로 넘긴다.
 """
 import collections
+import concurrent.futures
 import http.server
 import ipaddress
 import json
 import os
 import re
+import socket
 import socketserver
+import struct
 import subprocess
 import threading
 import time
 import urllib.parse
 
-LISTEN = ("10.53.53.53", 8053)
-LOG = "/run/nago-dns/queries.log"
+ADDR = "10.53.53.53"
+LISTEN = (ADDR, 8053)
+UPSTREAM = ("127.0.0.1", 5354)    # dnsmasq: 캐시·전달만
+LISTS = "/var/lib/nago-dns"
+ALLOW_CONF = "/etc/nago-dns/allow.conf"
 STATE = "/var/lib/nago-agent/state.json"
 WG_NET = ipaddress.ip_network("10.9.0.0/24")
 WG_SELF = "10.9.0.1"
@@ -43,9 +54,109 @@ TOP_KEEP = 500
 HOME_STALE = 180          # 핸드셰이크가 이보다 오래 없으면 집 출구가 끊긴 것
 RULE_PRIO = 5000
 TABLE_BASE = 2000
+LEVELS = {"light": 1, "normal": 2, "strict": 3}
+MAX_RULES = 500
+DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z0-9-]{2,63}$")
 
 lock = threading.Lock()          # 통계·상태
 rec_lock = threading.Lock()      # 터널·규칙 바꾸기(HTTP 요청과 15초 루프가 겹치지 않게)
+
+
+# ------------------------------------------------------------------ 차단 목록 · 내 규칙
+
+blocklist = {}            # 도메인 → 이 강도부터 막힘(1 light · 2 normal · 3 strict)
+global_allow = set()
+lists_stamp = None
+filters = {}              # 주소 → {"level", "block": set, "allow": set, "seen"}
+
+
+def load_lists():
+    """목록 파일이 바뀌었으면 다시 읽는다(하루 한 번 nago-dns-update). 못 읽으면 예전 것 그대로"""
+    global blocklist, global_allow, lists_stamp
+    files = [(1, "light.txt"), (2, "normal.txt"), (3, "strict.txt")]
+    stamp = []
+    for _, name in files:
+        try:
+            stamp.append(os.path.getmtime(os.path.join(LISTS, name)))
+        except OSError:
+            stamp.append(0)
+    try:
+        stamp.append(os.path.getmtime(ALLOW_CONF))
+    except OSError:
+        stamp.append(0)
+    if stamp == lists_stamp:
+        return
+    new = {}
+    for level, name in files:    # 약한 강도부터: 같은 도메인은 가장 약한 강도로 남는다
+        try:
+            with open(os.path.join(LISTS, name)) as f:
+                for line in f:
+                    d = line.strip().lower()
+                    if d and not d.startswith("#"):
+                        new.setdefault(d, level)
+        except OSError:
+            pass
+    allow = set()
+    try:
+        with open(ALLOW_CONF) as f:
+            allow = set(re.findall(r"^server=/([^/]+)/", f.read(), re.M))
+    except OSError:
+        pass
+    if new or not blocklist:
+        blocklist, global_allow, lists_stamp = new, allow, stamp
+
+
+def verdict(ip, domain):
+    """(막는지, 왜: "mine" | "list" | None)"""
+    labels = domain.split(".")
+    suffixes = [".".join(labels[i:]) for i in range(len(labels) - 1)] or [domain]
+    f = filters.get(ip)
+    level = LEVELS.get(f["level"], 2) if f else 2
+    if f:
+        if any(s in f["allow"] for s in suffixes):
+            return False, None
+        if any(s in f["block"] for s in suffixes):
+            return True, "mine"
+    if any(s in global_allow for s in suffixes):
+        return False, None
+    for s in suffixes:
+        lv = blocklist.get(s)
+        if lv is not None and lv <= level:
+            return True, "list"
+    return False, None
+
+
+def clean_rules(values):
+    out = []
+    for v in values if isinstance(values, list) else []:
+        d = str(v).strip().lower().rstrip(".")
+        if d.startswith("*."):
+            d = d[2:]
+        if DOMAIN_RE.match(d) and d not in out:
+            out.append(d)
+        if len(out) >= MAX_RULES:
+            break
+    return out
+
+
+def set_filter(ip, req):
+    level = str(req.get("level") or "normal")
+    f = {"level": level if level in LEVELS else "normal",
+         "block": set(clean_rules(req.get("block"))), "allow": set(clean_rules(req.get("allow"))),
+         "seen": time.time()}
+    with lock:
+        filters[ip] = f
+        if ipaddress.ip_address(ip) in WG_NET:
+            state.setdefault("filters", {})[ip] = {"level": f["level"], "block": sorted(f["block"]),
+                                                   "allow": sorted(f["allow"])}
+            save_state()
+
+
+def filter_view(ip):
+    f = filters.get(ip)
+    if not f:
+        return {"level": "normal", "block": [], "allow": []}
+    return {"level": f["level"], "block": sorted(f["block"]), "allow": sorted(f["allow"])}
 
 
 # ------------------------------------------------------------------ DNS 통계
@@ -65,11 +176,7 @@ class Client:
 
 
 clients = {}
-pending = {}            # dnsmasq 질의 번호 → 흐름 항목(뒤에 오는 config 줄로 '막힘' 표시)
 seq = 0
-
-LINE = re.compile(r"dnsmasq\[\d+\]: (\d+) ([0-9a-fA-F.:]+)/\d+ (query\[[A-Z0-9]+\]|config|cached|reply|forwarded) (\S+)(?: (?:is|from|to) (\S+))?")
-BLOCKED = ("NXDOMAIN", "NODATA", "NODATA-IPv4", "NODATA-IPv6", "0.0.0.0", "::")
 
 
 def kst_day(now):
@@ -88,88 +195,185 @@ def trim(counter):
         counter.update(dict(keep))
 
 
-def handle_line(line):
+def record(ip, domain, qtype, blocked, reason):
+    """A · AAAA · HTTPS만, 같은 도메인을 3초 안에 다시 물으면 한 번으로(lock 안에서 부른다)"""
     global seq
-    m = LINE.search(line)
-    if not m:
+    if qtype not in (1, 28, 65):
         return
-    serial, ip, kind, domain, value = m.groups()
     now = time.time()
-    domain = domain.rstrip(".").lower()
-    if kind.startswith("query["):
-        if kind not in ("query[A]", "query[AAAA]", "query[HTTPS]"):
-            return
-        c = clients.get(ip)
-        day = kst_day(now)
-        if c is None or c.day != day:
-            c = clients[ip] = Client(day)
-        c.last = now
-        if now - c.recent.get(domain, 0) < 3:
-            pending[serial] = (c, None)        # 같은 도메인을 연달아 물은 것: 숫자는 한 번만
-            return
-        c.recent[domain] = now
-        if len(c.recent) > 2000:
-            c.recent = {d: t for d, t in c.recent.items() if now - t < 3}
-        c.queries += 1
-        seq += 1
-        item = {"s": seq, "t": int(now), "d": domain, "b": False}
-        c.feed.append(item)
-        c.sites[site(domain)] += 1
-        trim(c.sites)
-        pending[serial] = (c, item)
-        if len(pending) > 5000:
-            for k in list(pending)[:2500]:
-                pending.pop(k, None)
+    c = clients.get(ip)
+    day = kst_day(now)
+    if c is None or c.day != day:
+        c = clients[ip] = Client(day)
+    c.last = now
+    if now - c.recent.get(domain, 0) < 3:
         return
-    if kind == "config" and value in BLOCKED:
-        c, item = pending.pop(serial, (None, None))
-        if c is None or item is None or item["b"]:
-            return
-        item["b"] = True
+    c.recent[domain] = now
+    if len(c.recent) > 2000:
+        c.recent = {d: t for d, t in c.recent.items() if now - t < 3}
+    c.queries += 1
+    seq += 1
+    item = {"s": seq, "t": int(now), "d": domain, "b": blocked}
+    if blocked:
+        item["r"] = reason
         c.blocked += 1
         c.top[domain] += 1
-        c.sites[site(domain)] -= 1
         trim(c.top)
-
-
-def tail():
-    """질의 기록을 따라 읽는다. 다 읽으면 파일을 비운다(tmpfs라도 커지지 않게, 기록이 남지 않게)."""
-    while True:
-        try:
-            with open(LOG, "r", errors="replace") as f:
-                f.seek(0, os.SEEK_END)
-                while True:
-                    line = f.readline()
-                    if line:
-                        with lock:
-                            handle_line(line)
-                        continue
-                    time.sleep(0.25)
-                    try:
-                        size = os.path.getsize(LOG)
-                    except OSError:
-                        break
-                    if size < f.tell():
-                        f.seek(0)
-                    elif size > 1 << 20 and f.tell() >= size:
-                        os.truncate(LOG, 0)
-                        f.seek(0)
-        except FileNotFoundError:
-            time.sleep(2)
-        except Exception:
-            time.sleep(2)
+    else:
+        c.sites[site(domain)] += 1
+        trim(c.sites)
+    c.feed.append(item)
 
 
 def forget_idle():
+    """하루 넘게 조용한 사람의 숫자, 10분 넘게 조용한 IKEv2 주소의 규칙(주소가 남에게 넘어가니)은 지운다"""
     now = time.time()
     with lock:
         for ip in [ip for ip, c in clients.items() if now - c.last > 36 * 3600]:
             del clients[ip]
+        for ip in [ip for ip, f in filters.items()
+                   if ipaddress.ip_address(ip) not in WG_NET and now - f["seen"] > 600]:
+            del filters[ip]
+
+
+# ------------------------------------------------------------------ DNS 서버
+
+def question(pkt):
+    """(이름, 종류, 질문 끝 위치). 이상하면 None(그대로 넘긴다)"""
+    if len(pkt) < 17 or pkt[4:6] != b"\x00\x01" or pkt[2] & 0x80:
+        return None
+    i, labels = 12, []
+    while True:
+        if i >= len(pkt):
+            return None
+        n = pkt[i]
+        if n == 0:
+            i += 1
+            break
+        if n & 0xC0 or i + 1 + n > len(pkt):
+            return None
+        labels.append(pkt[i + 1:i + 1 + n])
+        i += 1 + n
+    if i + 4 > len(pkt) or not labels:
+        return None
+    qtype = struct.unpack(">H", pkt[i:i + 2])[0]
+    return b".".join(labels).decode("ascii", "replace").lower(), qtype, i + 4
+
+
+def nxdomain(pkt, qend):
+    flags = struct.unpack(">H", pkt[2:4])[0]
+    out = 0x8000 | (flags & 0x7900) | 0x0080 | 3      # 응답 · opcode · RD 그대로 · RA · NXDOMAIN
+    return pkt[:2] + struct.pack(">HHHHH", out, 1, 0, 0, 0) + pkt[12:qend]
+
+
+def forward(pkt, tcp):
+    try:
+        if tcp:
+            with socket.create_connection(UPSTREAM, timeout=4) as s:
+                s.sendall(struct.pack(">H", len(pkt)) + pkt)
+                head = recv_exact(s, 2)
+                return recv_exact(s, struct.unpack(">H", head)[0]) if head else None
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(4)
+            s.sendto(pkt, UPSTREAM)
+            return s.recv(65535)
+    except OSError:
+        return None    # 폰이 다시 묻는다
+
+
+def recv_exact(s, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = s.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return buf
+
+
+def resolve(pkt, ip, tcp):
+    q = question(pkt)
+    if q and ip != ADDR and not ip.startswith("127."):
+        name, qtype, qend = q
+        blocked, reason = verdict(ip, name)
+        with lock:
+            record(ip, name, qtype, blocked, reason)
+            f = filters.get(ip)
+            if f:
+                f["seen"] = time.time()
+        if blocked:
+            return nxdomain(pkt, qend)
+    return forward(pkt, tcp)
+
+
+def serve_udp():
+    pool = concurrent.futures.ThreadPoolExecutor(48)
+    while True:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+            s.bind((ADDR, 53))
+            while True:
+                pkt, addr = s.recvfrom(4096)
+                pool.submit(answer_udp, s, pkt, addr)
+        except OSError:
+            time.sleep(1)
+
+
+def answer_udp(s, pkt, addr):
+    try:
+        reply = resolve(pkt, addr[0], tcp=False)
+        if reply:
+            s.sendto(reply, addr)
+    except Exception:
+        pass
+
+
+class TCPHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        self.request.settimeout(10)
+        try:
+            while True:
+                head = recv_exact(self.request, 2)
+                if not head:
+                    return
+                pkt = recv_exact(self.request, struct.unpack(">H", head)[0])
+                if not pkt:
+                    return
+                reply = resolve(pkt, self.client_address[0], tcp=True)
+                if not reply:
+                    return
+                self.request.sendall(struct.pack(">H", len(reply)) + reply)
+        except OSError:
+            pass
+
+
+class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def serve_tcp():
+    while True:
+        try:
+            TCPServer((ADDR, 53), TCPHandler).serve_forever()
+        except OSError:
+            time.sleep(1)
+
+
+def lists_loop():
+    while True:
+        try:
+            load_lists()
+        except Exception:
+            pass
+        time.sleep(60)
 
 
 # ------------------------------------------------------------------ 집 출구
 
-state = {"homes": {}, "exits": {}}     # homes: {id: {name, ip, since}} · exits: {client ip: home id}
+state = {"homes": {}, "exits": {}, "filters": {}}   # homes: {id: {name, ip, since}} · exits: {client ip: home id}
 
 
 def load_state():
@@ -177,9 +381,14 @@ def load_state():
     try:
         with open(STATE) as f:
             data = json.load(f)
-        state = {"homes": data.get("homes") or {}, "exits": data.get("exits") or {}}
+        state = {"homes": data.get("homes") or {}, "exits": data.get("exits") or {},
+                 "filters": data.get("filters") or {}}
     except (OSError, ValueError):
         pass
+    now = time.time()
+    for ip, f in state["filters"].items():
+        filters[ip] = {"level": f.get("level", "normal"), "block": set(f.get("block") or []),
+                       "allow": set(f.get("allow") or []), "seen": now}
 
 
 def save_state():
@@ -353,9 +562,10 @@ def me(ip):
                    "sites": [(d, n) for d, n in c.sites.most_common(8) if n > 0][:5],
                    "last": c.feed[-1]["s"] if c.feed else 0}
         via = state["exits"].get(ip, "server")
+        rules = filter_view(ip)
     homes = homes_view()
     active = via == "server" or any(h["id"] == via and h["online"] for h in homes)
-    return {"ip": ip, "day": day, "dns": dns, "exit": {"via": via, "active": active},
+    return {"ip": ip, "day": day, "dns": dns, "filter": rules, "exit": {"via": via, "active": active},
             "homes": homes, "exitAllowed": ipaddress.ip_address(ip) in WG_NET}
 
 
@@ -405,6 +615,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ip = self.client_address[0]
         path = urllib.parse.urlparse(self.path).path
         req = self.body()
+        if path == "/v1/dns":
+            set_filter(ip, req)
+            return self.reply(200, me(ip))
         if path == "/v1/exit":
             via = str(req.get("via") or "server")
             if ipaddress.ip_address(ip) not in WG_NET:
@@ -452,7 +665,9 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def main():
     load_state()
-    threading.Thread(target=tail, daemon=True).start()
+    load_lists()
+    for target in (serve_udp, serve_tcp, lists_loop):
+        threading.Thread(target=target, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     while True:
         try:

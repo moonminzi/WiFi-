@@ -31,10 +31,6 @@ server=8.8.8.8
 cache-size=10000
 conf-file=/var/lib/nago-dns/block.conf
 conf-file=/etc/nago-dns/allow.conf
-# nago-agent(server/agent): 질의 기록은 tmpfs에만(에이전트가 읽고 비움)
-log-queries=extra
-log-async=50
-log-facility=/run/nago-dns/queries.log
 EOF
 
 cat > /usr/local/sbin/nago-dns-update <<'SH'
@@ -44,9 +40,11 @@ set -u
 D=/var/lib/nago-dns
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 : > "$T/all"
-curl -fsSL --max-time 90 https://big.oisd.nl/dnsmasq2 -o "$T/oisd" \
+# OISD는 깃허브 공식 미러가 먼저(oisd.nl은 AWS에서 아주 느릴 때가 있다)
+{ curl -fsSL --compressed --max-time 120 https://raw.githubusercontent.com/sjhgvr/oisd/main/dnsmasq2_big.txt -o "$T/oisd" \
+  || curl -fsSL --compressed --max-time 600 https://big.oisd.nl/dnsmasq2 -o "$T/oisd"; } \
   && grep -E '^local=/[A-Za-z0-9._-]+/$' "$T/oisd" >> "$T/all"
-curl -fsSL --max-time 30 https://raw.githubusercontent.com/yous/YousList/master/hosts.txt -o "$T/yous" \
+curl -fsSL --compressed --max-time 60 https://raw.githubusercontent.com/yous/YousList/master/hosts.txt -o "$T/yous" \
   && awk '($1=="0.0.0.0"||$1=="127.0.0.1") && $2 ~ /^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$/ {print "local=/"$2"/"}' "$T/yous" >> "$T/all"
 sort -u "$T/all" > "$T/block.conf"
 n=$(wc -l < "$T/block.conf")
@@ -72,8 +70,6 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStartPre=/bin/mkdir -p /run/nago-dns
-ExecStartPre=/bin/chown nobody:nogroup /run/nago-dns
 ExecStartPre=-/usr/sbin/ip link add nago-dns type dummy
 ExecStartPre=-/usr/sbin/ip addr add ${DNS_IP}/32 dev nago-dns
 ExecStartPre=/usr/sbin/ip link set nago-dns up

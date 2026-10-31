@@ -5,6 +5,7 @@ import Observation
 /// 누가 묻는지는 터널 주소로 서버가 알아서, 로그인 없이 내 것만 온다(남의 기록은 볼 수 없다).
 /// - 광고 차단 통계(오늘 질의·차단 수, 많이 막힌 도메인) — 서버 광고 차단 DNS(--adblock)를 쓸 때만
 /// - 실시간 도메인 흐름(live)
+/// - 내 광고 차단 강도·내 규칙(AdblockFilter) 맞추기
 /// - 친구 집 출구(home exit): 서버에 붙은 집 노드 목록과 지금 출구, 출구 바꾸기
 @MainActor
 @Observable
@@ -15,6 +16,18 @@ final class NagoAgent {
         let exit: Exit
         let homes: [Home]
         let exitAllowed: Bool
+        /// 서버가 지금 이 폰에 쓰는 강도·내 규칙(2.1.9 서버부터. 없으면 nil)
+        var filter: Filter? = nil
+    }
+
+    struct Filter: Decodable, Equatable {
+        let level: String
+        let block: [String]
+        let allow: [String]
+
+        func same(as v: AdblockFilter.Value) -> Bool {
+            level == v.level.rawValue && Set(block) == Set(v.block) && Set(allow) == Set(v.allow)
+        }
     }
 
     struct DNS: Decodable, Equatable {
@@ -63,6 +76,8 @@ final class NagoAgent {
         let t: TimeInterval
         let d: String
         let b: Bool
+        /// 막힌 까닭: "list"(차단 목록) · "mine"(내 규칙)
+        var r: String? = nil
         var id: Int { s }
     }
 
@@ -72,6 +87,8 @@ final class NagoAgent {
     }
 
     static let base = URL(string: "http://10.53.53.53:8053")!
+    /// vpn 탭과 settings(강도·내 규칙을 바꾸면 바로 보냄)가 같이 쓴다
+    static let shared = NagoAgent()
 
     private(set) var me: Me?
     /// live 화면에 쌓인 도메인(최근 500개)
@@ -103,6 +120,27 @@ final class NagoAgent {
         }
         guard let me: Me = try? await Self.get("/v1/me") else { return }
         self.me = me
+        await syncFilter()
+    }
+
+    /// 폰에 저장된 강도·내 규칙이 서버 것과 다르면 보낸다(연결 직후 · refresh마다 · 바꿀 때).
+    /// 예전 서버(filter를 안 주는)에는 보내지 않는다
+    func syncFilter() async {
+        guard !Demo.on, let me, let server = me.filter else { return }
+        let local = AdblockFilter.current
+        guard !server.same(as: local) else { return }
+        do {
+            var request = URLRequest(url: Self.base.appendingPathComponent("v1/dns"))
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: local.json)
+            let session = Self.session
+            defer { session.finishTasksAndInvalidate() }
+            let (data, response) = try await session.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+            self.me = try JSONDecoder().decode(Me.self, from: data)
+            NagoLog.add("adblock \(local.level.rawValue) · \(local.block.count) blocked · \(local.allow.count) allowed")
+        } catch {}
     }
 
     /// live 화면이 열려 있는 동안 1초마다
@@ -120,7 +158,7 @@ final class NagoAgent {
         if Demo.on {
             if let me {
                 self.me = Me(ip: me.ip, dns: me.dns, exit: Exit(via: via, active: true), homes: me.homes,
-                             exitAllowed: true)
+                             exitAllowed: true, filter: me.filter)
             }
             return true
         }
@@ -170,7 +208,9 @@ final class NagoAgent {
                          sites: [], last: 0),
                 exit: me?.exit ?? Exit(via: "server", active: true),
                 homes: [Home(id: "h240", name: "minji-pc", online: true)],
-                exitAllowed: true)
+                exitAllowed: true,
+                filter: Filter(level: AdblockFilter.current.level.rawValue, block: AdblockFilter.current.block,
+                               allow: AdblockFilter.current.allow))
         if feed.isEmpty {
             let now = Date().timeIntervalSince1970
             let sample: [(String, Bool)] = [
@@ -179,7 +219,8 @@ final class NagoAgent {
                 ("ad.daum.net", true), ("m.naver.com", false), ("tr.line.me", true), ("gateway.icloud.com", false),
             ]
             feed = sample.enumerated().map { Item(s: $0.offset + 1, t: now - Double(sample.count - $0.offset) * 2,
-                                                  d: $0.element.0, b: $0.element.1) }
+                                                  d: $0.element.0, b: $0.element.1,
+                                                  r: $0.element.1 ? "list" : nil) }
         }
     }
 }

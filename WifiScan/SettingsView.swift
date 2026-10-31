@@ -14,6 +14,11 @@ struct SettingsView: View {
     @AppStorage("wgLoops") private var wgLoops = 1
     @AppStorage("vpnFastMode") private var fastMode = true
     @AppStorage("vpnAdblock") private var adblock = false
+    /// 광고 차단 강도·내 규칙(AdblockFilter). 연결 중에도 바꿀 수 있고 바로 서버에 보낸다
+    @AppStorage(AdblockFilter.Key.level) private var dnsLevel: AdblockFilter.Level = .normal
+    @AppStorage(AdblockFilter.Key.block) private var dnsBlock = ""
+    @AppStorage(AdblockFilter.Key.allow) private var dnsAllow = ""
+    @State private var newRule = ""
     @AppStorage("vpnAutoConnect") private var autoConnect: VPNAutoConnect = .off
     @AppStorage("vpnKillSwitch") private var killSwitch = false
     @AppStorage("vpnAllowLAN") private var allowLAN = true
@@ -60,6 +65,7 @@ struct SettingsView: View {
                 }
                 connectionBlock
                 dnsBlock
+                if adblock { adblockBlock }
                 logsBlock
                 aboutBlock
             } else {
@@ -70,6 +76,7 @@ struct SettingsView: View {
                 }
                 connectionBlock
                 dnsBlock
+                if adblock { adblockBlock }
                 serverBlock
                 logsBlock
                 aboutBlock
@@ -93,6 +100,10 @@ struct SettingsView: View {
         }
         .onChange(of: needsOurTunnel) { _, needed in
             if needed, !proto.usesTunnel { proto = .wireguard }
+        }
+        .onChange(of: "\(dnsLevel.rawValue)|\(dnsBlock)|\(dnsAllow)") { _, _ in
+            // 붙어 있으면 바로 서버에 보낸다(안 붙어 있으면 다음 연결 때 vpn 탭이 맞춘다)
+            Task { await NagoAgent.shared.syncFilter() }
         }
         .onDisappear(perform: savePassword)
         .sheet(isPresented: $showLogs) { LogsView(vpn: vpn) }
@@ -238,6 +249,85 @@ struct SettingsView: View {
             }
         }
         .locked(locked)
+    }
+
+    /// `// adblock` 강도 [light][normal][strict] · 내 규칙(나만 막기 ✗ · 나만 풀기 ✓). 연결 중에도 바로 바뀐다
+    private var adblockBlock: some View {
+        TermBlock(label: "adblock") {
+            VStack(alignment: .leading, spacing: 8) {
+                key("strength")
+                TermChoice(options: AdblockFilter.Level.allCases.map { (label: $0.rawValue, value: $0) },
+                           selection: $dnsLevel)
+                Text(dnsLevel.note)
+                    .font(Term.mono(11.5))
+                    .foregroundStyle(Term.muted)
+            }
+            TermDivider()
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    key("my rules")
+                    Spacer()
+                    Text("only you · this server and the next")
+                        .font(Term.mono(10.5))
+                        .foregroundStyle(Term.muted.opacity(0.8))
+                }
+                TermField(key: "domain", text: $newRule, placeholder: "ads.example.com", keyboard: .URL)
+                    .onSubmit { addRule(block: true) }
+                HStack(spacing: 8) {
+                    Button("✗ block") { addRule(block: true) }
+                        .buttonStyle(.term)
+                    Button("✓ allow") { addRule(block: false) }
+                        .buttonStyle(.term)
+                    Spacer()
+                    if !newRule.isEmpty, AdblockFilter.clean(newRule) == nil {
+                        Text("not a domain").font(Term.mono(11)).foregroundStyle(Term.red)
+                    }
+                }
+                .disabled(AdblockFilter.clean(newRule) == nil)
+                let blocked = dnsBlock.split(separator: "\n").map(String.init)
+                let allowed = dnsAllow.split(separator: "\n").map(String.init)
+                if blocked.isEmpty && allowed.isEmpty {
+                    Text("none yet · or long-press a domain in live")
+                        .font(Term.mono(11.5))
+                        .foregroundStyle(Term.muted)
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(allowed, id: \.self) { ruleRow($0, block: false) }
+                        ForEach(blocked, id: \.self) { ruleRow($0, block: true) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func ruleRow(_ domain: String, block: Bool) -> some View {
+        HStack(spacing: 8) {
+            Text(block ? "✗" : "✓").foregroundStyle(block ? Term.red : Term.green)
+            Text(domain).foregroundStyle(Term.text).lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 6)
+            Button {
+                AdblockFilter.remove(domain)
+                reloadRules()
+            } label: {
+                Text("remove").foregroundStyle(Term.muted)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("remove rule for \(domain)")
+        }
+        .font(Term.mono(12))
+    }
+
+    private func addRule(block: Bool) {
+        guard let domain = AdblockFilter.clean(newRule) else { return }
+        if block { AdblockFilter.block(domain) } else { AdblockFilter.allow(domain) }
+        newRule = ""
+        reloadRules()
+    }
+
+    /// AdblockFilter가 UserDefaults에 직접 쓰므로 @AppStorage 값을 다시 읽어 화면을 맞춘다
+    private func reloadRules() {
+        dnsBlock = AdblockFilter.list(AdblockFilter.Key.block).joined(separator: "\n")
+        dnsAllow = AdblockFilter.list(AdblockFilter.Key.allow).joined(separator: "\n")
     }
 
     private var customDNSRow: some View {

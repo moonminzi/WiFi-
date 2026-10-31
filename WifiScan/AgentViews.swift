@@ -25,6 +25,13 @@ struct AdblockPanel: View {
 
     private var dns: NagoAgent.DNS? { agent.me?.dns }
 
+    /// `normal` · `strict +3 rules` — 서버가 지금 이 폰에 쓰는 강도(설정 → adblock)
+    private var strength: String {
+        guard let f = agent.me?.filter else { return "normal" }
+        let n = f.block.count + f.allow.count
+        return n > 0 ? "\(f.level) +\(n) rule\(n == 1 ? "" : "s")" : f.level
+    }
+
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             FoldChevron(folded: folded)
@@ -93,7 +100,7 @@ struct AdblockPanel: View {
                         }
                     }
                 }
-                Text("today kst · counted in server memory only · only you see yours")
+                Text("today kst · \(strength) · counted in server memory only")
                     .font(Term.mono(10))
                     .foregroundStyle(Term.muted.opacity(0.8))
                     .lineLimit(1)
@@ -219,7 +226,37 @@ struct LiveView: View {
                 .foregroundStyle(item.b ? Term.red : Term.text)
                 .lineLimit(1)
                 .truncationMode(.middle)
+            if item.r == "mine" {
+                Text("mine").foregroundStyle(Term.muted)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .contextMenu { menu(item) }
+    }
+
+    /// 꾹 누르면: 나만 막기 · 나만 풀기 · 내 규칙 지우기 — 바로 서버에 보내고 다음 조회부터 바뀐다
+    @ViewBuilder
+    private func menu(_ item: NagoAgent.Item) -> some View {
+        let rule = AdblockFilter.rule(for: item.d)
+        Text(item.d)
+        if rule != nil {
+            Button("remove my rule", systemImage: "arrow.uturn.backward") { change { AdblockFilter.remove(item.d) } }
+        }
+        if item.b, rule != "allow" {
+            Button("allow for me", systemImage: "checkmark.circle") { change { AdblockFilter.allow(item.d) } }
+        }
+        if !item.b, rule != "block" {
+            Button("block for me", systemImage: "xmark.circle", role: .destructive) {
+                change { AdblockFilter.block(item.d) }
+            }
+        }
+        Button("copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = item.d }
+    }
+
+    private func change(_ edit: () -> Void) {
+        edit()
+        Task { await agent.syncFilter() }
     }
 
     private static let time: DateFormatter = {
