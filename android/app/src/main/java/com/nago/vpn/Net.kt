@@ -18,24 +18,16 @@ import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
 
-/** 설정 값 "neptun"(예전 이름 그대로 저장)은 화면에 우리 엔진 이름 nagotun으로 */
-fun engineName(value: String): String = if (value == "neptun") "nagotun" else value
+/** 설정 값 "neptun"(예전 이름 그대로 저장)은 화면에 우리 엔진 이름 NagoTun으로 */
+fun engineName(value: String): String = if (value == "neptun") "NagoTun" else value
 
 /** 출구 IP가 이 나라로 보여야 하는 국가 코드 */
 val VpnRegion.countryCode: String
-    get() = when (this) {
-        VpnRegion.kr -> "KR"
-        VpnRegion.jp -> "JP"
-        VpnRegion.us -> "US"
-        VpnRegion.uk -> "GB"
-    }
-
-/** 그 나라 서버가 있는 AWS 리전(detail의 뒷부분) */
-val VpnRegion.awsRegion: String get() = detail.substringAfterLast(' ')
+    get() = if (this == VpnRegion.uk) "GB" else name.uppercase()
 
 /**
  * 밖에서 보이는 내 IP와 나라. Cloudflare의 `/cdn-cgi/trace`(ip=…, loc=JP, colo=NRT 같은 줄)를 읽는다(iOS와 같음).
- * 앱 안 wg(neptun/go)는 앱 자신을 터널에서 빼 두므로 그때는 연결 전 회선만 보인다 — 연결 후에는 ikev2에서만 쓴다.
+ * 앱도 터널 안에 있어서(엔진 소켓만 protect) 연결되면 나가는 서버 것이 보여야 한다 — 나라가 다르면 새는 것.
  */
 data class ExitInfo(val ip: String, val country: String, val colo: String) {
     companion object {
@@ -49,13 +41,20 @@ data class ExitInfo(val ip: String, val country: String, val colo: String) {
             return if (parts.size == 4) "${parts[0]}.${parts[1]}.•••.•••" else "•••"
         }
 
-        suspend fun fetch(): ExitInfo? = withContext(Dispatchers.IO) {
+        /** 글 안의 IPv4를 모두 가린다(net scan 결과 줄) */
+        fun maskIPs(text: String): String =
+            Regex("""(\d{1,3}\.\d{1,3})\.\d{1,3}\.\d{1,3}""").replace(text) { "${it.groupValues[1]}.•••.•••" }
+
+        suspend fun fetch(): ExitInfo? = if (Demo.on) Demo.exit else withContext(Dispatchers.IO) {
             runCatching {
                 val conn = URL("https://1.1.1.1/cdn-cgi/trace").openConnection() as HttpURLConnection
                 try {
                     conn.connectTimeout = 6_000
                     conn.readTimeout = 6_000
                     conn.useCaches = false
+                    // 잴 때마다 새 연결. 연결 전에 열어 둔 1.1.1.1 연결을 다시 쓰면 터널이 생긴 뒤에도
+                    // 예전 회선으로 나가서 제대로 연결됐는데 KR이 보인다(iOS에서 겪음)
+                    conn.setRequestProperty("Connection", "close")
                     val fields = conn.inputStream.bufferedReader().use { it.readLines() }
                         .mapNotNull { line -> line.split('=', limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] } }
                         .toMap()
@@ -73,21 +72,24 @@ data class ExitInfo(val ip: String, val country: String, val colo: String) {
  * (TLS 핸드셰이크가 섞여서 버린다) 같은 연결로 두 번 더 재서 빠른 쪽을 쓴다(iOS LatencyProbe와 같음).
  */
 object LatencyProbe {
-    suspend fun measure(): Map<VpnRegion, Int> = coroutineScope {
+    suspend fun measure(): Map<VpnRegion, Int> = if (Demo.on) Demo.rtt else coroutineScope {
         VpnRegion.entries.map { region -> async(Dispatchers.IO) { region to ping(region) } }
             .awaitAll()
             .mapNotNull { (region, ms) -> ms?.let { region to it } }
             .toMap()
     }
 
-    private fun ping(region: VpnRegion): Int? {
+    private fun ping(region: VpnRegion): Int? = samples(region, 2).filterNotNull().minOrNull()?.let { Math.round(it).toInt() }
+
+    /** 한 번 데워(TLS 핸드셰이크) 둔 연결로 [count]번 잰 왕복 시간(ms). 실패한 회는 null. */
+    fun samples(region: VpnRegion, count: Int): List<Double?> {
         val url = URL("https://dynamodb.${region.awsRegion}.amazonaws.com/ping")
-        if (get(url) == null) return null
-        return (0 until 2).mapNotNull { get(url) }.minOrNull()?.toInt()
+        if (get(url) == null) return List(count) { null }
+        return List(count) { get(url) }
     }
 
     /** 한 번 묻고 걸린 시간(ms). 실패하면 null. 연결은 기본 풀에 남아 다음 번에 다시 쓴다. */
-    private fun get(url: URL): Long? = runCatching {
+    private fun get(url: URL): Double? = runCatching {
         val start = System.nanoTime()
         val conn = url.openConnection() as HttpURLConnection
         conn.connectTimeout = 4_000
@@ -95,7 +97,7 @@ object LatencyProbe {
         conn.useCaches = false
         val ok = conn.responseCode == 200
         conn.inputStream.use { it.readBytes() }
-        if (ok) (System.nanoTime() - start) / 1_000_000 else null
+        if (ok) (System.nanoTime() - start) / 1e6 else null
     }.getOrNull()
 }
 

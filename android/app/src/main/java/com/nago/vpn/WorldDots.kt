@@ -36,13 +36,13 @@ object WorldDots {
         levels = listOf(1, 2, 4, 8).map { coarsen(fine, cols, rows, it) }
     }
 
-    private fun code(c: Char): Byte = when (c) {
-        '#' -> 1
-        'k' -> 2
-        'j' -> 3
-        'u' -> 4
-        'g' -> 5
-        else -> 0
+    /** 나라 글자. [VpnRegion] 순서(tools/worldgrid.py의 LETTERS와 같아야 함) */
+    private const val LETTERS = "kjugsdfewcbai"
+
+    private fun code(c: Char): Byte {
+        if (c == '#') return 1
+        val i = LETTERS.indexOf(c)
+        return if (i < 0) 0 else (2 + i).toByte()
     }
 
     private fun decode(lines: List<String>, cols: Int, rows: Int): ByteArray {
@@ -73,7 +73,7 @@ object WorldDots {
         val lr = rows / s
         if (s == 1) return Level(1, lc, lr, step, fine)
         val cells = ByteArray(lc * lr)
-        val counts = IntArray(6)
+        val counts = IntArray(2 + LETTERS.length)
         val area = s * s
         for (row in 0 until lr) {
             for (col in 0 until lc) {

@@ -119,6 +119,7 @@ impl PacketWorkers {
                 .firewall_process_outbound_callback
                 .as_ref()
                 .map(|f| f.clone());
+            let ext = config.external_net.clone();
             thread::spawn(move || {
                 write_to_socket_worker(
                     tunnel_to_socket_rx,
@@ -126,6 +127,7 @@ impl PacketWorkers {
                     udp4_c,
                     udp6_c,
                     fw_callback,
+                    ext,
                 )
             });
         }
@@ -212,6 +214,7 @@ fn write_to_socket_worker(
     firewall_process_outbound_callback: Option<
         Arc<dyn Fn(&[u8; 32], &mut [u8], &mut dyn std::io::Write) -> bool + Send + Sync>,
     >,
+    ext: Arc<super::ExternalNetSlot>,
 ) {
     loop {
         crossbeam_channel::select! {
@@ -230,7 +233,7 @@ fn write_to_socket_worker(
                             }
                         }
 
-                        encapsulate_and_send(&element.peer, &mut element.data[..], len, &udp4, &udp6);
+                        encapsulate_and_send(&element.peer, &mut element.data[..], len, &udp4, &udp6, &ext);
                     }
                 }
             }

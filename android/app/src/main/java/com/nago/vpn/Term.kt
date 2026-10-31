@@ -35,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -295,5 +296,78 @@ fun TermButton(label: String, danger: Boolean, enabled: Boolean, busy: Boolean =
             .padding(vertical = 15.dp),
     ) {
         Text(label, style = Term.mono(14.sp, FontWeight.SemiBold, if (filled) Term.bg else accent))
+    }
+}
+
+/** iOS 토글처럼 생긴 스위치(초록 판 + 흰 손잡이). 누르면 손잡이가 미끄러진다 */
+@Composable
+fun TermSwitch(checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+    val knob by animateFloatAsState(if (checked) 1f else 0f, spring(dampingRatio = 0.75f, stiffness = 600f), label = "switch")
+    val track by animateColorAsState(
+        if (checked) Term.green else if (Term.dark) Color(0x52787880) else Color(0x29787880),
+        tween(200), label = "switch-track",
+    )
+    Box(
+        modifier = Modifier
+            .alpha(if (enabled) 1f else 0.5f)
+            .size(51.dp, 31.dp)
+            .background(track, RoundedCornerShape(50))
+            .clickable(remember { MutableInteractionSource() }, indication = null, enabled = enabled) { onChange(!checked) }
+            .padding(2.dp),
+    ) {
+        Box(
+            Modifier
+                .graphicsLayer { translationX = knob * 20.dp.toPx() }
+                .size(27.dp)
+                .shadow(2.dp, CircleShape)
+                .background(Color.White, CircleShape),
+        )
+    }
+}
+
+/** `--nagoing ············ (●)` 한 줄 */
+@Composable
+fun ToggleRow(label: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Text(label, style = Term.mono(13.sp, color = Term.muted), modifier = Modifier.weight(1f))
+        TermSwitch(checked, enabled, onChange)
+    }
+}
+
+/** 상자 안 `key  [a] b c` 한 줄 */
+@Composable
+fun KeyRow(key: String, content: @Composable () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(key, style = Term.mono(13.sp, color = Term.muted))
+        content()
+    }
+}
+
+/** 꽉 찬 너비의 테두리 버튼(`view ········· 42 lines`) */
+@Composable
+fun TermWideButton(onClick: () -> Unit, content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Term.surface, RoundedCornerShape(6.dp))
+            .border(1.dp, Term.border, RoundedCornerShape(6.dp))
+            .pressable(true, onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        content = content,
+    )
+}
+
+/** 한 줄에 다 들어가게 글자 크기를 [minScale]배까지 줄인다(SwiftUI minimumScaleFactor처럼). 그래도 넘치면 말줄임 */
+@Composable
+fun FitText(text: String, style: TextStyle, minScale: Float = 0.7f, modifier: Modifier = Modifier) {
+    androidx.compose.foundation.layout.BoxWithConstraints(modifier) {
+        val measurer = androidx.compose.ui.text.rememberTextMeasurer()
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        val available = with(density) { maxWidth.toPx() }
+        val width = remember(text, style) { measurer.measure(text, style, maxLines = 1, softWrap = false).size.width }
+        val scale = if (width <= available || width == 0) 1f else (available / width).coerceAtLeast(minScale)
+        Text(text, style = style.copy(fontSize = style.fontSize * scale), maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, softWrap = false)
     }
 }

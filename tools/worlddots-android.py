@@ -4,7 +4,7 @@
 같은 데이터를 두 번 만들지 않으려고 Swift 파일을 그대로 읽는다.
   python3 tools/worlddots-android.py   →   android/app/src/main/assets/worlddots.txt
 
-형식: 첫 줄 "cols rows step yTop", 그 아래로 RLE 한 줄씩(`#12`는 땅 12칸, k/j/u/g는 나라, `.`은 바다).
+형식: 첫 줄 "cols rows step yTop", 그 아래로 RLE 한 줄씩(`#12`는 땅 12칸, 소문자는 나라(kjugsdfewcbai), `.`은 바다).
 """
 import pathlib
 import re

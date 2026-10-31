@@ -145,7 +145,7 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
   - 터널 확장은 핸드셰이크가 170초 넘게 없으면(서버 유휴 종료, 재부팅으로 IP 변경) 국가 API로 서버를 켜고 주소가 바뀌었으면 피어를 바꾼다. 확장 자신의 통신은 킬 스위치에도 막히지 않는다
 - **custom dns** (wg만): `1.1.1.1, 8.8.8.8`처럼. --adblock이 켜져 있으면 광고 차단 DNS가 우선. IKEv2 DNS는 서버가 준다
 - **안드로이드**: `--allow-lan`(IKEv2 `setLocalRoutesExcluded`, wg는 사설망·멀티캐스트 대역을 AllowedIPs에서 뺌), 항상 켜기·킬 스위치는 시스템 VPN 설정(`system ›`)에서
-- **안드로이드 wg engine**: `nagotun`(기본) — iOS와 같은 NagoTun 엔진을 `NagoTun/build-android.sh`(NDK)로 libnago_tun.so로 빌드해 JNI(`NagoTun/src/android.rs`, `NeptunNative.kt`)로 부른다. `NeptunVpnService`가 TUN을 만들고 엔진에 넘김. 2.0.5부터 이벤트 루프 1개 + 패킷을 루프에서 바로 처리(NepTUN은 루프 4개 + 작업 스레드 — 같은 속도에 1GB당 CPU 40~50% 덜) + 서버마다 connect한 UDP 소켓. 앱 자신은 VPN에서 빼서(`addDisallowedApplication`) 엔진 소켓과 국가 API 요청이 터널 밖으로 나간다. 핸드셰이크가 끊기면 iOS처럼 서버를 깨우고 새 주소로 바꾼다 / `go` — wireguard-android GoBackend
+- **안드로이드 wg engine**: `nagotun`(기본) — iOS와 같은 NagoTun 엔진을 `NagoTun/build-android.sh`(NDK)로 libnago_tun.so로 빌드해 JNI(`NagoTun/src/android.rs`, `NeptunNative.kt`)로 부른다. `NeptunVpnService`가 TUN을 만들고 엔진에 넘김. 2.0.5부터 이벤트 루프 1개 + 패킷을 루프에서 바로 처리(NepTUN은 루프 4개 + 작업 스레드 — 같은 속도에 1GB당 CPU 40~50% 덜) + 서버마다 connect한 UDP 소켓. 2.1.7부터 앱도 iOS처럼 터널 안에 있고(출구 확인·net scan·speed test가 터널을 잰다), 엔진·nagoing이 서버로 가는 소켓만 만들 때 JNI로 `VpnService.protect()`를 불러 터널 밖으로 뺀다. 핸드셰이크가 끊기면 VPN이 아닌 실제 회선(`registerBestMatchingNetworkCallback`)으로 국가 API에 물어 서버를 깨우고 새 주소로 바꾼다. `--nagoing`(막힌 망 우회)도 iOS와 같은 FFI로 엔진에 바로 붙는다(`NagoingNative.kt`) / `go` — wireguard-android GoBackend
   - 빌드에 Rust와 Android NDK가 필요(Gradle `preBuild` 앞에 `buildNagoTun`이 돈다. NDK는 `ANDROID_NDK_HOME` 또는 `<SDK>/ndk/<버전>`)
 - **logs**: 진행 단계·오류·VPN 상태 변화(끊긴 이유 포함). iOS는 터널 확장이 켜져 있으면 확장의 로그와 상태(wg는 핸드셰이크·주고받은 양, unicorn은 쪼갠 횟수·DNS 질의 수)도 같이 보여 준다
 - **server**: 가속(TCP 분할)은 4대 모두 IKEv2·WireGuard TCP에 켜져 있음
@@ -177,10 +177,10 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
 
 ## 안드로이드 앱 (`android/`)
 
-친구용 안드로이드 버전. 화면은 iOS VPN 탭과 같은 지도 중심 터미널 스타일이고 국가 선택(kr/jp/us/uk)도 같다.
+친구용 안드로이드 버전. 2.1.7부터 화면·기능이 iOS 관리자용과 같다(dash 탭만 없음): 국가 13곳(늘 있는 kr/jp/us/uk + 임시 서버 9곳), 머리줄 레이더 단추 · net scan(`NetScan.kt`) · speed test(`SpeedTest.kt`) · 실패 줄 · settings의 loops · `--nagoing` · `--fast`. 아이콘은 SF Symbols 모양을 직접 그린다(`Icons.kt`). 디버그 빌드는 `--es nagoDemo connected` 같은 실행 인자로 서버 없이 화면 상태를 그린다(`Demo.kt`, iOS `-nagoDemo`와 같음).
 
 - **화면(2.0)**: iOS와 같은 route 지도가 위쪽을 채운다(`RouteMap.kt`, Compose Canvas). 점 세계 지도는 iOS 데이터를 `tools/worlddots-android.py`로 `assets/worlddots.txt`에 옮겨 쓴다. 단계마다 웨이포인트, 연결되면 그 나라로 날아가 확대·신호 고리. 나라 점이나 카드를 눌러 고르고, 연결 중에 고르면 갈아타기(hop)를 묻는다
-  - 콘솔 판: 상태 꼬리표 · 도시 · 연결 시간 · 단계 막대(api → boot → tunnel → up) · 출구 줄(연결 전 isp IP, 연결 후엔 출구 나라가 맞는지 확인. neptun은 앱이 터널 밖이라 서버 주소. 줄을 누르면 IP 뒷부분을 `210.182.•••.•••`처럼 가리고 다시 누르면 보임, 길게 누르면 다시 잼 — iOS도 같음, net scan exit 줄도 같이 가려짐) · 지역 카드(DynamoDB `/ping`으로 잰 실제 왕복 시간, 가장 빠른 곳에 `fast`) · 진행 기록
+  - 콘솔 판: 상태 꼬리표 · 도시 · 연결 시간 · 단계 막대(api → boot → tunnel → up) · 출구 줄(연결 전 isp IP, 연결 후엔 출구 나라가 맞는지 확인 — 다르면 `! not JP — leak?`. 줄을 누르면 IP 뒷부분을 `210.182.•••.•••`처럼 가리고 다시 누르면 보임, 길게 누르면 다시 잼 — iOS도 같음, net scan exit 줄도 같이 가려짐) · 지역 카드(DynamoDB `/ping`으로 잰 실제 왕복 시간, 가장 빠른 곳에 `fast`) · 진행 기록
   - wg로 연결돼 있으면 엔진에 1초마다 바이트 수·핸드셰이크를 물어 속도 그래프와 "handshake 00:14 ago"를 보여 준다(3분 넘게 없으면 노랗게 — 엔진 문제를 바로 알아챌 수 있게). 묻는 건 화면이 아니라 프로세스(`LinkMonitor`, 엔진이 켜질 때 시작)라서 탭을 오가도 그래프가 이어진다. iOS는 터널 확장이 최근 1분을 쌓아 두고 앱이 받아 간다(앱을 닫았다 열어도 이어짐)
   - 경로 위 흐름 점(받기 초록 · 보내기 하늘색, iOS와 같음): 속도는 1초마다 바뀌지만 점마다 자리를 이어 가고(`FlowLane`), 양·속도는 부드럽게 따라가며, 트래픽이 0이 되면 계속 흐르면서 1.5초쯤에 걸쳐 사라진다. 점 개수는 1초에 4개씩만 바뀐다
   - settings → appearance: system / dark / light. 글꼴은 JetBrains Mono(OFL, `assets/OFL-JetBrainsMono.txt`)
@@ -204,7 +204,7 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
 - **iOS**: `build-ipa.yml`(main에 push하거나 직접 실행)이 IPA를 만들어 버전마다 릴리스 하나에 올린다 — 태그 `ios-<버전>`(예: `ios-2.0.5`), 파일 `NAGO-VPN-<버전>.ipa`(유저용)와 `NAGO-VPN-<버전>-admin.ipa`(관리자용).
   - 유저용은 컴파일 조건 `USER_EDITION`으로 따로 빌드한다(재서명 도구가 Info.plist를 바꿔도 판이 유지되게, `NAGOEdition = user`도 같이 넣음). 홈 화면 이름은 유저용 NAGO VPN · 관리자용 NAGO Admin, settings → about에 판 표시. 유저용(`Edition.isUser`): vpn · settings 탭만, 속도 측정·설정 꼬리표·링크 상세 없음, settings는 화면 모양·비밀번호·자동 연결/킬 스위치·광고 차단·로그·버전만. 프로토콜·엔진은 기본값(auto · nagotun). 친구용은 유저용 IPA에 `NAGOPresetPassword`를 넣어 재서명한다
   - 스크린샷(`ui-shots`)에 `user-*` 장면(`-nagoEdition user`) 버전은 `project.yml`의 `MARKETING_VERSION`(빌드 번호는 `CURRENT_PROJECT_VERSION`). 같은 버전을 다시 빌드하면 그 릴리스의 IPA·설명만 바뀐다. 설명은 `release-notes/ios-<버전>.md`
-- **안드로이드**: 태그 `android-<버전>`, 파일 `NAGO-VPN-<버전>.apk`(nago-release 키로 서명)
+- **안드로이드**: `build-apk.yml`(직접 실행)이 태그 `android-<버전>` 릴리스에 올린다. 서명 secrets가 있으면 `NAGO-VPN-<버전>.apk`(nago-release 키, 기존 앱 위에 덮어 깔림), 없으면 `NAGO-VPN-<버전>-debug.apk`(com.nago.vpn.debug, 따로 깔림 — CI 러너마다 디버그 키가 달라 다음 버전은 지우고 깔아야 함). 비밀번호는 넣지 않는다. 설명은 `release-notes/android-<버전>.md`
 
 ## 빌드 방법 A: XcodeGen (추천)
 
