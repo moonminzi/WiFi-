@@ -29,7 +29,8 @@ fi
 
 NAME="${1:-$(hostname -s)}"
 NAME=$(printf '%s' "$NAME" | tr -cd 'A-Za-z0-9._ -' | cut -c1-24)
-: "${NAGO_KEY:?NAGO_KEY=VPN 비밀번호 를 앞에 붙여 실행하세요}"
+# 관리자가 피어를 따로 넣어 둔 경우: NAGO_IP · NAGO_SERVER_PUB · NAGO_ENDPOINT를 주면 등록(비밀번호)을 건너뛴다
+[ -n "${NAGO_IP:-}" ] || : "${NAGO_KEY:?NAGO_KEY=VPN 비밀번호 를 앞에 붙여 실행하세요}"
 
 echo ">> 필요한 것 설치"
 need=""
@@ -45,11 +46,15 @@ mkdir -p $DIR && chmod 700 $DIR
 [ -s $DIR/key ] || (umask 077; wg genkey > $DIR/key)
 PUB=$(wg pubkey < $DIR/key)
 
-echo ">> 서버에 피어로 등록"
-REPLY=$(curl -fsS --max-time 20 -X POST "$DASH" -H "x-nago-key: $NAGO_KEY" -H 'content-type: application/json' \
-  -d "{\"op\":\"add\",\"pub\":\"$PUB\",\"name\":\"home: $NAME\"}") || { echo "등록 실패(비밀번호?)" >&2; exit 1; }
-read -r IP SPUB ENDPOINT < <(printf '%s' "$REPLY" | python3 -c '
+if [ -n "${NAGO_IP:-}" ]; then
+  IP=$NAGO_IP; SPUB=$NAGO_SERVER_PUB; ENDPOINT=$NAGO_ENDPOINT
+else
+  echo ">> 서버에 피어로 등록"
+  REPLY=$(curl -fsS --max-time 20 -X POST "$DASH" -H "x-nago-key: $NAGO_KEY" -H 'content-type: application/json' \
+    -d "{\"op\":\"add\",\"pub\":\"$PUB\",\"name\":\"home: $NAME\"}") || { echo "등록 실패(비밀번호?)" >&2; exit 1; }
+  read -r IP SPUB ENDPOINT < <(printf '%s' "$REPLY" | python3 -c '
 import json,sys; r=json.load(sys.stdin); print(r["ip"], r["serverPub"], r["endpoint"])')
+fi
 # 서버 쪽 포트는 udp 443도 받는다(51820이 막힌 망이 있어서 443으로)
 ENDPOINT="${ENDPOINT%:*}:443"
 echo "   $IP → $ENDPOINT"

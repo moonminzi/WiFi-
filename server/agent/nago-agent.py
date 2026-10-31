@@ -282,6 +282,20 @@ def _reconcile():
         exits = dict(state["exits"])
     hs = handshakes()
     now = time.time()
+    # 서버 피어 목록에서 지워진 집(대시보드에서 삭제 · 다시 등록해 주소가 바뀜)은 출구에서도 내린다.
+    # wg를 못 읽었을 때(hs가 빔) 다 지우지 않게, 읽힌 때만
+    if hs:
+        gone = [hid for hid, h in homes.items() if h["ip"] not in hs]
+        if gone:
+            with lock:
+                for hid in gone:
+                    state["homes"].pop(hid, None)
+                    for c in [c for c, x in state["exits"].items() if x == hid]:
+                        state["exits"].pop(c)
+                save_state()
+                exits = dict(state["exits"])
+            for hid in gone:
+                tunnel_down(homes.pop(hid)["ip"])
     online = {hid: now - hs.get(h["ip"], 0) < HOME_STALE for hid, h in homes.items()}
     for hid, h in homes.items():
         try:
