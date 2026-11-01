@@ -1,0 +1,24 @@
+:root { color-scheme: dark; }
+body { margin: 0; padding: 14px; min-width: 300px; background: #0b0f0c; color: #d1fae5;
+  font: 13px ui-monospace, "SF Mono", Menlo, monospace; }
+header { font-size: 17px; font-weight: 700; color: #22c55e; margin-bottom: 12px; }
+.dim { color: #6b7f72; font-weight: 400; }
+.cursor { display: inline-block; width: 8px; height: 16px; background: #22c55e; margin-left: 2px;
+  vertical-align: -2px; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+section { border: 1px solid #1f2a22; background: #101612; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+.row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; gap: 10px; }
+.key { color: #6b7f72; }
+.val { color: #d1fae5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.on { color: #22c55e; font-weight: 700; }
+.off { color: #fbbf24; font-weight: 700; }
+.note { color: #6b7f72; font-size: 11px; line-height: 1.45; margin: 4px 0 0; }
+.warn { color: #fbbf24; }
+ul { list-style: none; margin: 4px 0 8px; padding: 0; }
+li { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-top: 1px solid #1f2a22;
+  font-size: 11px; color: #d1fae5; }
+li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+li button { background: none; border: none; color: #ef4444; font: inherit; padding: 0 2px; }
+button.primary { width: 100%; padding: 10px; margin: 6px 0; border-radius: 6px; border: 1px solid #22c55e;
+  background: #22c55e; color: #0b0f0c; font: 700 13px ui-monospace, Menlo, monospace; }
+.toggle input { width: 20px; height: 20px; accent-color: #22c55e; }

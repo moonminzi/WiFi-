@@ -24,10 +24,12 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan   # ← 본인 것으로 변경
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
-        MARKETING_VERSION: "2.1.4"
-        CURRENT_PROJECT_VERSION: "34"
+        MARKETING_VERSION: "2.1.12"
+        CURRENT_PROJECT_VERSION: "45"
     dependencies:
       - target: WifiScanTunnel
+      - target: WifiScanBlocker
+      - target: WifiScanWebExt
     entitlements:
       path: WifiScan/WifiScan.entitlements
       properties:
@@ -46,9 +48,13 @@ targets:
           - JetBrainsMono-Bold.ttf
         UILaunchScreen: {}
         # net scan의 portal 검사: captive.apple.com을 일부러 평문 http로 받아 바꿔치기를 본다
+        # 서버 nago-agent(10.53.53.53:8053, VPN 안쪽 전용 · 터널이 이미 암호화): 광고 차단 숫자·live·집 출구
         NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
           NSExceptionDomains:
             captive.apple.com:
+              NSExceptionAllowsInsecureHTTPLoads: true
+            10.53.53.53:
               NSExceptionAllowsInsecureHTTPLoads: true
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         # 아이패드: 네 방향 모두(멀티태스킹/Split View 조건)
@@ -68,6 +74,8 @@ targets:
       - path: WifiScan/VPNRegion.swift
       # 유니콘 HTTPS 설정을 앱이 만들고 확장이 읽는다(앱과 같은 코드)
       - path: WifiScan/UnicornSettings.swift
+      # nagoing(막힌 망 우회) 설정을 앱이 만들고 확장이 읽는다(앱과 같은 코드)
+      - path: WifiScan/NagoingSettings.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan.tunnel   # 앱 번들 ID + .tunnel
@@ -76,8 +84,8 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: WifiScanTunnel/WifiScanTunnel-Bridging-Header.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/NagoTun/include
         OTHER_LDFLAGS: -lnago_tun -framework Security -framework Foundation -lobjc -liconv -lresolv
-        MARKETING_VERSION: "2.1.4"
-        CURRENT_PROJECT_VERSION: "34"
+        MARKETING_VERSION: "2.1.12"
+        CURRENT_PROJECT_VERSION: "45"
     dependencies:
       - target: WireGuardGoBridgeiOS
       - target: NagoTunRust
@@ -95,6 +103,55 @@ targets:
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+
+  # Safari 콘텐츠 차단기(배너 광고·광고 칸 숨기기). 앱의 PlugIns에 들어간다. 규칙은 CI가 만든다(tools/safari-blocker)
+  WifiScanBlocker:
+    type: app-extension
+    platform: iOS
+    sources: [WifiScanBlocker]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan.blocker   # 앱 번들 ID + .blocker
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "2.1.12"
+        CURRENT_PROJECT_VERSION: "45"
+    info:
+      path: WifiScanBlocker/Info.plist
+      properties:
+        CFBundleDisplayName: NAGO Blocker
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.Safari.content-blocker
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ContentBlockerRequestHandler
+
+  # Safari 웹 확장 "NAGO": Safari의 aA·퍼즐 메뉴에서 차단기 상태 · 이 사이트에서 요소 골라 숨기기 · 사이트별 멈춤.
+  # Resources의 파일은 번들 맨 위에 그대로 들어간다(manifest.json 옆에 popup·content·아이콘)
+  WifiScanWebExt:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: WifiScanWebExt
+        excludes: ["Resources/**"]
+      - path: WifiScanWebExt/Resources
+        buildPhase: resources
+      # 같은 앱의 콘텐츠 차단기를 찾는 코드(앱과 같음)
+      - path: WifiScan/BlockerLocator.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan.webext   # 앱 번들 ID + .webext
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "2.1.12"
+        CURRENT_PROJECT_VERSION: "45"
+    info:
+      path: WifiScanWebExt/Info.plist
+      properties:
+        CFBundleDisplayName: NAGO
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.Safari.web-extension
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SafariWebExtensionHandler
 
   # wireguard-go를 libwg-go.a로 빌드(Go 필요). WireGuardKit 안내대로 External Build System 타깃.
   WireGuardGoBridgeiOS:

@@ -218,6 +218,30 @@ impl MakeExternalNeptun for MakeExternalNeptunNoop {
     fn make_external(&self, _socket: std::os::fd::RawFd) {}
 }
 
+/// NagoTun: WG 데이터그램을 UDP 소켓 대신 주고받는 바깥 전송(nagoing을 엔진에 바로 붙인다).
+///
+/// 예전엔 NepTUN이 WG 데이터그램을 127.0.0.1의 nagoing 프록시로 UDP로 보내고(sendto→recvfrom), 받을 때도 같은
+/// 홉을 거꾸로 탔다. 패킷마다 시스템 호출 둘과 스레드 넘김이 더 들었다. 여기 꽂으면 엔진 스레드가 암호화 직후
+/// 이 함수로 바로 넘기고(→ nagoing이 FEC·봉인·전송), 받는 쪽은 [`receive_external`]로 바로 복호화→tun에 쓴다.
+pub trait ExternalNet: Send + Sync {
+    /// 피어(서버)로 WG 데이터그램 하나를 보낸다. 엔진 스레드에서 바로 불리므로 오래 막지 않아야 한다.
+    fn send(&self, packet: &[u8]);
+}
+
+/// 바깥 전송을 꽂는 자리. 비어 있으면(기본) 엔진은 원래대로 UDP 소켓을 쓴다 — nagoing을 안 쓰면 경로가 그대로다.
+#[derive(Default)]
+pub struct ExternalNetSlot(parking_lot::RwLock<Option<Arc<dyn ExternalNet>>>);
+
+impl ExternalNetSlot {
+    pub fn set(&self, net: Option<Arc<dyn ExternalNet>>) {
+        *self.0.write() = net;
+    }
+
+    fn get(&self) -> Option<Arc<dyn ExternalNet>> {
+        self.0.read().clone()
+    }
+}
+
 pub struct DeviceHandle {
     pub device: Arc<Lock<Device>>, // The interface this handle owns
     #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
@@ -248,6 +272,8 @@ pub struct DeviceConfig {
     /// 끄면 NepTUN처럼 작업 스레드로 넘긴다. 폰 속도(수백 Mbps 이하)에서는 패킷마다 스레드를 깨우는
     /// 비용이 암호화보다 커서, 바로 처리하는 쪽이 1GB당 CPU를 덜 쓴다(tools/nagotun-bench). 애플에선 늘 켜진 것과 같다.
     pub inline_packets: bool,
+    /// NagoTun: 바깥 전송 자리(nagoing). 비어 있으면 UDP 소켓 그대로.
+    pub external_net: Arc<ExternalNetSlot>,
 }
 
 pub struct Device {
@@ -328,7 +354,42 @@ type EventLoopThreads = Result<
     Error,
 >;
 
+/// NagoTun: 바깥 전송이 받은 WG 데이터그램을 엔진에 넣는 손잡이. 엔진을 약하게(Weak) 쥐어서, nagoing이 이걸
+/// 들고 있어도 엔진이 멈추면 그대로 놓인다(엔진 ↔ nagoing 순환 참조 없음).
+#[derive(Clone)]
+pub struct ExternalReceiver(std::sync::Weak<Lock<Device>>);
+
+impl ExternalReceiver {
+    /// 받은 데이터그램을 검증·복호화해 tun에 쓴다. 엔진이 이미 멈췄으면 false.
+    pub fn receive(&self, packet: &[u8]) -> bool {
+        match self.0.upgrade() {
+            Some(device) => {
+                receive_external(&device, packet);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 엔진의 바깥 전송 자리를 비운다(엔진은 UDP 소켓으로 돌아간다).
+    pub fn detach(&self) {
+        if let Some(device) = self.0.upgrade() {
+            device.read().config.external_net.set(None);
+        }
+    }
+}
+
 impl DeviceHandle {
+    /// NagoTun: 바깥 전송(nagoing)을 꽂거나(Some) 비운다(None). 비우면 다음 패킷부터 UDP 소켓으로 돌아간다.
+    pub fn set_external_net(&self, net: Option<Arc<dyn ExternalNet>>) {
+        self.device.read().config.external_net.set(net);
+    }
+
+    /// NagoTun: 바깥 전송이 받은 걸 엔진에 넣는 손잡이.
+    pub fn external_receiver(&self) -> ExternalReceiver {
+        ExternalReceiver(Arc::downgrade(&self.device))
+    }
+
     pub fn new(name: &str, config: DeviceConfig) -> Result<DeviceHandle, Error> {
         tracing::info!("NagoTun engine starting up ({})", env!("CARGO_PKG_VERSION"));
         Self::new_with_tun(TunSocket::new(name)?, config)
@@ -349,6 +410,17 @@ impl DeviceHandle {
             threads,
             sockets_to_close,
         })
+    }
+
+    /// 가짜 tun(MTU ioctl 없이 값으로)으로 띄운다 — `mock-tun` 기능을 켠 nago_tun 시험·벤치용.
+    #[cfg(feature = "mock-tun")]
+    pub fn new_with_mock_tun(tun: TunSocket, mtu: usize, config: DeviceConfig) -> Result<DeviceHandle, Error> {
+        let n_threads = config.n_threads;
+        let mut wg_interface = Device::new_with_mock_tun(tun, mtu, config)?;
+        wg_interface.open_listen_socket(0)?;
+        let interface_lock = Arc::new(Lock::new(wg_interface));
+        let (threads, sockets_to_close) = Self::start_event_loop_threads(n_threads, interface_lock.clone())?;
+        Ok(DeviceHandle { device: interface_lock, threads, sockets_to_close })
     }
 
     fn start_event_loop_threads(
@@ -765,7 +837,7 @@ impl Device {
         Self::new_with_iface(iface, mtu, config)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "mock-tun"))]
     pub(crate) fn new_with_mock_tun(
         tun: TunSocket,
         mtu: usize,
@@ -1037,6 +1109,10 @@ impl Device {
                         }
                         TunnResult::Err(e) => tracing::error!(message = "Timer error", error = ?e),
                         TunnResult::WriteToNetwork(packet) => {
+                            if let Some(ext) = d.config.external_net.get() {
+                                ext.send(packet);
+                                continue;
+                            }
                             let res = match endpoint_addr {
                                 SocketAddr::V4(_) => {
                                     udp4.send_to(packet, &endpoint_addr.into())
@@ -1444,7 +1520,14 @@ fn process_iface_inline(
                 }
 
                 let len = payload.len();
-                encapsulate_and_send(&peer, &mut thread_data.dst_buf[..], len, udp4, udp6);
+                encapsulate_and_send(
+                    &peer,
+                    &mut thread_data.dst_buf[..],
+                    len,
+                    udp4,
+                    udp6,
+                    &device.config.external_net,
+                );
             }
         }
     }
@@ -1490,6 +1573,7 @@ fn encapsulate_and_send(
     payload_len: usize,
     udp4: &socket2::Socket,
     udp6: &socket2::Socket,
+    ext: &ExternalNetSlot,
 ) {
     let res = {
         let mut tun = peer.tunnel.lock();
@@ -1503,6 +1587,10 @@ fn encapsulate_and_send(
                 error = ?e, peer = %peer.public_key);
         }
         TunnResult::WriteToNetwork(packet) => {
+            if let Some(ext) = ext.get() {
+                ext.send(packet);
+                return;
+            }
             let endpoint = peer.endpoint();
             if let Some(conn) = endpoint.conn.as_ref() {
                 match conn.send(packet) {
@@ -1541,6 +1629,100 @@ fn encapsulate_and_send(
         }
         _ => {
             tracing::error!(peer = %peer.public_key, "Unexpected result from encapsulate");
+        }
+    }
+}
+
+thread_local! {
+    /// receive_external의 복호화 버퍼(부르는 스레드마다 하나 — 패킷마다 할당하지 않게).
+    static EXT_DST: std::cell::RefCell<[u8; MAX_PKT_SIZE]> = const { std::cell::RefCell::new([0u8; MAX_PKT_SIZE]) };
+}
+
+/// NagoTun: 바깥 전송(nagoing)이 받은 WG 데이터그램 하나를 엔진에 넣는다 — UDP 소켓으로 받은 것과 같게
+/// 검증·복호화해 tun에 쓰고, 답할 게 있으면(핸드셰이크 응답·쿠키·대기열) 바깥 전송으로 보낸다.
+/// 로컬 UDP 홉 없이 nagoing의 수신 스레드에서 바로 부른다. 기기 잠금은 읽기로만 잠깐 쥔다.
+fn receive_external(device: &Lock<Device>, packet: &[u8]) {
+    let d = device.read();
+    let Some(ext) = d.config.external_net.get() else {
+        return;
+    };
+    EXT_DST.with(|buf| {
+        let mut buf = buf.borrow_mut();
+        d.handle_external(packet, &mut buf[..], ext.as_ref());
+    });
+}
+
+impl Device {
+    fn handle_external(&self, packet: &[u8], dst: &mut [u8], ext: &dyn ExternalNet) {
+        let Some((private_key, public_key)) = self.key_pair.as_ref() else {
+            return;
+        };
+        // 원래 UDP 수신 처리와 같은 순서: 속도 제한(쿠키) → 파싱 → 피어 찾기 → 처리.
+        // 바깥 전송에선 상대 주소가 늘 서버 하나라 주소 대신 None을 쓴다.
+        let parsed = match self.rate_limiter.as_ref() {
+            Some(rate_limiter) => match rate_limiter.verify_packet(None, packet, dst) {
+                Ok(p) => p,
+                Err(TunnResult::WriteToNetwork(cookie)) => {
+                    ext.send(cookie);
+                    return;
+                }
+                Err(_) => return,
+            },
+            None => match Tunn::parse_incoming_packet(packet) {
+                Ok(p) => p,
+                Err(_) => return,
+            },
+        };
+        let peer = match &parsed {
+            Packet::HandshakeInit(p) => parse_handshake_anon(private_key, public_key, p)
+                .ok()
+                .and_then(|hh| self.peers.get(&x25519::PublicKey::from(hh.peer_static_public))),
+            Packet::HandshakeResponse(p) => self.peers_by_idx.get(&(p.receiver_idx >> 8)),
+            Packet::PacketCookieReply(p) => self.peers_by_idx.get(&(p.receiver_idx >> 8)),
+            Packet::PacketData(p) => self.peers_by_idx.get(&(p.receiver_idx >> 8)),
+        };
+        let Some(peer) = peer else {
+            return;
+        };
+
+        let res = {
+            let mut tun = peer.tunnel.lock();
+            tun.handle_verified_packet(parsed, dst)
+        };
+        let flush = match res {
+            TunnResult::Done => false,
+            TunnResult::Err(err) => {
+                tracing::warn!(message = "Failed to handle external packet", error = ?err, peer = %peer.public_key);
+                return;
+            }
+            TunnResult::WriteToNetwork(packet) => {
+                ext.send(packet);
+                true
+            }
+            TunnResult::WriteToTunnel(packet, addr) => {
+                if let Some(callback) = &self.config.firewall_process_inbound_callback {
+                    if !callback(peer.public_key.as_bytes(), packet) {
+                        return;
+                    }
+                }
+                if peer.is_allowed_ip(addr) {
+                    _ = self.iface.as_ref().write(packet);
+                }
+                false
+            }
+        };
+        if flush {
+            // 핸드셰이크가 끝나 쌓여 있던 패킷을 내보낸다.
+            loop {
+                let res = {
+                    let mut tun = peer.tunnel.lock();
+                    tun.decapsulate(None, &[], dst)
+                };
+                let TunnResult::WriteToNetwork(packet) = res else {
+                    break;
+                };
+                ext.send(packet);
+            }
         }
     }
 }
@@ -1732,6 +1914,7 @@ mod tests {
             inter_thread_channel_size: None,
             max_inter_thread_batched_pkts: None,
             inline_packets: false,
+            external_net: Default::default(),
         };
 
         (
@@ -1847,6 +2030,8 @@ mod tests {
             skt_buffer_size: None,
             inter_thread_channel_size: None,
             max_inter_thread_batched_pkts: None,
+            inline_packets: false,
+            external_net: Default::default(),
         };
 
         let device_secret = x25519::StaticSecret::random_from_rng(&mut OsRng);

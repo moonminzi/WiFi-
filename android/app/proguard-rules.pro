@@ -5,3 +5,4 @@
 
 # NepTUN(NagoTun) JNI: 네이티브 함수 이름이 Java_com_nago_vpn_NeptunNative_* 로 고정
 -keep class com.nago.vpn.NeptunNative { native <methods>; }
+-keep class com.nago.vpn.NagoingNative { native <methods>; }

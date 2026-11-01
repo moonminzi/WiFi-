@@ -19,6 +19,8 @@ default = []
 device = ["socket2", "thiserror"]
 # mocks std::time::Instant with mock_instant
 mock-instant = ["mock_instant"]
+# NagoTun: 파일 디스크립터로 가짜 tun을 만든다(리눅스 시험·벤치용 — nago_tun의 dev 빌드만 켠다)
+mock-tun = []
 xray = []
 docker-tests = []
 

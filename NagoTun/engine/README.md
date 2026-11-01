@@ -15,6 +15,8 @@ NAGO VPN의 WireGuard 엔진. NordSecurity의 [NepTUN](https://github.com/NordSe
 | 2 | **이벤트 루프 하나일 때 읽기 이벤트를 레벨 트리거로**(epoll ONESHOT·다시 켜기 없음) | 깰 때마다 `epoll_ctl` 하나 덜. 루프가 둘 이상이면 NepTUN 그대로 | `device/epoll.rs` |
 | 3 | 빈 묶음으로 tun 작업 스레드를 깨우지 않음 | 작업 스레드 모드에서 헛깨움 | `device/mod.rs` |
 | 4 | IPv6가 없는 커널에서도 뜸(v6 소켓 대신 쓰지 않는 v4 소켓) | 벤치 VM 등. 폰에서는 늘 v6 소켓이 있다 | `device/mod.rs` |
+| 5 | **바깥 전송 자리**(`DeviceConfig::external_net`, `DeviceHandle::set_external_net`·`external_receiver`) — nagoing을 엔진에 바로 붙임 | 127.0.0.1 UDP 홉(패킷마다 sendto/recvfrom + 스레드 넘김)을 없앤다. 비어 있으면 UDP 그대로 | `device/mod.rs`, `device/packet_workers.rs` |
+| 6 | `mock-tun` 기능: 가짜 tun으로 `DeviceHandle`을 띄움 | nago_tun의 끝에서 끝 시험·벤치(리눅스, dev 빌드만) | `device/mod.rs`, `device/tun_linux.rs` |
 
 앱 쪽 기본값도 같이 바꿨다: **이벤트 루프 1개**(iOS·안드로이드), 안드로이드는 바로 처리(작업 스레드 없음).
 iOS 관리자용 settings → loops에서 2로 바꿔 비교할 수 있다.

@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextMeasurer
@@ -114,10 +115,19 @@ data class Geo(val lat: Double, val lon: Double, val city: String) {
 /** 그 나라 AWS 리전이 있는 곳 */
 val VpnRegion.geo: Geo
     get() = when (this) {
-        VpnRegion.kr -> Geo(37.5665, 126.978, "seoul")
-        VpnRegion.jp -> Geo(35.6762, 139.6503, "tokyo")
-        VpnRegion.us -> Geo(45.84, -119.70, "oregon")
-        VpnRegion.uk -> Geo(51.5074, -0.1278, "london")
+        VpnRegion.kr -> Geo(37.5665, 126.978, city)
+        VpnRegion.jp -> Geo(35.6762, 139.6503, city)
+        VpnRegion.us -> Geo(45.84, -119.70, city)
+        VpnRegion.uk -> Geo(51.5074, -0.1278, city)
+        VpnRegion.sg -> Geo(1.3521, 103.8198, city)
+        VpnRegion.de -> Geo(50.1109, 8.6821, city)
+        VpnRegion.fr -> Geo(48.8566, 2.3522, city)
+        VpnRegion.ie -> Geo(53.3498, -6.2603, city)
+        VpnRegion.se -> Geo(59.3293, 18.0686, city)
+        VpnRegion.ca -> Geo(45.5017, -73.5673, city)
+        VpnRegion.br -> Geo(-23.5505, -46.6333, city)
+        VpnRegion.au -> Geo(-33.8688, 151.2093, city)
+        VpnRegion.`in` -> Geo(19.0760, 72.8777, city)
     }
 
 /** 지도 칸 값(2부터 VpnRegion 순서) */
@@ -306,6 +316,8 @@ fun RouteMap(
     /** 지금 받는·보내는 속도(바이트/초). 연결돼 있을 때 경로 위 흐름의 양 */
     flowDown: Double = 0.0,
     flowUp: Double = 0.0,
+    /** 네트워크 검사 중(레이더) */
+    scanning: Boolean = false,
 ) {
     val context = LocalContext.current
     remember { WorldDots.load(context) }
@@ -317,9 +329,9 @@ fun RouteMap(
 
     // 움직일 게 있을 때만 프레임마다 다시 그린다(연결 중엔 계속, 바뀐 뒤엔 잠깐, 연결된 뒤엔 신호가 퍼지는 동안)
     // 흐름이 있으면 계속, 멈추면 흐르던 점이 서서히 사라지는 동안(2.5초) 더 그린다
-    LaunchedEffect(stage, destination, hop, flowing) {
+    LaunchedEffect(stage, destination, hop, flowing, scanning) {
         val wake = when {
-            stage == RouteStage.Connecting || flowing -> Double.MAX_VALUE
+            stage == RouteStage.Connecting || flowing || scanning -> Double.MAX_VALUE
             stage == RouteStage.Connected -> 10.0
             else -> 3.5
         }
@@ -339,7 +351,7 @@ fun RouteMap(
             },
     ) {
         model.sync(stage, destination, hop, now)
-        model.flow(flowDown, flowUp, now)
+        model.flow(flowDown, flowUp, scanning, now)
         model.draw(this, measurer, now, top.toPx(), bottom.toPx())
     }
 }
@@ -400,6 +412,11 @@ class FlowLane {
 class RouteMapModel {
     private enum class Framing { Route, Focus }
 
+    private companion object {
+        /** 같은 도시(서울에서 kr)일 때 목적지를 도는 고리 반지름(dp). 22였을 땐 고리·번호·you·꼬리표가 한 점에 몰려 답답했다 */
+        const val ORBIT = 34.0
+    }
+
     private val origin = Geo.here
     private val arcs = VpnRegion.entries.associateWith { RouteArc(origin, it.geo) }
     private var started = false
@@ -415,6 +432,10 @@ class RouteMapModel {
     private val down = FlowLane()
     private val up = FlowLane()
     private var flowAt: Double? = null
+    private var scanning = false
+    private var scanAt = 0.0
+    /** 검사가 끝난 시각(레이더가 서서히 사라진다) */
+    private var scanEndAt: Double? = null
     private var w = 0.0
     private var h = 0.0
     private var top = 0.0
@@ -426,13 +447,22 @@ class RouteMapModel {
 
     // MARK: 상태 맞추기
 
-    fun flow(downRate: Double, upRate: Double, now: Double) {
+    fun flow(downRate: Double, upRate: Double, newScanning: Boolean, now: Double) {
         // 멈춰 있던 뒤 첫 프레임에 한꺼번에 건너뛰지 않게
         val dt = minOf(0.1, maxOf(0.0, flowAt?.let { now - it } ?: 0.0))
         flowAt = now
         val active = stage == RouteStage.Connected
         down.step(downRate, active, dt)
         up.step(upRate, active, dt)
+        if (newScanning && !scanning) {
+            // 사라지는 중에 다시 켜지면 각도가 튀지 않게 이어 간다
+            val resuming = scanEndAt?.let { now - it < 0.6 } ?: false
+            if (!resuming) scanAt = now
+            scanEndAt = null
+        } else if (!newScanning && scanning) {
+            scanEndAt = now
+        }
+        scanning = newScanning
     }
 
     fun sync(newStage: RouteStage, newDestination: VpnRegion, hop: String?, now: Double) {
@@ -524,7 +554,11 @@ class RouteMapModel {
         return when (framing) {
             Framing.Focus -> at(arc.b, focusZ)
             Framing.Route -> {
-                if (arc.local) return at(arc.b, focusZ - 0.35)
+                if (arc.local) {
+                    // 고리 아래에 꼬리표(you ⇄ kr · seoul)가 붙으니 서울을 가운데보다 12dp 위로
+                    val z = focusZ - 0.6
+                    return Camera(arc.b.x, arc.b.y + (shift - 12 * d) / 2.0.pow(z), z)
+                }
                 val apex = arc.point(0.5)
                 val xs = listOf(arc.a.x, arc.b.x, apex.x)
                 val ys = listOf(arc.a.y, arc.b.y, apex.y)
@@ -580,6 +614,8 @@ class RouteMapModel {
         drawRect(Term.bg)
         drawDots(this, view, now)
         drawEdgeFade(this)
+        val radar = radarAlpha(now)
+        if ((scanning || scanEndAt != null) && radar > 0.005) drawRadar(this, view, now, radar)
         drawRoute(this, tm, view, now)
         drawHud(this, tm, view)
     }
@@ -654,7 +690,7 @@ class RouteMapModel {
     private fun drawRoute(s: DrawScope, tm: TextMeasurer, view: View, now: Double) = with(s) {
         val local = arc.local
         val b = view.point(arc.b)
-        val orbit = 22 * density
+        val orbit = (ORBIT * density).toFloat()
         fun at(f: Double): Offset {
             if (local) {
                 val angle = -PI / 2 + f * 2 * PI
@@ -684,7 +720,8 @@ class RouteMapModel {
 
         // 고를 수 있는 다른 나라로 가는 길(아주 옅게)
         if (stage == RouteStage.Idle || stage == RouteStage.Failed) {
-            for (region in VpnRegion.entries) {
+            // 임시 서버 나라까지 그으면 지도가 실선 뭉치가 된다 — 늘 있는 서버로 가는 길만
+            for (region in VpnRegion.fixed) {
                 if (region == destination) continue
                 val other = arcs.getValue(region)
                 if (other.local) continue
@@ -723,6 +760,11 @@ class RouteMapModel {
                 drawRect(Term.bg.copy(alpha = alpha), rect.topLeft, rect.size)
                 drawRect((if (failed && i == r.stops.size - 1) Term.red else Term.green).copy(alpha = alpha),
                     rect.topLeft, rect.size, style = Stroke(1.2f * density))
+                // 서울 고리에선 번호가 좁은 데 몰리니, 연결되고 1.5~2.5초 사이에 번호만 흐려지고 칸은 남는다
+                val finish = r.finish
+                val numberAlpha = if (local && finish != null) {
+                    alpha * (1 - RouteMath.smooth(1.5, 2.5, now - finish.time)).toFloat()
+                } else alpha
                 // 번호는 경로 바깥쪽(위)에
                 val q = at(min(1.0, stop.f + 0.01))
                 val tx = q.x - p.x
@@ -737,8 +779,10 @@ class RouteMapModel {
                     nx = -nx
                     ny = -ny
                 }
-                label(tm, "%02d".format(i), Offset(p.x + nx * 11 * density, p.y + ny * 11 * density), Anchor.Center,
-                    9.sp, FontWeight.Normal, Term.muted.copy(alpha = alpha))
+                if (numberAlpha > 0.01f) {
+                    label(tm, "%02d".format(i), Offset(p.x + nx * 11 * density, p.y + ny * 11 * density), Anchor.Center,
+                        9.sp, FontWeight.Normal, Term.muted.copy(alpha = numberAlpha))
+                }
             }
         }
 
@@ -816,16 +860,43 @@ class RouteMapModel {
             val x = view.sx(base + offset)
             val y = view.sy(RouteMath.mercY(geo.lat))
             if (x < -40 * density || x > size.width + 40 * density || y < -20 * density || y > size.height + 20 * density) continue
-            hits += region to Offset(x, y)
+            // 목적지가 아닌 나라는 머리줄·아래 패널 밑에선 땅 점처럼 흐려진다. 안 그러면 땅은 흐려졌는데
+            // 북쪽에 있는 uk만 머리줄 옆에 또렷하게 떠 있다(넓게 볼 때). 거의 안 보이면 누를 수도 없다
+            val shown = if (on) 1.0 else edgeVisibility(y.toDouble())
+            if (shown <= 0.02) continue
+            if (shown > 0.5) hits += region to Offset(x, y)
+            // 고르지 않은 나라는 이름 없이 점만: 늘 있는 서버는 빈 칸, 임시 서버 나라는 더 작은 칸.
+            // 이름은 아래 카드·칸에 있고, 지도의 점은 눌러서 고를 수 있다
+            if (!on) {
+                val half = (if (region.onDemand) 2.5f else 3.5f) * density
+                val a = shown.toFloat()
+                drawRect(Term.bg.copy(alpha = a), Offset(x - half, y - half), Size(half * 2, half * 2))
+                drawRect(Term.muted.copy(alpha = a * (if (region.onDemand) 0.7f else 1f)),
+                    Offset(x - half, y - half), Size(half * 2, half * 2),
+                    style = Stroke((if (region.onDemand) 1f else 1.2f) * density))
+                continue
+            }
             val half = 3.5f * density
-            drawRect(if (on) Term.green else Term.bg, Offset(x - half, y - half), Size(half * 2, half * 2))
-            drawRect(if (on) Term.green else Term.muted, Offset(x - half, y - half), Size(half * 2, half * 2),
-                style = Stroke(1.2f * density))
-            val text = if (on && stage == RouteStage.Connected) "${region.name} · ${geo.city}" else region.name
-            val dx = if (on && arc.local) 22 * density + 7 * density else 8 * density
-            label(tm, text, Offset(x + dx, y), Anchor.Leading, 10.sp,
-                if (on) FontWeight.SemiBold else FontWeight.Normal, if (on) Term.green else Term.muted)
+            drawRect(Term.green, Offset(x - half, y - half), Size(half * 2, half * 2))
+            val text = if (stage == RouteStage.Connected) "${region.name} · ${geo.city}" else region.name
+            // 목적지 나라는 땅 점이 초록으로 켜져서 초록 글자가 묻힌다 → 배경색 판 + 초록 테두리(꼬리표)
+            if (arc.local) {
+                // 서울에서 kr: you와 서버가 같은 점이라 이름표를 하나로 합쳐 고리 아래 가운데에
+                label(tm, "you ⇄ $text", Offset(x, y + ((ORBIT + 24) * density).toFloat()), Anchor.Center, 10.sp,
+                    FontWeight.SemiBold, Term.green, backed = true, outline = Term.green.copy(alpha = 0.45f))
+            } else {
+                // 연결되면 고리(반지름 14) 밖에서 시작한다 — 안에서 시작하면 고리가 글자를 긋는다
+                label(tm, text, Offset(x + 22 * density, y), Anchor.Leading, 10.sp, FontWeight.SemiBold, Term.green,
+                    backed = true, outline = Term.green.copy(alpha = 0.45f))
+            }
         }
+    }
+
+    /** 0(머리줄·아래 패널 밑) ~ 1(보이는 지도). 위는 머리줄 아래 끝부터, 아래는 도시 → 도시 줄 언저리부터 흐린다 */
+    private fun edgeVisibility(y: Double): Double {
+        val t = RouteMath.smooth(top - 12 * d, top + 14 * d, y)
+        val b = 1 - RouteMath.smooth(h - bottom - 30 * d, h - bottom - 6 * d, y)
+        return min(t, b)
     }
 
     private fun drawYou(s: DrawScope, tm: TextMeasurer, view: View) = with(s) {
@@ -834,11 +905,58 @@ class RouteMapModel {
         for (region in VpnRegion.entries) if (origin.km(region.geo) <= 150) hits += region to p
         drawCircle(Term.text, 3.2f * density, p)
         drawCircle(Term.text.copy(alpha = 0.35f), 6.5f * density, p, style = Stroke(1 * density))
-        if (arc.local) {
-            label(tm, "you", Offset(p.x, p.y - 22 * density - 10 * density), Anchor.Center, 10.sp, FontWeight.Normal, Term.text)
-        } else {
-            label(tm, "you", Offset(p.x - 9 * density, p.y), Anchor.Trailing, 10.sp, FontWeight.Normal, Term.text)
+        when {
+            // 서울에서 kr: you는 고리 아래 목적지 꼬리표(you ⇄ kr · seoul)에 같이 쓴다
+            arc.local -> Unit
+            // 화면 왼쪽 끝이면 왼쪽에 쓰면 잘린다 → 점 아래에
+            p.x < 44 * density -> label(tm, "you", Offset(max(p.x, 18 * density), p.y + 16 * density), Anchor.Center,
+                10.sp, FontWeight.Normal, Term.text, backed = true)
+            else -> label(tm, "you", Offset(p.x - 12 * density, p.y), Anchor.Trailing, 10.sp, FontWeight.Normal, Term.text,
+                backed = true)
         }
+    }
+
+    /** 레이더가 켜질 때 0.35초, 꺼질 때 0.6초에 걸쳐 서서히 */
+    private fun radarAlpha(now: Double): Double {
+        val fadeIn = RouteMath.smooth(0.0, 0.35, now - scanAt)
+        val fadeOut = scanEndAt?.let { 1 - RouteMath.smooth(0.0, 0.6, now - it) } ?: 1.0
+        return fadeIn * fadeOut
+    }
+
+    /** you 둘레를 도는 레이더: 테두리 원 + 퍼지는 고리 둘 + 꼬리가 옅어지는 부채꼴 */
+    private fun drawRadar(s: DrawScope, view: View, now: Double, alpha: Double) = with(s) {
+        val p = view.point(origin.world)
+        val since = now - scanAt
+        val reach = min(110 * density, max(60 * density, size.width * 0.22f))
+        val a = alpha.toFloat()
+        drawCircle(Term.green.copy(alpha = 0.035f * a), reach, p)
+        drawCircle(Term.green.copy(alpha = 0.18f * a), reach, p, style = Stroke(1 * density))
+        for (k in 0 until 2) {
+            val u = (since / 2.2 + k / 2.0) % 1.0
+            val e = RouteMath.easeOut(u)
+            drawCircle(Term.green.copy(alpha = (0.4 * (1 - u)).toFloat() * a), (6 * density + (reach - 6 * density) * e).toFloat(), p,
+                style = Stroke(1 * density))
+        }
+        // 한 바퀴 2.6초, 꼬리 66°
+        val angle = since * 2 * PI / 2.6
+        val trail = 1.15
+        val span = (trail / (2 * PI)).toFloat()
+        val green = Term.green
+        rotate(Math.toDegrees(angle - trail).toFloat(), p) {
+            drawCircle(
+                Brush.sweepGradient(
+                    0f to green.copy(alpha = 0f),
+                    span to green.copy(alpha = 0.32f * a),
+                    min(span + 0.003f, 1f) to green.copy(alpha = 0f),
+                    1f to green.copy(alpha = 0f),
+                    center = p,
+                ),
+                reach, p,
+            )
+        }
+        val tip = Offset(p.x + reach * cos(angle).toFloat(), p.y + reach * sin(angle).toFloat())
+        drawLine(green.copy(alpha = 0.8f * a), p, tip, 1.2f * density, cap = StrokeCap.Round)
+        drawCircle(green.copy(alpha = a), 2 * density, tip)
     }
 
     /** 오른쪽 위: 카메라 중심 좌표 · 아래: 도시 → 도시와 거리 */
@@ -860,9 +978,12 @@ class RouteMapModel {
 
     private enum class Anchor { Leading, Trailing, Center }
 
-    /** [backed]: 글자 뒤에 배경색 판을 옅게 깐다(HUD — 밑에 깔린 나라 점에 글자가 묻히지 않게) */
+    /**
+     * [backed]: 글자 뒤에 배경색 판을 옅게 깐다(밑에 깔린 나라 점에 글자가 묻히지 않게).
+     * [outline]: 판을 더 진하게 하고 테두리를 둘러 꼬리표처럼(목적지 — 켜진 초록 땅 점 위)
+     */
     private fun DrawScope.label(tm: TextMeasurer, text: String, at: Offset, anchor: Anchor, size: TextUnit,
-                                weight: FontWeight, color: Color, backed: Boolean = false) {
+                                weight: FontWeight, color: Color, backed: Boolean = false, outline: Color? = null) {
         val layout = tm.measure(text, Term.mono(size, weight, color))
         val width = layout.size.width
         val left = when (anchor) {
@@ -872,11 +993,13 @@ class RouteMapModel {
         }
         val top = at.y - layout.size.height / 2f
         if (backed) {
-            drawRoundRect(
-                Term.bg.copy(alpha = 0.75f), Offset(left - 4 * density, top - 2 * density),
-                Size(width + 8 * density, layout.size.height + 4 * density),
-                androidx.compose.ui.geometry.CornerRadius(3 * density),
-            )
+            val padX = (if (outline == null) 4 else 6) * density
+            val padY = (if (outline == null) 2f else 3.5f) * density
+            val corner = androidx.compose.ui.geometry.CornerRadius((if (outline == null) 3 else 4) * density)
+            val plateAt = Offset(left - padX, top - padY)
+            val plate = Size(width + padX * 2, layout.size.height + padY * 2)
+            drawRoundRect(Term.bg.copy(alpha = if (outline == null) 0.75f else 0.9f), plateAt, plate, corner)
+            outline?.let { drawRoundRect(it, plateAt, plate, corner, style = Stroke(1 * density)) }
         }
         drawText(layout, topLeft = Offset(left, top))
     }

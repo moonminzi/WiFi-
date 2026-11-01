@@ -156,8 +156,8 @@ final class SpeedTest {
     func showDemo() {
         let now = Date()
         history = [
-            Result(at: now.addingTimeInterval(-60), via: "wg/nagotun ×1 · jp", downMbps: 312.4, upMbps: 88.1, idleMs: 31, loadedMs: 52),
-            Result(at: now.addingTimeInterval(-420), via: "wg/nagotun ×2 · jp", downMbps: 243.9, upMbps: 86.7, idleMs: 31, loadedMs: 71),
+            Result(at: now.addingTimeInterval(-60), via: "wg/NagoTun ×1 · jp", downMbps: 312.4, upMbps: 88.1, idleMs: 31, loadedMs: 52),
+            Result(at: now.addingTimeInterval(-420), via: "wg/NagoTun ×2 · jp", downMbps: 243.9, upMbps: 86.7, idleMs: 31, loadedMs: 71),
             Result(at: now.addingTimeInterval(-900), via: "wg/go · jp", downMbps: 228.0, upMbps: 80.2, idleMs: 32, loadedMs: 66),
             Result(at: now.addingTimeInterval(-1500), via: "direct", downMbps: 486.5, upMbps: 121.0, idleMs: 9, loadedMs: 38),
         ]

@@ -4,7 +4,11 @@ import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,32 +21,36 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.Executors
 
 /**
- * 앱 안 WireGuard의 NepTUN 엔진(NordVPN의 Rust 엔진). VpnService가 만든 TUN을 엔진 스레드가 직접 읽고 쓴다.
- * 앱 자신은 VPN에서 빼 둬서(addDisallowedApplication) 엔진의 UDP 소켓과 국가 API 요청은 터널 밖으로 나간다.
- * 핸드셰이크가 끊기면(서버 유휴 종료, 재부팅으로 IP 변경) 국가 API로 서버를 깨우고 새 주소로 바꾼다.
- * 시스템이 다시 띄우면(항상 켜기, 프로세스 재시작) 마지막으로 연결한 설정으로 다시 붙는다.
+ * 앱 안 WireGuard의 NagoTun 엔진(NepTUN을 고친 Rust 엔진). VpnService가 만든 TUN을 엔진 스레드가 직접 읽고 쓴다.
+ * 앱도 VPN 안에 있다(iOS처럼 — 속도 측정·네트워크 검사·출구 확인이 터널을 지나게). 서버로 가는 소켓(엔진의 UDP,
+ * nagoing의 UDP·TCP)만 엔진이 만들 때 protect()로 터널 밖으로 뺀다(NagoTun/src/android.rs).
+ * nagoing을 켜면 WG를 막힌 망 우회 전송(QUIC 모양 UDP → 막히면 TLS 1.3/TCP 443)으로 감싸고 엔진에 바로 붙인다.
+ * 핸드셰이크가 끊기면(서버 유휴 종료, 재부팅으로 IP 변경) 실제 와이파이·모바일 데이터로 국가 API에 물어 서버를 깨우고
+ * 새 주소로 바꾼다. 시스템이 다시 띄우면(항상 켜기, 프로세스 재시작) 마지막으로 연결한 설정으로 다시 붙는다.
  */
 class NeptunVpnService : VpnService() {
     data class Session(
         val privateKey: String,     // base64
         val address: String,        // 10.9.0.x
         val serverPub: String,
-        val endpoint: String,       // ip:port
+        val endpoint: String,       // ip:port (서버 WG)
         val dns: List<String>,
         val allowLan: Boolean,
         val region: String,
         val apiKey: String,
-    )
+        /** NagoTun 이벤트 루프 수(settings → loops) */
+        val loops: Int = 1,
+        /** 막힌 망 우회. null이면 끔(엔진이 서버 WG 포트로 바로 보낸다) */
+        val nagoing: NagoingSettings? = null,
+    ) {
+        val serverIp get() = endpoint.substringBeforeLast(':').trim('[', ']')
+    }
 
     companion object {
         private const val ACTION_STOP = "com.nago.vpn.NEPTUN_STOP"
-        /**
-         * NagoTun 이벤트 루프 1개. 패킷은 루프에서 바로 처리한다(작업 스레드 없음).
-         * NepTUN 방식(루프 4개 + 작업 스레드)보다 같은 속도에 1GB당 CPU가 절반 안팎(tools/nagotun-bench)
-         */
-        private const val THREADS = 1
 
         val up = MutableStateFlow(false)
         val failure = MutableStateFlow<String?>(null)
@@ -50,8 +58,17 @@ class NeptunVpnService : VpnService() {
         /** 지금 엔진을 돌리는 서비스(통계 읽기용) */
         @Volatile private var running: NeptunVpnService? = null
 
+        /**
+         * 켜고 끄는 일은 프로세스에 하나뿐인 이 스레드에서 차례로 한다. nagoing은 멈출 때 연결 수립을 기다리느라
+         * 몇 초 걸릴 수 있어서 메인 스레드에서 하지 않고, 바로 다시 켤 때 예전 것이 로컬 포트를 놓기 전에 켜지지 않게.
+         */
+        private val worker = Executors.newSingleThreadExecutor { Thread(it, "nagotun-service") }
+
         /** 받은·보낸 바이트와 마지막 핸드셰이크. 꺼져 있으면 null. 엔진 잠금을 잡으니 메인 스레드에서 부르지 않는다. */
         fun stats(): LinkStats? = running?.readStats()
+
+        /** nagoing 전송 상태 한 줄("udp · tx .. · rx .. · fec+..") — 켜져 있을 때만 */
+        fun transport(): String? = running?.nagoingStats()
 
         fun start(context: Context, session: Session) {
             pending = session
@@ -72,7 +89,7 @@ class NeptunVpnService : VpnService() {
                 failure.value?.let { throw IllegalStateException(it) }
                 delay(200)
             }
-            throw IllegalStateException("nagotun: start timeout")
+            throw IllegalStateException("NagoTun: start timeout")
         }
 
         private fun prefs(context: Context) = context.getSharedPreferences("nago", Context.MODE_PRIVATE)
@@ -86,6 +103,8 @@ class NeptunVpnService : VpnService() {
                 .put("dns", JSONArray(s.dns))
                 .put("allowLan", s.allowLan)
                 .put("region", s.region)
+                .put("loops", s.loops)
+            s.nagoing?.let { n -> json.put("nagoing", JSONObject().put("prefer", n.prefer).put("fec", n.fec)) }
             prefs(context).edit().putString("neptunSession", json.toString()).apply()
         }
 
@@ -103,6 +122,8 @@ class NeptunVpnService : VpnService() {
                 allowLan = o.optBoolean("allowLan"),
                 region = o.getString("region"),
                 apiKey = apiKey(context) ?: "",
+                loops = o.optInt("loops", 1),
+                nagoing = o.optJSONObject("nagoing")?.let { NagoingSettings(prefer = it.optString("prefer", "auto"), fec = it.optBoolean("fec", true)) },
             )
         }.getOrNull()
 
@@ -114,7 +135,11 @@ class NeptunVpnService : VpnService() {
 
     private val lock = Any()
     private var handle = 0L
+    /** nagoing 클라이언트(켰을 때만) */
+    private var nagoing = 0L
     @Volatile private var session: Session? = null
+    /** VPN 밑의 실제 회선(와이파이·모바일 데이터). 터널이 죽었을 때 국가 API를 여기로 묻는다 */
+    @Volatile private var underlying: Network? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var watchdog: Job? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
@@ -122,35 +147,39 @@ class NeptunVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         NagoLog.catchCrashes(this)
         if (intent?.action == ACTION_STOP) {
-            teardown("stop")
-            stopSelf()
+            worker.execute {
+                teardown("stop")
+                // 그사이 새 연결(갈아타기)이 들어왔으면 서비스는 남겨 둔다 — 가장 최근 요청일 때만 멈춘다
+                stopSelfResult(startId)
+            }
             return START_NOT_STICKY
         }
         // 앱이 넘긴 설정, 없으면(시스템이 다시 띄움) 마지막으로 연결한 설정
         val s = pending ?: restore(this)
         pending = null
         if (s == null) {
-            fail("nagotun: no saved config")
+            fail("NagoTun: no saved config")
             return START_NOT_STICKY
         }
-        // 여기서 예외가 나면 앱 프로세스째 죽고, START_STICKY라 시스템이 다시 띄우며 또 죽는다 → 실패로 돌린다
-        return try {
-            bringUp(s)
-            START_STICKY
-        } catch (e: Exception) {
-            teardown(null)
-            fail("nagotun: ${e.javaClass.simpleName}: ${e.message}")
-            START_NOT_STICKY
+        worker.execute {
+            // 여기서 예외가 나면 앱 프로세스째 죽고, START_STICKY라 시스템이 다시 띄우며 또 죽는다 → 실패로 돌린다
+            try {
+                bringUp(s)
+            } catch (e: Exception) {
+                teardown(null)
+                fail("NagoTun: ${e.javaClass.simpleName}: ${e.message}")
+            }
         }
+        return START_STICKY
     }
 
     override fun onRevoke() {
-        teardown("revoked")
+        worker.execute { teardown("revoked") }
         super.onRevoke()
     }
 
     override fun onDestroy() {
-        teardown(null)
+        worker.execute { teardown(null) }
         scope.cancel()
         super.onDestroy()
     }
@@ -163,7 +192,6 @@ class NeptunVpnService : VpnService() {
             .addAddress(s.address, 32)
             // IPv6도 터널로 받아서(서버엔 IPv6가 없으니 버려짐) 진짜 IP가 IPv6로 새지 않게 한다
             .addAddress("fd09::" + s.address.substringAfterLast('.'), 128)
-            .addDisallowedApplication(packageName)
             .setMetered(false)
         s.dns.forEach { builder.addDnsServer(it) }
         (Routes.ipv4(s.allowLan) + "::/0").forEach { cidr ->
@@ -172,28 +200,63 @@ class NeptunVpnService : VpnService() {
         }
         val tun = runCatching { builder.establish() }.getOrNull()
         if (tun == null) {
-            fail("nagotun: vpn permission missing")
+            fail("NagoTun: vpn permission missing")
             return
         }
+        val protectFailures = NeptunNative.protectFailures()
         val fd = tun.detachFd()
-        val h = NeptunNative.start(fd, uapi(s, withKey = true), THREADS)
+        // nagoing을 먼저 띄운다(iOS와 같은 순서) — 엔진은 기기 안 로컬 포트(nagoing)로 보내고, 엔진이 뜨면 바로 붙인다
+        s.nagoing?.let { ns ->
+            NagoLog.add("start nagoing · ${ns.summary} → ${s.serverIp}:${ns.udpPort}")
+            if (startNagoing(s, s.serverIp, s.serverPub) == 0L) {
+                runCatching { ParcelFileDescriptor.adoptFd(fd).close() }
+                fail("nagoing: ${NeptunNative.lastError() ?: "start failed"}")
+                return
+            }
+        }
+        val engineEndpoint = s.nagoing?.let { "127.0.0.1:${it.localPort}" } ?: s.endpoint
+        val h = NeptunNative.start(this, fd, uapi(s, engineEndpoint, withKey = true), s.loops.coerceIn(1, 2))
         if (h == 0L) {
             val error = NeptunNative.lastError() ?: "unknown"
             // 엔진이 TUN을 넘겨받기 전에 실패했으면 직접 닫는다(넘겨받았으면 엔진이 이미 닫음).
             if (error.startsWith("tun fd") || error.startsWith("uapi is not")) {
                 runCatching { ParcelFileDescriptor.adoptFd(fd).close() }
             }
-            fail("nagotun: $error")
+            teardown(null)
+            fail("NagoTun: $error")
             return
         }
         synchronized(lock) { handle = h }
+        if (s.nagoing != null) attachNagoing()
+        if (NeptunNative.protectFailures() > protectFailures) {
+            NagoLog.add("✗ NagoTun: protect failed — engine socket stays in the tunnel")
+        }
         session = s
         running = this
         up.value = true
-        NagoLog.add("nagotun: up → ${s.endpoint}")
+        NagoLog.add("NagoTun: up → ${s.endpoint}" + if (s.nagoing != null) " · nagoing" else "")
         LinkMonitor.start { stats() }
         watchNetwork()
         startWatchdog()
+    }
+
+    /** nagoing 클라이언트를 띄운다(엔진이 떠 있으면 바로 붙인다). 실패하면 0 */
+    private fun startNagoing(s: Session, serverIp: String, serverPub: String): Long {
+        val ns = s.nagoing ?: return 0L
+        val client = NagoingNative.start(
+            this, serverIp, ns.udpPort, ns.tcpPort, ns.localPort, ns.fecK, ns.fecGroups, if (ns.fec) 1 else 0,
+            ns.preferCode, ns.sni, s.privateKey, serverPub,
+        )
+        if (client == 0L) return 0L
+        synchronized(lock) { nagoing = client }
+        if (synchronized(lock) { handle != 0L }) attachNagoing()
+        return client
+    }
+
+    /** 엔진 ↔ nagoing 직결(로컬 UDP 홉 없음). 안 되면 로컬 포트로 그대로 돈다 */
+    private fun attachNagoing() {
+        val attached = synchronized(lock) { handle != 0L && nagoing != 0L && NagoingNative.attach(nagoing, handle) == 0 }
+        NagoLog.add(if (attached) "nagoing: attached to NagoTun" else "nagoing: local hop")
     }
 
     private fun fail(message: String) {
@@ -210,19 +273,25 @@ class NeptunVpnService : VpnService() {
             runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(cb) }
         }
         networkCallback = null
-        val stopped = synchronized(lock) {
-            val h = handle
+        underlying = null
+        val (h, client) = synchronized(lock) {
+            val pair = handle to nagoing
             handle = 0L
-            if (h != 0L) NeptunNative.stop(h)
-            h != 0L
+            nagoing = 0L
+            pair
         }
-        if (stopped && reason != null) NagoLog.add("nagotun: $reason")
+        if (h != 0L) NeptunNative.stop(h)
+        // 엔진을 먼저 멈춰도 된다(nagoing이 멈출 땐 엔진에서 스스로 떨어진다). 수립 중이면 몇 초 걸린다(이 스레드는 일꾼 스레드)
+        if (client != 0L) NagoingNative.stop(client)
+        if (h != 0L && reason != null) NagoLog.add("NagoTun: $reason")
         session = null
-        if (running === this) {
+        // 다른(새) 서비스가 이미 돌고 있으면 그쪽 상태는 건드리지 않는다(예전 서비스가 늦게 내려갈 때)
+        val mine = running === this
+        if (mine) {
             running = null
             LinkMonitor.stop()
         }
-        up.value = false
+        if (mine || running == null) up.value = false
     }
 
     private fun readStats(): LinkStats? {
@@ -243,23 +312,43 @@ class NeptunVpnService : VpnService() {
         return LinkStats(rx, tx, if (sec > 0) sec * 1000 + nsec / 1_000_000 else 0L)
     }
 
-    /** 와이파이↔모바일 데이터가 바뀌면 엔진이 서버에 맞춰 연결해 둔 소켓을 새로 만든다. */
+    private fun nagoingStats(): String? =
+        synchronized(lock) { if (nagoing != 0L) NagoingNative.stats(nagoing) else null }?.takeIf { it.isNotEmpty() }
+
+    /**
+     * VPN 밑의 실제 회선을 따라간다(앱은 VPN 안이라 기본 망 콜백은 VPN 자신을 준다 → VPN이 아닌 망 중 시스템이 고른 것).
+     * 와이파이↔모바일 데이터가 바뀌면 엔진·nagoing이 서버로 가는 소켓을 새로 만들고, 시스템에 밑 회선을 알려 준다
+     * (데이터 절약·요금제 표시가 실제 회선을 따르게).
+     */
     private fun watchNetwork() {
-        var current: Network? = null
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                val previous = current
-                current = network
+                val previous = underlying
+                underlying = network
+                runCatching { setUnderlyingNetworks(arrayOf(network)) }
                 if (previous == null || previous == network) return
-                synchronized(lock) { if (handle != 0L) NeptunNative.networkChanged(handle) }
-                NagoLog.add("nagotun: network changed")
+                synchronized(lock) {
+                    if (handle != 0L) NeptunNative.networkChanged(handle)
+                    if (nagoing != 0L) NagoingNative.networkChanged(nagoing)
+                }
+                NagoLog.add("NagoTun: network changed")
+            }
+
+            override fun onLost(network: Network) {
+                if (underlying == network) underlying = null
             }
         }
-        // 앱은 VPN에서 빠져 있어서 앱 기준 기본 망 = 실제 와이파이/모바일 데이터.
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .build()
         // 못 걸어도(권한 등) 터널은 그대로 두고 로그만 남긴다 — 망이 바뀌면 watchdog이 핸드셰이크로 알아챈다
-        runCatching { getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(cb) }
+        runCatching {
+            getSystemService(ConnectivityManager::class.java)
+                .registerBestMatchingNetworkCallback(request, cb, Handler(Looper.getMainLooper()))
+        }
             .onSuccess { networkCallback = cb }
-            .onFailure { NagoLog.add("! neptun: network watch off (${it.message})") }
+            .onFailure { NagoLog.add("! NagoTun: network watch off (${it.message})") }
     }
 
     /**
@@ -293,34 +382,71 @@ class NeptunVpnService : VpnService() {
         if (s.apiKey.isEmpty()) return
         NagoLog.add("${s.region}: no handshake → api")
         try {
-            val target = RegionApi.waitUntilReady(region, s.apiKey) { NagoLog.add(it) }
+            // 터널이 죽어 있으니 실제 회선으로 묻는다(앱은 VPN 안이라 그냥 물으면 죽은 터널로 들어간다)
+            val target = RegionApi.waitUntilReady(region, s.apiKey, underlying) { NagoLog.add(it) }
             val endpoint = "${target.address}:${target.wgPort}"
             val serverPub = target.wgPub ?: s.serverPub
+            if (s.nagoing != null) {
+                rebindNagoing(s, target.address, serverPub)
+                return
+            }
             if (endpoint == s.endpoint && serverPub == s.serverPub) {
                 NagoLog.add("${s.region}: up · $endpoint")
                 return
             }
             val next = s.copy(endpoint = endpoint, serverPub = serverPub)
-            val rc = synchronized(lock) { if (handle != 0L) NeptunNative.set(handle, uapi(next, withKey = false)) else -1 }
+            val rc = synchronized(lock) { if (handle != 0L) NeptunNative.set(handle, uapi(next, endpoint, withKey = false)) else -1 }
             if (rc == 0) {
                 session = next
                 save(this, next)
                 NagoLog.add("${s.region}: endpoint → $endpoint")
             } else {
-                NagoLog.add("✗ neptun: uapi set errno $rc")
+                NagoLog.add("✗ NagoTun: uapi set errno $rc")
             }
         } catch (e: Exception) {
             NagoLog.add("✗ ${s.region}: ${e.message}")
         }
     }
 
+    /**
+     * nagoing: 엔진 endpoint는 로컬 포트라 그대로 둔다. 서버 IP나 WG 키(HELLO 인증에 씀)가 바뀌었으면 nagoing만 새로 띄우고,
+     * 같으면(서울처럼 고정 IP 서버 재부팅) 전송을 다시 세우라고 알린다.
+     */
+    private fun rebindNagoing(s: Session, serverIp: String, serverPub: String) {
+        if (serverIp == s.serverIp && serverPub == s.serverPub) {
+            NagoLog.add("${s.region}: up · $serverIp · nagoing rebind")
+            synchronized(lock) { if (nagoing != 0L) NagoingNative.networkChanged(nagoing) }
+            return
+        }
+        val old = synchronized(lock) { nagoing.also { nagoing = 0L } }
+        // 예전 것이 로컬 포트를 놓을 때까지 기다린 뒤 새로 띄운다(watchdog 스레드라 막아도 된다)
+        if (old != 0L) NagoingNative.stop(old)
+        // 기다리는 사이 터널이 멈췄으면 새로 띄우지 않는다
+        if (session == null || synchronized(lock) { handle == 0L }) return
+        val wgPort = s.endpoint.substringAfterLast(':')
+        val next = s.copy(endpoint = "$serverIp:$wgPort", serverPub = serverPub)
+        if (startNagoing(next, serverIp, serverPub) == 0L) {
+            NagoLog.add("✗ ${s.region}: nagoing restart: ${NeptunNative.lastError()}")
+            return
+        }
+        if (serverPub != s.serverPub) {
+            val rc = synchronized(lock) {
+                if (handle != 0L) NeptunNative.set(handle, uapi(next, "127.0.0.1:${s.nagoing?.localPort}", withKey = false)) else -1
+            }
+            if (rc != 0) NagoLog.add("✗ NagoTun: uapi set errno $rc")
+        }
+        session = next
+        save(this, next)
+        NagoLog.add("${s.region}: nagoing → $serverIp")
+    }
+
     /** 서버(피어) 하나짜리 UAPI 설정. 키는 base64 그대로(엔진이 16진수로 바꿈). */
-    private fun uapi(s: Session, withKey: Boolean) = buildString {
+    private fun uapi(s: Session, endpoint: String, withKey: Boolean) = buildString {
         append("set=1\n")
         if (withKey) append("private_key=${s.privateKey}\n")
         append("replace_peers=true\n")
         append("public_key=${s.serverPub}\n")
-        append("endpoint=${s.endpoint}\n")
+        append("endpoint=$endpoint\n")
         append("persistent_keepalive_interval=25\n")
         append("replace_allowed_ips=true\n")
         append("allowed_ip=0.0.0.0/0\n")

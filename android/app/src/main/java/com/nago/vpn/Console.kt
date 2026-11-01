@@ -102,10 +102,10 @@ fun SessionClock(since: Long) {
     RollingText(clock((now - since) / 1000), Term.mono(22.sp, FontWeight.SemiBold, Term.num))
 }
 
-/** 연결 단계 막대: api → boot → tunnel → up. 지금 단계는 노랗게 숨 쉰다. */
+/** 연결 단계 막대: api → boot → tunnel → up. 지금 단계는 노랗게 숨 쉰다. [onDevice](유니콘)는 서버를 켜지 않는다 */
 @Composable
-fun PhasePipeline(index: Int) {
-    val labels = listOf("api", "boot", "tunnel", "up")
+fun PhasePipeline(index: Int, onDevice: Boolean = false) {
+    val labels = if (onDevice) listOf("config", "local", "tunnel", "up") else listOf("api", "boot", "tunnel", "up")
     val breathe = pulse(1100)
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         labels.forEachIndexed { i, label ->
@@ -143,13 +143,13 @@ fun PhasePipeline(index: Int) {
 
 /**
  * 나라 국기를 지도와 같은 점(LED)으로 찍는다. 이모지 국기는 기기·글꼴마다 모양이 달라서 터미널 화면에서 튄다.
- * 15×9 점 그림은 iOS(Console.swift DotFlag)와 같다. 라이트에선 판을 조금 어둡게 해서 흰 점이 보이게.
+ * 15×9 점 그림은 iOS(Console.swift DotFlag)와 같다(13나라). 라이트에선 판을 조금 어둡게 해서 흰 점이 보이게.
  */
 object DotFlags {
     const val COLS = 15
     const val ROWS = 9
 
-    /** W 흰 · R 빨강 · B 파랑(태극) · N 남색(성조기) · U 파랑(유니언 잭) · K 검정(괘) */
+    /** W 흰 · R 빨강 · B 파랑(태극) · N 남색(성조기) · U 파랑(유니언 잭) · K 검정(괘) · G 초록 · Y 노랑 · O 주황 · S 하늘색(스웨덴) */
     val art = mapOf(
         VpnRegion.kr to listOf("WWKWWWWWWWWWKWW", "WKKKWWWWWWWKKKW", "WKKWWWRRRWWWKKW", "WWWWWRRRBBWWWWW", "WWWWWRRRBBWWWWW",
             "WWWWWRRBBBWWWWW", "WKKWWWBBBWWWKKW", "WKKKWWWWWWWKKKW", "WWKWWWWWWWWWKWW"),
@@ -159,6 +159,24 @@ object DotFlags {
             "WWWWWWWWWWWWWWW", "RRRRRRRRRRRRRRR", "WWWWWWWWWWWWWWW", "RRRRRRRRRRRRRRR"),
         VpnRegion.uk to listOf("RRWUUUWRWUUUWRR", "WWRWWUWRWUWWRWW", "UUWRRWWRWWRRWUU", "WWWWWWWRWWWWWWW", "RRRRRRRRRRRRRRR",
             "WWWWWWWRWWWWWWW", "UUWRRWWRWWRRWUU", "WWRWWUWRWUWWRWW", "RRWUUUWRWUUUWRR"),
+        VpnRegion.sg to listOf("RRWWRRWRRRRRRRR", "RWRRRWRWRRRRRRR", "RWRRRRRRRRRRRRR", "RRWWRWRWRRRRRRR", "RRRRRRRRRRRRRRR",
+            "WWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWW", "WWWWWWWWWWWWWWW"),
+        VpnRegion.de to listOf("KKKKKKKKKKKKKKK", "KKKKKKKKKKKKKKK", "KKKKKKKKKKKKKKK", "RRRRRRRRRRRRRRR", "RRRRRRRRRRRRRRR",
+            "RRRRRRRRRRRRRRR", "YYYYYYYYYYYYYYY", "YYYYYYYYYYYYYYY", "YYYYYYYYYYYYYYY"),
+        VpnRegion.fr to listOf("BBBBBWWWWWRRRRR", "BBBBBWWWWWRRRRR", "BBBBBWWWWWRRRRR", "BBBBBWWWWWRRRRR", "BBBBBWWWWWRRRRR",
+            "BBBBBWWWWWRRRRR", "BBBBBWWWWWRRRRR", "BBBBBWWWWWRRRRR", "BBBBBWWWWWRRRRR"),
+        VpnRegion.ie to listOf("GGGGGWWWWWOOOOO", "GGGGGWWWWWOOOOO", "GGGGGWWWWWOOOOO", "GGGGGWWWWWOOOOO", "GGGGGWWWWWOOOOO",
+            "GGGGGWWWWWOOOOO", "GGGGGWWWWWOOOOO", "GGGGGWWWWWOOOOO", "GGGGGWWWWWOOOOO"),
+        VpnRegion.se to listOf("SSSSSYSSSSSSSSS", "SSSSSYSSSSSSSSS", "SSSSSYSSSSSSSSS", "SSSSSYSSSSSSSSS", "YYYYYYYYYYYYYYY",
+            "SSSSSYSSSSSSSSS", "SSSSSYSSSSSSSSS", "SSSSSYSSSSSSSSS", "SSSSSYSSSSSSSSS"),
+        VpnRegion.ca to listOf("RRRRWWWWWWWRRRR", "RRRRWWWRWWWRRRR", "RRRRWRWRWRWRRRR", "RRRRWRRRRRWRRRR", "RRRRWRRRRRWRRRR",
+            "RRRRWWRRRWWRRRR", "RRRRWWWRWWWRRRR", "RRRRWWWRWWWRRRR", "RRRRWWWWWWWRRRR"),
+        VpnRegion.br to listOf("GGGGGGGYGGGGGGG", "GGGGGYYYYYGGGGG", "GGGYYYNNNYYYGGG", "GGYYYNNNNNYYYGG", "GYYYYNWWWNYYYYG",
+            "GGYYYNNNNNYYYGG", "GGGYYYNNNYYYGGG", "GGGGGYYYYYGGGGG", "GGGGGGGYGGGGGGG"),
+        VpnRegion.au to listOf("WNNRNNWNNNNWNNN", "NWNRNWNNNNNNNNN", "RRRRRRRNNNNNNWN", "NWNRNWNNNWNNNNN", "WNNRNNWNNNNNWNN",
+            "NNNNNNNNNNNNNNN", "NNNWNNNNNNNWNNN", "NNWWWNNNNNNNNNN", "NNNWNNNNNNNNNNN"),
+        VpnRegion.`in` to listOf("OOOOOOOOOOOOOOO", "OOOOOOOOOOOOOOO", "OOOOOOOOOOOOOOO", "WWWWWWWNWWWWWWW", "WWWWWWNWNWWWWWW",
+            "WWWWWWWNWWWWWWW", "GGGGGGGGGGGGGGG", "GGGGGGGGGGGGGGG", "GGGGGGGGGGGGGGG"),
     )
 
     fun color(ch: Char, dark: Boolean) = Color(
@@ -168,6 +186,10 @@ object DotFlags {
             'N' -> 0xFF2C3878
             'U' -> 0xFF243E8C
             'K' -> if (dark) 0xFF3A403A else 0xFF1C1E1C
+            'G' -> 0xFF1E9A50
+            'Y' -> 0xFFF2C230
+            'O' -> 0xFFF08A3C
+            'S' -> 0xFF2B6CB0
             else -> if (dark) 0xFFE8ECE5 else 0xFFFFFFFF
         },
     )
@@ -211,12 +233,7 @@ fun RegionCard(
     val shape = RoundedCornerShape(8.dp)
     val border by animateColorAsState(if (selected) Term.green else Term.border, tween(200), label = "card-border")
     val fill by animateColorAsState(if (selected) Term.green.copy(alpha = 0.08f) else Term.surface, tween(200), label = "card-fill")
-    val rttColor = when {
-        measured == null -> if (selected) Term.key else Term.muted
-        measured < 80 -> Term.green
-        measured < 180 -> Term.amber
-        else -> Term.red
-    }
+    val rttColor = measured?.let(::rttTint) ?: if (selected) Term.key else Term.muted
     Column(
         verticalArrangement = Arrangement.spacedBy(3.dp),
         modifier = modifier
@@ -270,25 +287,18 @@ fun FlagRow(flags: List<String>) {
     }
 }
 
-/** 지금 속도(↓ 받은 쪽 · ↑ 보낸 쪽), 누적, 마지막 핸드셰이크, 1분 그래프 */
+/** 연결돼 있는 동안 `↓ 2.4 MB/s  ↑ 120 KB/s` + 누적 + 최근 1분 그래프 */
 @Composable
-fun TrafficPanel(meter: TrafficMeter, handshakeAgo: Long?) {
+fun TrafficPanel(meter: TrafficMeter) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             Speed("↓", meter.current?.down ?: 0.0, Term.green)
             Speed("↑", meter.current?.up ?: 0.0, Term.key)
             Spacer(Modifier.weight(1f))
-            Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    "${TrafficMeter.bytes(meter.totalDown)} ↓ · ${TrafficMeter.bytes(meter.totalUp)} ↑",
-                    style = Term.mono(10.5.sp, color = Term.muted), maxLines = 1,
-                )
-                Text(
-                    handshakeAgo?.let { "handshake ${clock(it)} ago" } ?: "no handshake yet",
-                    style = Term.mono(10.5.sp, color = if (handshakeAgo == null || handshakeAgo > 180) Term.amber else Term.muted),
-                    maxLines = 1,
-                )
-            }
+            Text(
+                "${TrafficMeter.bytes(meter.totalDown)} ↓ · ${TrafficMeter.bytes(meter.totalUp)} ↑",
+                style = Term.mono(10.5.sp, color = Term.muted), maxLines = 1, modifier = Modifier.padding(bottom = 2.dp),
+            )
         }
         Sparkline(meter.history, Modifier.fillMaxWidth().height(34.dp))
     }
