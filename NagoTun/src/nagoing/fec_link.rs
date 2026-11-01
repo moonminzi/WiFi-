@@ -20,6 +20,8 @@ const REPORT_EVERY: Duration = Duration::from_millis(250);
 const REPORT_MIN_SAMPLES: u64 = 64;
 /// 그룹 실패 확률 목표. CUBIC 같은 손실 기반 TCP는 남는 손실 0.01%에도 크게 느려져서 낮게 잡는다.
 const RS_TARGET: f64 = 1e-6;
+/// 깨끗한 회선에서 쓰는 큰 묶음
+const CLEAN_K: u8 = 48;
 
 fn xor_frame(s: ShardRef) -> Frame {
     match s {
@@ -55,6 +57,11 @@ impl FecTx {
     /// 지금 RS 패리티 수(0 = XOR 중)
     pub fn rs_m(&self) -> u8 {
         self.rs.as_ref().map_or(0, RsEncoder::m)
+    }
+
+    /// 지금 RS 묶음의 데이터 수(0 = XOR 중)
+    pub fn rs_k(&self) -> u8 {
+        self.rs.as_ref().map_or(0, RsEncoder::k)
     }
 
     pub fn loss_ppm(&self) -> u32 {
@@ -102,8 +109,15 @@ impl FecTx {
             // 오를 때는 바로, 내릴 때는 천천히(손실은 몰려 온다)
             self.loss = if p > self.loss { p } else { self.loss * 0.7 + p * 0.3 };
             // 잰 값보다 조금 높게 잡는다(표본 오차·버스트)
-            let m = choose_m(rs.k(), (self.loss * 1.5).max(0.0005), RS_TARGET);
-            rs.set_m(m);
+            let p = (self.loss * 1.5).max(0.00002);
+            // 깨끗한 회선: 48개당 패리티 1개(≈2%)로 충분하면 그렇게 — WireGuard 단독과 거의 같은 대역폭.
+            // 손실이 보이면 짧은 묶음(rs_k)으로 돌아가 필요한 만큼 패리티를 붙인다(되살린 패킷이 빨리 도착).
+            if choose_m(CLEAN_K, p, RS_TARGET) == 1 {
+                rs.set_shape(CLEAN_K, 1);
+            } else {
+                let k = self.params.rs_k;
+                rs.set_shape(k, choose_m(k, p, RS_TARGET));
+            }
         }
     }
 }
@@ -214,6 +228,21 @@ mod tests {
         assert!(tx.rs_m() >= 3, "m {}", tx.rs_m());
         let residual = 1.0 - got as f64 / sent as f64;
         assert!(residual < 0.01, "residual {residual}"); // 첫 라운드(XOR) 손실 포함
+    }
+
+    #[test]
+    fn clean_link_uses_big_groups() {
+        let mut tx = FecTx::new(params());
+        tx.on_report(0, 1000);
+        assert_eq!((tx.rs_k(), tx.rs_m()), (CLEAN_K, 1));
+        tx.on_report(20_000, 1000); // 2%
+        assert_eq!(tx.rs_k(), 16);
+        assert!(tx.rs_m() >= 3);
+        // 손실이 사라지면 천천히 다시 큰 묶음으로
+        for _ in 0..60 {
+            tx.on_report(0, 1000);
+        }
+        assert_eq!((tx.rs_k(), tx.rs_m()), (CLEAN_K, 1));
     }
 
     #[test]

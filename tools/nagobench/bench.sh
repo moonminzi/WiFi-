@@ -80,7 +80,7 @@ for mode in $MODES; do
     netem $rtt $loss
     for cc in $CCS; do
       sleep 1
-      j=$(ip netns exec cli iperf3 -c 10.77.0.1 -R -t $SECS -O 3 -C $cc -J 2>/dev/null)
+      j=$(timeout $((SECS + 30)) ip netns exec cli iperf3 -c 10.77.0.1 -R -t $SECS -O 3 -C $cc -J 2>/dev/null)
       mbps=$(echo "$j" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(round(d["end"]["sum_received"]["bits_per_second"]/1e6,1))' 2>/dev/null || echo ERR)
       re=$(echo "$j" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["end"]["sum_sent"].get("retransmits",""))' 2>/dev/null)
       echo "$mode,$rtt,$loss,$cc,$mbps,$re" | tee -a $OUT

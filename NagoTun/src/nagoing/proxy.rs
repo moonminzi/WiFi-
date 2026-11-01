@@ -918,13 +918,18 @@ impl ClientHandle {
             2 => Some(Kind::Tcp),
             _ => None,
         };
+        // ★ 잠금은 한 번만 — 한 문장에서 두 번 잡으면 첫 가드가 문장 끝까지 살아 있어 스스로 막힌다(교착)
+        let (rs_m, up_loss_ppm) = {
+            let enc = self.inner.enc.lock().unwrap();
+            (enc.rs_m(), enc.loss_ppm())
+        };
         ClientStats {
             kind,
             sent: self.inner.st_sent.load(Ordering::Relaxed),
             recv: self.inner.st_recv.load(Ordering::Relaxed),
             recovered: self.inner.st_recovered.load(Ordering::Relaxed),
-            rs_m: self.inner.enc.lock().unwrap().rs_m(),
-            up_loss_ppm: self.inner.enc.lock().unwrap().loss_ppm(),
+            rs_m,
+            up_loss_ppm,
         }
     }
 
@@ -957,7 +962,7 @@ impl ClientStats {
             None => "down",
         };
         let fec = if self.rs_m > 0 {
-            format!("rs m={} up-loss {:.2}%", self.rs_m, self.up_loss_ppm as f64 / 1e4)
+            format!("rs m={} up-loss {:.3}%", self.rs_m, self.up_loss_ppm as f64 / 1e4)
         } else {
             "xor".to_string()
         };
@@ -1241,7 +1246,21 @@ mod tests {
             }
         }
 
-        let kind = client.stats().kind;
+        // 상태 읽기가 데이터 길을 막지 않는지(예전에 같은 잠금을 두 번 잡아 터널이 멈췄다): 읽고 나서도 계속 오가야 한다
+        let _ = client.stats();
+        for i in 0..5u8 {
+            let payload = [4u8, 0, 0, 0, 9, 9, 9, i, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24];
+            neptun.send(&payload).unwrap();
+            let mut rbuf = [0u8; 2048];
+            assert!(neptun.recv(&mut rbuf).is_ok(), "traffic stalled after stats()");
+        }
+        // 새 서버·새 클라끼리는 REPORT를 주고받아 RS로 바뀐다
+        thread::sleep(Duration::from_millis(900));
+        neptun.send(&[4u8, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        let stats = client.stats();
+        assert!(stats.rs_m >= 1, "rs not negotiated: {}", stats.summary());
+        let kind = stats.kind;
         client.stop();
         server.stop();
         wg_stop.store(true, Ordering::Relaxed);

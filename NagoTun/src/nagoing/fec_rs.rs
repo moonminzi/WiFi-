@@ -118,6 +118,7 @@ pub enum RsShard<'a> {
 
 struct GroupEnc {
     gen: u16,
+    k: u8, // 이 그룹의 데이터 수 — 그룹을 시작할 때 정하고 끝까지 안 바꾼다(받는 쪽이 k로 묶음을 맞춘다)
     shards: Vec<Vec<u8>>, // [len][payload]
     first: Option<Instant>,
 }
@@ -135,7 +136,7 @@ impl RsEncoder {
     pub fn new(k: u8, groups: u16, m: u8) -> Self {
         let k = k.clamp(2, 64);
         let groups = groups.max(1);
-        let state = (0..groups).map(|_| GroupEnc { gen: 0, shards: Vec::with_capacity(k as usize), first: None }).collect();
+        let state = (0..groups).map(|_| GroupEnc { gen: 0, k, shards: Vec::with_capacity(k as usize), first: None }).collect();
         RsEncoder { k, m: m.clamp(1, k), groups, seq: 0, state, parity: Vec::new() }
     }
 
@@ -152,11 +153,20 @@ impl RsEncoder {
         self.m = m.clamp(1, self.k);
     }
 
+    /// 묶음 모양(k, m)을 바꾼다. k는 다음에 시작하는 그룹부터, m은 다음에 닫히는 그룹부터.
+    pub fn set_shape(&mut self, k: u8, m: u8) {
+        self.k = k.clamp(2, 64);
+        self.m = m.clamp(1, self.k);
+    }
+
     pub fn push<F: FnMut(RsShard)>(&mut self, payload: &[u8], mut emit: F) {
         let g = (self.seq % self.groups as u32) as usize;
         self.seq = self.seq.wrapping_add(1);
-        let k = self.k;
         let st = &mut self.state[g];
+        if st.shards.is_empty() {
+            st.k = self.k;
+        }
+        let k = st.k;
         let index = st.shards.len() as u8;
         emit(RsShard::Data { group: g as u16, gen: st.gen, index, k, payload });
         let mut s = Vec::with_capacity(2 + payload.len());
@@ -538,6 +548,33 @@ mod tests {
         let residual = (lost_data.len() - rec.len()) as f64 / data.len() as f64;
         assert!(residual < 0.002, "residual {residual}");
         assert!(rec.len() as f64 > lost_data.len() as f64 * 0.95);
+    }
+
+    #[test]
+    fn shape_change_mid_stream_decodes() {
+        // 그룹 도중에 k를 16→48→8로 바꿔도 각 그룹은 시작할 때의 k로 끝나고, 손실은 제대로 되살아난다
+        let data = payloads(200, 11);
+        let mut enc = RsEncoder::new(16, 1, 2);
+        let mut shards = Vec::new();
+        for (i, p) in data.iter().enumerate() {
+            if i == 10 {
+                enc.set_shape(48, 1);
+            }
+            if i == 90 {
+                enc.set_shape(8, 3);
+            }
+            enc.push(p, |s| shards.push(own(s)));
+        }
+        enc.flush_stale(Duration::ZERO, |s| shards.push(own(s)));
+        let pos: Vec<usize> = shards.iter().enumerate().filter(|(_, s)| matches!(s, Owned::Data { .. })).map(|(i, _)| i).collect();
+        // 그룹마다 하나씩 잃게: 데이터 3, 20, 70, 100, 150, 199
+        let drop: Vec<usize> = [3, 20, 70, 100, 150, 199].iter().map(|&i| pos[i]).collect();
+        let mut dec = RsDecoder::new();
+        let mut rec = run(&mut dec, &shards, &drop);
+        rec.sort();
+        let mut want: Vec<Vec<u8>> = [3, 20, 70, 100, 150, 199].iter().map(|&i| data[i].clone()).collect();
+        want.sort();
+        assert_eq!(rec, want);
     }
 
     #[test]
