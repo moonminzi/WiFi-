@@ -66,6 +66,7 @@ struct SettingsView: View {
                 connectionBlock
                 dnsBlock
                 if adblock { adblockBlock }
+                SafariBlockerBlock()
                 logsBlock
                 aboutBlock
             } else {
@@ -77,6 +78,7 @@ struct SettingsView: View {
                 connectionBlock
                 dnsBlock
                 if adblock { adblockBlock }
+                SafariBlockerBlock()
                 serverBlock
                 logsBlock
                 aboutBlock

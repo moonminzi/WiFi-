@@ -24,10 +24,11 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan   # ← 본인 것으로 변경
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
-        MARKETING_VERSION: "2.1.10"
-        CURRENT_PROJECT_VERSION: "43"
+        MARKETING_VERSION: "2.1.11"
+        CURRENT_PROJECT_VERSION: "44"
     dependencies:
       - target: WifiScanTunnel
+      - target: WifiScanBlocker
     entitlements:
       path: WifiScan/WifiScan.entitlements
       properties:
@@ -82,8 +83,8 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: WifiScanTunnel/WifiScanTunnel-Bridging-Header.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/NagoTun/include
         OTHER_LDFLAGS: -lnago_tun -framework Security -framework Foundation -lobjc -liconv -lresolv
-        MARKETING_VERSION: "2.1.10"
-        CURRENT_PROJECT_VERSION: "43"
+        MARKETING_VERSION: "2.1.11"
+        CURRENT_PROJECT_VERSION: "44"
     dependencies:
       - target: WireGuardGoBridgeiOS
       - target: NagoTunRust
@@ -101,6 +102,27 @@ targets:
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+
+  # Safari 콘텐츠 차단기(배너 광고·광고 칸 숨기기). 앱의 PlugIns에 들어간다. 규칙은 CI가 만든다(tools/safari-blocker)
+  WifiScanBlocker:
+    type: app-extension
+    platform: iOS
+    sources: [WifiScanBlocker]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.wifiscan.blocker   # 앱 번들 ID + .blocker
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "2.1.11"
+        CURRENT_PROJECT_VERSION: "44"
+    info:
+      path: WifiScanBlocker/Info.plist
+      properties:
+        CFBundleDisplayName: NAGO Blocker
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.Safari.content-blocker
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ContentBlockerRequestHandler
 
   # wireguard-go를 libwg-go.a로 빌드(Go 필요). WireGuardKit 안내대로 External Build System 타깃.
   WireGuardGoBridgeiOS:

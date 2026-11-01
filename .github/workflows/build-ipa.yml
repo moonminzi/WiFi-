@@ -24,6 +24,32 @@ jobs:
       - name: Rust iOS target
         run: rustup target add aarch64-apple-ios
 
+      # Safari 콘텐츠 차단기 규칙: EasyList + List-KR(AdGuard판 묶음)을 받아 Safari 규칙으로 바꾸고,
+      # macOS WebKit으로 실제 컴파일해 안 되는 규칙을 뺀다(하나라도 안 되면 iOS가 목록을 통째로 버림)
+      - name: Safari blocker rules
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/lists
+          curl -fsSL --compressed --retry 3 https://easylist.to/easylist/easylist.txt -o /tmp/lists/easylist.txt
+          K=https://cdn.jsdelivr.net/gh/List-KR/List-KR@latest/adblocking
+          : > /tmp/lists/listkr.txt
+          for f in filters-share/3rd_domains filters-share/1st_domains filters-share/general_elemhide \
+                   filters-AG/specific_ELEMHIDE filters-share/general_url filters-AG/general_url filters-share/specific_URL \
+                   filters-share/specific_ELEMHIDE filters-share/allowlist filters-AG/allowlist filters-AG/specific_URL; do
+            curl -fsSL --compressed --retry 3 "$K/$f.txt" >> /tmp/lists/listkr.txt
+            echo >> /tmp/lists/listkr.txt
+          done
+          wc -l /tmp/lists/*.txt
+          python3 tools/safari-blocker/convert.py WifiScanBlocker/blockerList.json /tmp/lists/easylist.txt /tmp/lists/listkr.txt | tee /tmp/stats.json
+          swift tools/safari-blocker/validate.swift WifiScanBlocker/blockerList.json
+          python3 - <<'EOF'
+          import json, datetime
+          n = len(json.load(open("WifiScanBlocker/blockerList.json")))
+          json.dump({"rules": n, "lists": "EasyList + List-KR", "built": datetime.date.today().isoformat()},
+                    open("WifiScan/BlockerInfo.json", "w"))
+          print("rules", n)
+          EOF
+
       - name: Generate Xcode project
         run: |
           brew install xcodegen
@@ -54,6 +80,7 @@ jobs:
             # 확장(PlugIns)을 먼저 서명해야 앱 서명이 깨지지 않는다. Info.plist를 고친 뒤에 서명한다.
             codesign --force --sign - --entitlements WifiScanTunnel/WifiScanTunnel.entitlements \
               "$1/Payload/WifiScan.app/PlugIns/WifiScanTunnel.appex"
+            codesign --force --sign - "$1/Payload/WifiScan.app/PlugIns/WifiScanBlocker.appex"
             codesign --force --sign - --entitlements WifiScan/WifiScan.entitlements "$1/Payload/WifiScan.app"
             codesign -d --entitlements - "$1/Payload/WifiScan.app"
           }

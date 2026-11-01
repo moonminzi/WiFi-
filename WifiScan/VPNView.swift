@@ -990,7 +990,8 @@ struct VPNView: View {
     /// 광고 차단 DNS → 직접 넣은 DNS → 1.1.1.1. 임시 서버도 차단 DNS가 있다(만든 직후 1~2분은 서버가
     /// 10.53.53.53을 1.1.1.1로 넘겨 주다가, 에이전트가 뜨면 거른다 — server/region-api)
     private var wgDNS: [String] {
-        if adblock { return ["10.53.53.53"] }
+        // 임시 서버는 예전 서버(차단 DNS 없음)일 수도 있어 1.1.1.1을 뒤에 둔다(앞이 답하면 그걸 쓴다)
+        if adblock { return region.onDemand ? ["10.53.53.53", "1.1.1.1"] : ["10.53.53.53"] }
         return DNSList.parse(customDNS) ?? ["1.1.1.1"]
     }
 
