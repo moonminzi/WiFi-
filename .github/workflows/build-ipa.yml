@@ -46,7 +46,7 @@ jobs:
           import json, datetime
           n = len(json.load(open("WifiScanBlocker/blockerList.json")))
           json.dump({"rules": n, "lists": "EasyList + List-KR", "built": datetime.date.today().isoformat()},
-                    open("WifiScan/BlockerInfo.json", "w"))
+                    open("WifiScanBlocker/BlockerInfo.json", "w"))
           print("rules", n)
           EOF
 
@@ -81,6 +81,8 @@ jobs:
             codesign --force --sign - --entitlements WifiScanTunnel/WifiScanTunnel.entitlements \
               "$1/Payload/WifiScan.app/PlugIns/WifiScanTunnel.appex"
             codesign --force --sign - "$1/Payload/WifiScan.app/PlugIns/WifiScanBlocker.appex"
+            codesign --force --sign - "$1/Payload/WifiScan.app/PlugIns/WifiScanWebExt.appex"
+            ls "$1/Payload/WifiScan.app/PlugIns/WifiScanWebExt.appex"
             codesign --force --sign - --entitlements WifiScan/WifiScan.entitlements "$1/Payload/WifiScan.app"
             codesign -d --entitlements - "$1/Payload/WifiScan.app"
           }

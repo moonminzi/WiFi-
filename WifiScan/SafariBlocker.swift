@@ -7,28 +7,24 @@ import SwiftUI
 @MainActor
 @Observable
 final class SafariBlocker {
-    struct Info: Decodable {
-        let rules: Int
-        let lists: String
-        let built: String
-    }
-
     private(set) var enabled: Bool?
-    let info: Info? = {
-        guard let url = Bundle.main.url(forResource: "BlockerInfo", withExtension: "json"),
-              let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(Info.self, from: data)
-    }()
-
-    /// 재서명하면 앱 번들 ID가 바뀌므로 앱 ID + ".blocker"로 찾는다
-    static var identifier: String { (Bundle.main.bundleIdentifier ?? "com.example.wifiscan") + ".blocker" }
+    private(set) var problem: String?
+    let identifier = BlockerLocator.identifier
+    let info = BlockerLocator.info
 
     func refresh() async {
-        enabled = await withCheckedContinuation { cont in
-            SFContentBlockerManager.getStateOfContentBlocker(withIdentifier: Self.identifier) { state, _ in
-                cont.resume(returning: state?.isEnabled)
+        guard let id = identifier else {
+            enabled = false
+            problem = "blocker extension missing from this build"
+            return
+        }
+        let (state, error) = await withCheckedContinuation { (cont: CheckedContinuation<(Bool?, String?), Never>) in
+            SFContentBlockerManager.getStateOfContentBlocker(withIdentifier: id) { state, error in
+                cont.resume(returning: (state?.isEnabled, error.map { ($0 as NSError).localizedDescription }))
             }
         }
+        enabled = state ?? false
+        problem = state == nil ? (error ?? "ios did not answer") : nil
     }
 }
 
@@ -36,11 +32,12 @@ final class SafariBlocker {
 struct SafariBlockerBlock: View {
     @State private var blocker = SafariBlocker()
     @Environment(\.scenePhase) private var phase
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         TermBlock(label: "safari") {
             HStack {
-                Text("banner blocker").foregroundStyle(Term.muted)
+                Text("NAGO Blocker").foregroundStyle(Term.muted)
                 Spacer()
                 Text(status).foregroundStyle(blocker.enabled == true ? Term.green : Term.amber)
             }
@@ -50,23 +47,41 @@ struct SafariBlockerBlock: View {
                     .font(Term.mono(11))
                     .foregroundStyle(Term.muted)
             }
+            if let problem = blocker.problem {
+                Text("! \(problem)" + (blocker.identifier.map { " · \($0)" } ?? ""))
+                    .font(Term.mono(10.5))
+                    .foregroundStyle(Term.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Text(blocker.enabled == true
                  ? "hides banner ads and empty ad boxes inside pages · safari only"
-                 : "turn on: iOS Settings → Apps → Safari → Extensions → NAGO Blocker → on · works in safari only (not kakao/chrome in-app browsers)")
+                 : "iOS Settings → Apps → Safari → Extensions → NAGO Blocker → on")
                 .font(Term.mono(11.5))
                 .foregroundStyle(Term.muted)
                 .fixedSize(horizontal: false, vertical: true)
-            if blocker.enabled != true {
-                Button {
-                    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
-                } label: {
-                    HStack {
-                        Text("open settings")
-                        Spacer()
-                        Text("→ apps → safari → extensions").foregroundStyle(Term.muted)
-                    }
+            TermDivider()
+            HStack {
+                Text("NAGO menu").foregroundStyle(Term.muted)
+                Spacer()
+                Text("in safari").foregroundStyle(Term.muted.opacity(0.8))
+            }
+            .font(Term.mono(13))
+            Text("same Extensions page → NAGO → on, allow every website. Then in Safari tap aA (or the puzzle icon) → NAGO: blocker status, tap a banner to hide it on that site, pause per site")
+                .font(Term.mono(11.5))
+                .foregroundStyle(Term.muted)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button("test in safari") {
+                    if let url = URL(string: "https://d3ward.github.io/toolz/adblock") { openURL(url) }
                 }
-                .buttonStyle(TermButtonStyle(fill: true))
+                .buttonStyle(.term)
+                Button("open settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                }
+                .buttonStyle(.term)
+                Spacer()
+                Button("recheck") { Task { await blocker.refresh() } }
+                    .buttonStyle(.term)
             }
         }
         .task { await blocker.refresh() }
