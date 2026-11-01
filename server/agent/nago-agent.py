@@ -460,7 +460,10 @@ def save_state():
 
 
 def run(*args, check=False):
-    r = subprocess.run(args, capture_output=True, text=True)
+    try:
+        r = subprocess.run(args, capture_output=True, text=True)
+    except OSError as e:     # 임시 서버에는 wg(wireguard-tools)가 없다 — 그냥 빈 결과로
+        r = subprocess.CompletedProcess(args, 127, "", str(e))
     if check and r.returncode != 0:
         raise RuntimeError("%s: %s" % (" ".join(args), (r.stderr or r.stdout).strip()[:200]))
     return r
