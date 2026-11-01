@@ -183,7 +183,7 @@ struct VPNView: View {
         }
         if fastMode, effectiveProto != .wireguard { parts.append("gcm") }
         if adblock {
-            parts.append(region.onDemand ? "adblock n/a · temp server" : "adblock")
+            parts.append("adblock")
         } else if effectiveProto != .ikev2, let dns = DNSList.parse(customDNS) {
             parts.append("dns " + dns.joined(separator: ","))
         }
@@ -314,7 +314,7 @@ struct VPNView: View {
             }
             // 서버 광고 차단 DNS가 오늘 막은 것(펴면 많이 막힌 도메인 · live)
             if vpn.status == .connected, !onDevice, agent.me != nil {
-                AdblockPanel(agent: agent, adblockOn: adblock && !savedRegion.onDemand, folded: $foldAdblock) {
+                AdblockPanel(agent: agent, adblockOn: adblock, folded: $foldAdblock) {
                     showLive = true
                 }
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -987,9 +987,10 @@ struct VPNView: View {
         try vpn.connectTunnel()
     }
 
-    /// 광고 차단 DNS → 직접 넣은 DNS → 1.1.1.1. 임시 서버엔 차단 DNS가 없다.
+    /// 광고 차단 DNS → 직접 넣은 DNS → 1.1.1.1. 임시 서버도 차단 DNS가 있다(만든 직후 1~2분은 서버가
+    /// 10.53.53.53을 1.1.1.1로 넘겨 주다가, 에이전트가 뜨면 거른다 — server/region-api)
     private var wgDNS: [String] {
-        if adblock, !region.onDemand { return ["10.53.53.53"] }
+        if adblock { return ["10.53.53.53"] }
         return DNSList.parse(customDNS) ?? ["1.1.1.1"]
     }
 

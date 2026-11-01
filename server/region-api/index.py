@@ -7,7 +7,7 @@ WireGuard용으로 그 서버의 공개키/포트(wgPub, wgPort)도 준다. 서�
 피어 동기화를 부탁한다(꺼져 있는 동안 바뀐 피어 목록을 맞춤).
 
 GET /region?r=<sg|de|fr|...>  임시 서버 나라(ONDEMAND)
-→ 떠 있는 서버가 없으면 그 리전에 새로 만든다(WireGuard만, 1분쯤). 서버는 30분 동안 거의 안 쓰면
+→ 떠 있는 서버가 없으면 그 리전에 새로 만든다(WireGuard, 1분쯤. 가속·광고 차단 DNS·nago-agent는 뒤에서 깔림). 서버는 30분 동안 거의 안 쓰면
 스스로 꺼지는데 종료 동작이 terminate라 그대로 지워진다(24시간이 지나도 지워짐). 안 쓰는 동안 드는 돈이 없다.
 서버 키는 여기서 만들어 user-data로 넘기고, 피어 목록은 만들 때의 /nago/wg/peers를 넣는다.
 """
@@ -35,6 +35,8 @@ _wg = {"t": 0, "v": {}}
 # 임시 서버 나라: {"sg": {"region": "ap-southeast-1"}, ...}
 ONDEMAND = json.loads(os.environ.get("ONDEMAND", "{}"))
 OD_TYPE = os.environ.get("ONDEMAND_TYPE", "c7g.medium")
+# 임시 서버가 nago-agent(server/agent)를 받아 올 깃허브 브랜치·태그
+AGENT_REF = os.environ.get("NAGO_AGENT_REF", "feat/nagoing-2.1.5")
 # 한꺼번에 떠 있을 수 있는 임시 서버 수(키가 새도 서버를 마구 못 만들게)
 OD_MAX = int(os.environ.get("ONDEMAND_MAX", "2"))
 OD_TAG = "nago:ondemand"
@@ -282,6 +284,47 @@ systemctl restart haproxy && systemctl enable --now nago-accel && \
 SH
 chmod +x /usr/local/sbin/nago-accel-setup
 systemd-run --unit nago-accel-setup /usr/local/sbin/nago-accel-setup
+
+# ---- 광고 차단 DNS + nago-agent(고정 서버와 같음: 강도·내 규칙·통계·live). 앱의 --adblock은 10.53.53.53을 쓴다.
+# 다 깔릴 때까지(1~2분) 10.53.53.53:53은 1.1.1.1로 넘겨 두어 DNS가 끊기지 않게 하고, 에이전트가 뜨면 뗀다.
+ip link add nago-dns type dummy 2>/dev/null; ip addr add 10.53.53.53/32 dev nago-dns 2>/dev/null; ip link set nago-dns up
+for pr in udp tcp; do
+  iptables -t nat -I PREROUTING -i wg0 -d 10.53.53.53 -p $pr --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null
+done
+cat > /usr/local/sbin/nago-agent-setup <<'SH'
+#!/bin/bash
+exec > >(tee -a /var/log/nago-ondemand.log /dev/console) 2>&1
+export DEBIAN_FRONTEND=noninteractive
+for i in 1 2 3 4 5; do
+  command -v dnsmasq >/dev/null && break
+  apt-get -o DPkg::Lock::Timeout=180 -q install -y --no-install-recommends dnsmasq-base \
+    || { apt-get -o DPkg::Lock::Timeout=180 -q update; sleep 5; }
+done
+command -v dnsmasq >/dev/null || { echo "NAGO_AGENT_FAIL no dnsmasq"; exit 1; }
+mkdir -p /etc/nago-dns /var/lib/nago-dns /root/nago-agent
+printf 'bind-interfaces\nlisten-address=127.0.0.1\nport=5354\nno-resolv\nserver=1.1.1.1\n' > /etc/nago-dns/dnsmasq.conf
+printf '%s\n' '[Unit]' 'Description=NAGO VPN dns cache' '[Service]' \
+  'ExecStartPre=-/usr/sbin/ip link add nago-dns type dummy' 'ExecStartPre=-/usr/sbin/ip addr add 10.53.53.53/32 dev nago-dns' \
+  'ExecStartPre=/usr/sbin/ip link set nago-dns up' \
+  'ExecStart=/usr/sbin/dnsmasq -k -C /etc/nago-dns/dnsmasq.conf --pid-file=/run/nago-dns.pid' 'Restart=always' \
+  '[Install]' 'WantedBy=multi-user.target' > /etc/systemd/system/nago-dns.service
+systemctl daemon-reload && systemctl enable --now nago-dns
+cd /root/nago-agent
+for f in nago-agent.py setup-agent.sh; do
+  curl -fsSL --retry 3 --max-time 60 -o $f "https://raw.githubusercontent.com/moonminzi/WiFi-/@AGENT_REF@/server/agent/$f" \
+    || { echo "NAGO_AGENT_FAIL download $f"; exit 1; }
+done
+if bash setup-agent.sh && /usr/local/sbin/nago-dns-guard; then
+  for pr in udp tcp; do
+    iptables -t nat -D PREROUTING -i wg0 -d 10.53.53.53 -p $pr --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null
+  done
+  echo "NAGO_AGENT_READY uptime=$(cut -d. -f1 /proc/uptime)s"
+else
+  echo "NAGO_AGENT_FAIL setup (dns stays on 1.1.1.1)"
+fi
+SH
+chmod +x /usr/local/sbin/nago-agent-setup
+systemd-run --unit nago-agent-setup /usr/local/sbin/nago-agent-setup
 """
 
 
@@ -366,7 +409,7 @@ def od_create(code, cfg, account):
     private, public = wg_keypair()
     peers = od_peers()
     script = (OD_SCRIPT.replace("@CODE@", code).replace("@KEY@", private).replace("@PORT@", str(WG_PORT))
-              .replace("@READY@", OD_READY).replace("@NPEERS@", str(len(peers)))
+              .replace("@READY@", OD_READY).replace("@NPEERS@", str(len(peers))).replace("@AGENT_REF@", AGENT_REF)
               # printf 서식 문자열로 들어간다: \n은 printf가 줄바꿈으로 바꾼다(키·ip에는 %나 \가 없다)
               .replace("@PEERS@", "".join("\\n[WireGuardPeer]\\nPublicKey=%s\\nAllowedIPs=%s/32\\n" % p
                                           for p in peers)))
