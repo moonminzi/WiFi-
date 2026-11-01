@@ -174,7 +174,7 @@ fn main() {
     for fec_on in [false, true] {
         let (wg, wg_stop) = spawn_echo();
         // k=4, groups=4 → 4연속 손실까지 복구, 패리티 비용 25%.
-        let fec = FecParams { k: 4, groups: 4, enabled: fec_on };
+        let fec = FecParams { k: 4, groups: 4, enabled: fec_on, ..FecParams::default() };
         let server = run_server(ServerConfig {
             identity: SKEY, tls_cert_pem: testcert::CERT_PEM.into(), tls_key_pem: testcert::KEY_PEM.into(),
             psk: psk.into(), udp_bind: lo(0), tcp_bind: lo(0), upstream: wg, fec,

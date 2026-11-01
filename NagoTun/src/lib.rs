@@ -298,7 +298,7 @@ pub(crate) fn nagoing_start(
         server_udp,
         server_tcp,
         local_bind,
-        fec: nagoing::FecParams { k: fec_k, groups: fec_groups, enabled: fec_on != 0 },
+        fec: nagoing::FecParams { k: fec_k, groups: fec_groups, enabled: fec_on != 0, ..Default::default() },
         prefer,
         sni: text(sni).unwrap_or_else(|| "www.cloudflare.com".into()),
         identity,

@@ -10,6 +10,11 @@ pub const DATA: u8 = 0x10;
 pub const PARITY: u8 = 0x11;
 pub const PING: u8 = 0x20;
 pub const PONG: u8 = 0x21;
+/// Reed-Solomon 데이터·패리티(fec_rs.rs). 상대가 REPORT를 보낸 적이 있을 때만 쓴다(예전 상대는 모르는 태그를 버린다).
+pub const RS_DATA: u8 = 0x12;
+pub const RS_PARITY: u8 = 0x13;
+/// 받는 쪽이 잰 손실률을 보내는 쪽에 알린다(그걸로 패리티 수를 정함). 보내는 것 자체가 "RS 할 줄 안다"는 표시.
+pub const REPORT: u8 = 0x22;
 
 /// 패딩을 붙일 기준(이보다 작은 payload만). WG 핸드셰이크(148/92)·keepalive를 덮고, 대용량은 안 건드린다.
 const PAD_THRESHOLD: usize = 256;
@@ -21,6 +26,10 @@ pub enum Frame<'a> {
     Parity { group: u16, gen: u16, k: u8, payload: &'a [u8] },
     Ping { token: u64 },
     Pong { token: u64 },
+    RsData { group: u16, gen: u16, index: u8, k: u8, payload: &'a [u8] },
+    RsParity { group: u16, gen: u16, k: u8, m: u8, j: u8, payload: &'a [u8] },
+    /// loss_ppm: 잰 손실률(백만분율). samples=0이면 아직 잰 게 없음(능력 알림만)
+    Report { loss_ppm: u32, samples: u32 },
 }
 
 fn put_u16(v: &mut Vec<u8>, n: u16) {
@@ -50,6 +59,32 @@ pub fn encode(frame: &Frame, out: &mut Vec<u8>) {
             put_u16(out, payload.len() as u16);
             out.extend_from_slice(payload);
             padit = payload.len() < PAD_THRESHOLD;
+        }
+        Frame::RsData { group, gen, index, k, payload } => {
+            out.push(RS_DATA);
+            put_u16(out, group);
+            put_u16(out, gen);
+            out.push(index);
+            out.push(k);
+            put_u16(out, payload.len() as u16);
+            out.extend_from_slice(payload);
+            padit = payload.len() < PAD_THRESHOLD;
+        }
+        Frame::RsParity { group, gen, k, m, j, payload } => {
+            out.push(RS_PARITY);
+            put_u16(out, group);
+            put_u16(out, gen);
+            out.push(k);
+            out.push(m);
+            out.push(j);
+            put_u16(out, payload.len() as u16);
+            out.extend_from_slice(payload);
+            padit = payload.len() < PAD_THRESHOLD;
+        }
+        Frame::Report { loss_ppm, samples } => {
+            out.push(REPORT);
+            out.extend_from_slice(&loss_ppm.to_le_bytes());
+            out.extend_from_slice(&samples.to_le_bytes());
         }
         Frame::Ping { token } => {
             out.push(PING);
@@ -87,6 +122,31 @@ pub fn decode(body: &[u8]) -> Option<Frame<'_>> {
         PARITY => {
             let plen = u16_at(5)? as usize;
             Some(Frame::Parity { group: u16_at(0)?, gen: u16_at(2)?, k: *rest.get(4)?, payload: rest.get(7..7 + plen)? })
+        }
+        RS_DATA => {
+            let plen = u16_at(6)? as usize;
+            Some(Frame::RsData {
+                group: u16_at(0)?,
+                gen: u16_at(2)?,
+                index: *rest.get(4)?,
+                k: *rest.get(5)?,
+                payload: rest.get(8..8 + plen)?,
+            })
+        }
+        RS_PARITY => {
+            let plen = u16_at(7)? as usize;
+            Some(Frame::RsParity {
+                group: u16_at(0)?,
+                gen: u16_at(2)?,
+                k: *rest.get(4)?,
+                m: *rest.get(5)?,
+                j: *rest.get(6)?,
+                payload: rest.get(9..9 + plen)?,
+            })
+        }
+        REPORT => {
+            let u32_at = |i: usize| -> Option<u32> { Some(u32::from_le_bytes(rest.get(i..i + 4)?.try_into().ok()?)) };
+            Some(Frame::Report { loss_ppm: u32_at(0)?, samples: u32_at(4)? })
         }
         PING => Some(Frame::Ping { token: u64_at(0)? }),
         PONG => Some(Frame::Pong { token: u64_at(0)? }),
@@ -134,5 +194,17 @@ mod tests {
         assert!(matches!(decode(&buf), Some(Frame::Ping { token: 77 })));
         assert!(decode(&[0x99, 1, 2]).is_none());
         assert!(decode(&[DATA, 0, 0]).is_none()); // 잘린 프레임
+    }
+
+    #[test]
+    fn rs_and_report_roundtrip() {
+        let mut buf = Vec::new();
+        let payload = vec![7u8; 1000];
+        encode(&Frame::RsData { group: 1, gen: 2, index: 3, k: 16, payload: &payload }, &mut buf);
+        assert!(matches!(decode(&buf), Some(Frame::RsData { group: 1, gen: 2, index: 3, k: 16, payload: p }) if p == &payload[..]));
+        encode(&Frame::RsParity { group: 0, gen: 9, k: 12, m: 3, j: 2, payload: b"par" }, &mut buf);
+        assert!(matches!(decode(&buf), Some(Frame::RsParity { group: 0, gen: 9, k: 12, m: 3, j: 2, payload: b"par" })));
+        encode(&Frame::Report { loss_ppm: 12_345, samples: 640 }, &mut buf);
+        assert!(matches!(decode(&buf), Some(Frame::Report { loss_ppm: 12_345, samples: 640 })));
     }
 }

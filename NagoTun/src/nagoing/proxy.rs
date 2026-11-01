@@ -21,7 +21,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::crypto::{self, ClientHello, HandshakeKey, Identity, ServerAck, SessionKeys};
-use super::fec::{FecDecoder, FecEncoder, ShardRef};
+use super::fec_link::{FecRx, FecTx};
 use super::frame::{self, Frame};
 use super::transport::{self, Kind, MsgKind, RxHalf, TlsTx, TxHalf, UdpRx, UdpTx};
 use super::{rand_bytes, rand_u64};
@@ -55,11 +55,6 @@ const MAX_SESSIONS: usize = 4096;
 const MAX_HELLO_CACHE: usize = 65_536;
 /// auto에서 UDP가 붙었다가 조용해지면(=도중에 막힘) 이 시간 동안은 TCP를 먼저 해 본다.
 const UDP_PENALTY: Duration = Duration::from_secs(300);
-/// 덜 찬 FEC 그룹은 이만큼 기다린 뒤 그 개수로 닫아 패리티를 낸다(드문 트래픽도 복구되게).
-/// 대용량 전송은 그룹이 이보다 먼저 차서 추가 비용이 없다.
-const FEC_MAX_AGE: Duration = Duration::from_millis(200);
-/// 덜 찬 그룹이 있을 때 읽기 제한을 이만큼으로 줄여 FEC_MAX_AGE를 제때 확인한다(없으면 READ_TIMEOUT).
-const FEC_TICK: Duration = Duration::from_millis(20);
 /// UDP 핸드셰이크 평문을 이만큼 채우면 데이터그램이 QUIC Initial 크기(1200)가 된다.
 const UDP_HS_PAD: usize = transport::QUIC_INITIAL_SIZE - transport::LONG_HDR - 12 - crypto::TAG_LEN;
 /// TLS 안의 HELLO는 진짜 브라우저의 첫 요청 크기쯤으로.
@@ -79,12 +74,17 @@ pub struct FecParams {
     pub k: u8,
     pub groups: u16,
     pub enabled: bool,
+    /// 상대도 할 줄 알면 Reed-Solomon으로 바꾼다(fec_link.rs)
+    pub rs: bool,
+    pub rs_k: u8,
+    pub rs_groups: u16,
 }
 
 impl Default for FecParams {
     fn default() -> Self {
-        // k=8 → 12.5% 추가, groups=8 → 최대 8연속 손실 복구.
-        FecParams { k: 8, groups: 8, enabled: true }
+        // XOR: k=8 → 12.5% 추가, groups=8 → 최대 8연속 손실 복구.
+        // RS: 데이터 16개마다 패리티 m개(손실률에 맞춰 1~), 인터리브 없음 — 아무 m개 손실을 바로 메운다.
+        FecParams { k: 8, groups: 8, enabled: true, rs: true, rs_k: 16, rs_groups: 1 }
     }
 }
 
@@ -99,14 +99,6 @@ pub enum Prefer {
 
 fn is_timeout(e: &io::Error) -> bool {
     matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
-}
-
-/// ShardRef를 Frame으로(seq는 선에 싣지 않는다 — 디코더가 안 쓴다).
-fn shard_frame<'a>(shard: ShardRef<'a>) -> Frame<'a> {
-    match shard {
-        ShardRef::Data { group, gen, index, k, payload, .. } => Frame::Data { group, gen, index, k, payload },
-        ShardRef::Parity { group, gen, k, payload } => Frame::Parity { group, gen, k, payload },
-    }
 }
 
 thread_local! {
@@ -179,9 +171,8 @@ struct Session {
     static_pub: [u8; 32],
     keys: Mutex<Arc<SessionKeys>>, // 마지막 HELLO로 뽑은 세션 키
     ret: Mutex<Return>,
-    enc: Mutex<FecEncoder>, // wg→client
-    dec: Mutex<FecDecoder>, // client→wg
-    fec_on: bool,
+    enc: Mutex<FecTx>, // wg→client
+    dec: Mutex<FecRx>, // client→wg
     alive: Arc<AtomicBool>,
     recovered: Arc<AtomicU64>, // client→wg 방향에서 FEC로 되살린 조각 수(서버 전체 합산)
     last_seen: AtomicU64,      // 마지막 인증된 수신 시각(ms). 유휴 정리에 쓴다
@@ -203,28 +194,19 @@ impl Session {
         self.last_seen.store(now_ms(), Ordering::Relaxed);
     }
 
-    /// 클라이언트→wg0: 받은 조각은 바로 wg0로, FEC로 되살린 조각도 wg0로.
+    /// 클라이언트→wg0: 받은 조각은 바로 wg0로, FEC로 되살린 조각도 wg0로. REPORT면 내 보내는 쪽 FEC를 맞춘다.
     fn inbound(&self, frame: Frame) {
-        match frame {
-            Frame::Data { group, gen, index, k, payload } => {
-                let _ = self.wg.send(payload);
-                if k >= 2 {
-                    let (wg, rc) = (&self.wg, &self.recovered);
-                    self.dec.lock().unwrap().on_data(group, gen, index, k, payload, |rec| {
-                        rc.fetch_add(1, Ordering::Relaxed);
-                        let _ = wg.send(rec);
-                    });
-                }
-            }
-            Frame::Parity { group, gen, k, payload } => {
-                let (wg, rc) = (&self.wg, &self.recovered);
-                self.dec.lock().unwrap().on_parity(group, gen, k, payload, |rec| {
-                    rc.fetch_add(1, Ordering::Relaxed);
-                    let _ = wg.send(rec);
-                });
-            }
-            _ => {}
+        if let Frame::Report { loss_ppm, samples } = frame {
+            self.enc.lock().unwrap().on_report(loss_ppm, samples);
+            return;
         }
+        let (wg, rc) = (&self.wg, &self.recovered);
+        self.dec.lock().unwrap().inbound(&frame, |p, recovered| {
+            if recovered {
+                rc.fetch_add(1, Ordering::Relaxed);
+            }
+            let _ = wg.send(p);
+        });
     }
 }
 
@@ -311,9 +293,8 @@ impl ServerInner {
             static_pub,
             keys: Mutex::new(keys),
             ret: Mutex::new(ret),
-            enc: Mutex::new(FecEncoder::new(self.fec.k, self.fec.groups)),
-            dec: Mutex::new(FecDecoder::new()),
-            fec_on: self.fec.enabled,
+            enc: Mutex::new(FecTx::new(self.fec)),
+            dec: Mutex::new(FecRx::new()),
             alive: Arc::new(AtomicBool::new(true)),
             recovered: self.recovered.clone(),
             last_seen: AtomicU64::new(now_ms()),
@@ -361,29 +342,27 @@ impl ServerInner {
             while session.alive.load(Ordering::Relaxed) && !self.stop.load(Ordering::Relaxed) {
                 match session.wg.recv(&mut buf) {
                     Ok(n) => {
-                        let payload = &buf[..n];
-                        if session.fec_on {
-                            session.enc.lock().unwrap().push(payload, |shard| {
-                                let _ = session.send_frame(&shard_frame(shard));
-                            });
-                        } else {
-                            let _ = session.send_frame(&Frame::Data { group: 0, gen: 0, index: 0, k: 0, payload });
-                        }
+                        session.enc.lock().unwrap().push(&buf[..n], |f| {
+                            let _ = session.send_frame(f);
+                        });
                     }
                     Err(e) if is_timeout(&e) => {}
                     Err(_) => break,
                 }
-                if session.fec_on {
-                    // 덜 찬 그룹을 제때 닫고, 남은 게 있으면 짧은 주기로 다시 확인한다.
-                    let mut enc = session.enc.lock().unwrap();
-                    enc.flush_stale(FEC_MAX_AGE, |shard| {
-                        let _ = session.send_frame(&shard_frame(shard));
-                    });
-                    let want = if enc.has_pending() { FEC_TICK } else { READ_TIMEOUT };
-                    drop(enc);
-                    if want != timeout && session.wg.set_read_timeout(Some(want)).is_ok() {
-                        timeout = want;
-                    }
+                // 덜 찬 그룹을 제때 닫고, 남은 게 있으면 짧은 주기로 다시 확인한다.
+                let mut enc = session.enc.lock().unwrap();
+                enc.flush_stale(|f| {
+                    let _ = session.send_frame(f);
+                });
+                let want = if enc.has_pending() { enc.tick() } else { READ_TIMEOUT };
+                drop(enc);
+                if want != timeout && session.wg.set_read_timeout(Some(want)).is_ok() {
+                    timeout = want;
+                }
+                // 받는 쪽(클라→wg0)에서 잰 손실률을 클라에 알린다(클라가 RS 패리티 수를 정함)
+                let report = session.dec.lock().unwrap().report_due();
+                if let Some(r) = report {
+                    let _ = session.send_frame(&r);
                 }
             }
         })?;
@@ -538,8 +517,8 @@ fn server_udp_loop(inner: Arc<ServerInner>, udp: Arc<UdpSocket>) {
                         let direct = Return::Udp { sock: udp.clone(), addr: from, cid };
                         let _ = with_sealed(&keys, &Frame::Pong { token }, |b| direct.send(MsgKind::Data, b));
                     }
-                    Frame::Data { .. } | Frame::Parity { .. } => s.inbound(frame),
                     Frame::Pong { .. } => {}
+                    _ => s.inbound(frame),
                 }
             }
         }
@@ -650,8 +629,8 @@ fn server_tcp_conn(inner: Arc<ServerInner>, stream: TcpStream) -> io::Result<()>
                     Frame::Ping { token } => {
                         let _ = with_sealed(&keys, &Frame::Pong { token }, |b| ret.send(MsgKind::Data, b));
                     }
-                    Frame::Data { .. } | Frame::Parity { .. } => session.inbound(frame),
                     Frame::Pong { .. } => {}
+                    _ => session.inbound(frame),
                 }
             }
         }
@@ -700,8 +679,8 @@ struct ClientInner {
     tx: Mutex<Option<Box<dyn TxHalf>>>,
     rx: Mutex<Option<Box<dyn RxHalf>>>,
     keys: Mutex<Option<Arc<SessionKeys>>>,
-    enc: Mutex<FecEncoder>, // c2s
-    dec: Mutex<FecDecoder>, // s2c
+    enc: Mutex<FecTx>, // c2s
+    dec: Mutex<FecRx>, // s2c
     last_rx: AtomicU64,     // 마지막 인증된 수신 시각(ms). 오래 조용하면 전송을 다시 세운다
     udp_bad_until: AtomicU64, // 이 시각(ms)까지는 auto에서 TCP를 먼저(붙었던 UDP가 도중에 막힌 망)
     stop: AtomicBool,
@@ -740,32 +719,20 @@ impl ClientInner {
 
     /// WG 데이터그램 하나를 FEC로 조각내 봉인해 보낸다(로컬 소켓에서 받았든 엔진이 바로 넘겼든 같은 길).
     fn send_wg(&self, payload: &[u8]) {
-        if self.cfg.fec.enabled {
-            self.enc.lock().unwrap().push(payload, |shard| self.send_frame(&shard_frame(shard)));
-        } else {
-            self.send_frame(&Frame::Data { group: 0, gen: 0, index: 0, k: 0, payload });
-        }
+        self.enc.lock().unwrap().push(payload, |f| self.send_frame(f));
     }
 
     fn handle_down(&self, frame: Frame) {
-        match frame {
-            Frame::Data { group, gen, index, k, payload } => {
-                self.deliver(payload);
-                if k >= 2 {
-                    self.dec.lock().unwrap().on_data(group, gen, index, k, payload, |rec| {
-                        self.st_recovered.fetch_add(1, Ordering::Relaxed);
-                        self.deliver(rec);
-                    });
-                }
-            }
-            Frame::Parity { group, gen, k, payload } => {
-                self.dec.lock().unwrap().on_parity(group, gen, k, payload, |rec| {
-                    self.st_recovered.fetch_add(1, Ordering::Relaxed);
-                    self.deliver(rec);
-                });
-            }
-            _ => {}
+        if let Frame::Report { loss_ppm, samples } = frame {
+            self.enc.lock().unwrap().on_report(loss_ppm, samples);
+            return;
         }
+        self.dec.lock().unwrap().inbound(&frame, |p, recovered| {
+            if recovered {
+                self.st_recovered.fetch_add(1, Ordering::Relaxed);
+            }
+            self.deliver(p);
+        });
     }
 
     fn stopped(&self) -> bool {
@@ -956,6 +923,8 @@ impl ClientHandle {
             sent: self.inner.st_sent.load(Ordering::Relaxed),
             recv: self.inner.st_recv.load(Ordering::Relaxed),
             recovered: self.inner.st_recovered.load(Ordering::Relaxed),
+            rs_m: self.inner.enc.lock().unwrap().rs_m(),
+            up_loss_ppm: self.inner.enc.lock().unwrap().loss_ppm(),
         }
     }
 
@@ -974,6 +943,10 @@ pub struct ClientStats {
     pub sent: u64,
     pub recv: u64,
     pub recovered: u64,
+    /// 올리는 쪽 RS 패리티 수(0 = 상대가 예전 버전이라 XOR)
+    pub rs_m: u8,
+    /// 서버가 잰 올리는 쪽 손실률(ppm)
+    pub up_loss_ppm: u32,
 }
 
 impl ClientStats {
@@ -983,7 +956,12 @@ impl ClientStats {
             Some(Kind::Tcp) => "tls",
             None => "down",
         };
-        format!("{k} · tx {} · rx {} · fec+{}", self.sent, self.recv, self.recovered)
+        let fec = if self.rs_m > 0 {
+            format!("rs m={} up-loss {:.2}%", self.rs_m, self.up_loss_ppm as f64 / 1e4)
+        } else {
+            "xor".to_string()
+        };
+        format!("{k} · tx {} · rx {} · fec+{} · {fec}", self.sent, self.recv, self.recovered)
     }
 }
 
@@ -1006,8 +984,8 @@ pub fn run_client(cfg: ClientConfig) -> io::Result<ClientHandle> {
         tx: Mutex::new(None),
         rx: Mutex::new(None),
         keys: Mutex::new(None),
-        enc: Mutex::new(FecEncoder::new(cfg.fec.k, cfg.fec.groups)),
-        dec: Mutex::new(FecDecoder::new()),
+        enc: Mutex::new(FecTx::new(cfg.fec)),
+        dec: Mutex::new(FecRx::new()),
         last_rx: AtomicU64::new(0),
         udp_bad_until: AtomicU64::new(0),
         stop: AtomicBool::new(false),
@@ -1058,7 +1036,6 @@ fn looks_like_wg(p: &[u8]) -> bool {
 
 fn client_up_loop(inner: Arc<ClientInner>) {
     let mut buf = [0u8; MAX_MSG];
-    let fec_on = inner.cfg.fec.enabled;
     let mut timeout = READ_TIMEOUT;
     while !inner.stop.load(Ordering::Relaxed) {
         match inner.local.recv_from(&mut buf) {
@@ -1071,15 +1048,13 @@ fn client_up_loop(inner: Arc<ClientInner>) {
             Ok(_) => {}
             Err(_) => {} // 타임아웃 포함
         }
-        if fec_on {
-            // 덜 찬 그룹을 제때 닫고(드문 트래픽도 복구), 남은 게 있으면 짧은 주기로 다시 확인한다.
-            let mut enc = inner.enc.lock().unwrap();
-            enc.flush_stale(FEC_MAX_AGE, |shard| inner.send_frame(&shard_frame(shard)));
-            let want = if enc.has_pending() { FEC_TICK } else { READ_TIMEOUT };
-            drop(enc);
-            if want != timeout && inner.local.set_read_timeout(Some(want)).is_ok() {
-                timeout = want;
-            }
+        // 덜 찬 그룹을 제때 닫고(드문 트래픽도 복구), 남은 게 있으면 짧은 주기로 다시 확인한다.
+        let mut enc = inner.enc.lock().unwrap();
+        enc.flush_stale(|f| inner.send_frame(f));
+        let want = if enc.has_pending() { enc.tick() } else { READ_TIMEOUT };
+        drop(enc);
+        if want != timeout && inner.local.set_read_timeout(Some(want)).is_ok() {
+            timeout = want;
         }
     }
 }
@@ -1143,6 +1118,11 @@ fn client_supervisor(inner: Arc<ClientInner>) {
         // 서버 재시작/NAT 변경으로 보고 전송을 다시 세운다.
         while !inner.stop.load(Ordering::Relaxed) && !inner.rebind.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(200));
+            // 받는 쪽(서버→나)에서 잰 손실률을 서버에 알린다(서버가 RS 패리티 수를 정함)
+            let report = inner.dec.lock().unwrap().report_due();
+            if let Some(r) = report {
+                inner.send_frame(&r);
+            }
             if last_ping.elapsed() >= KEEPALIVE {
                 last_ping = Instant::now();
                 inner.send_frame(&Frame::Ping { token: rand_u64() });
@@ -1238,7 +1218,7 @@ mod tests {
     // 클라 로컬로 패킷을 밀어 서버(→에코 wg0)를 돌아 되돌아오는지 센다.
     fn roundtrip(prefer: Prefer, udp_bind: SocketAddr, tcp_bind: SocketAddr, local_bind: SocketAddr) -> u32 {
         let (wg_addr, wg_stop, wg_thread, _) = spawn_echo();
-        let fec = FecParams { k: 4, groups: 4, enabled: true };
+        let fec = FecParams { k: 4, groups: 4, enabled: true, ..FecParams::default() };
         let skey = random_key();
         let server = run_server(server_cfg(udp_bind, tcp_bind, wg_addr, fec, skey)).unwrap();
         let client = run_client(client_cfg(udp_bind, tcp_bind, local_bind, fec, prefer, &skey)).unwrap();
@@ -1309,7 +1289,7 @@ mod tests {
     #[test]
     fn replay_and_hijack_rejected() {
         let (wg_addr, wg_stop, wg_thread, count) = spawn_echo();
-        let fec = FecParams { k: 4, groups: 4, enabled: false };
+        let fec = FecParams { k: 4, groups: 4, enabled: false, ..FecParams::default() };
         let skey = random_key();
         let server = run_server(server_cfg(loopback(0), loopback(0), wg_addr, fec, skey)).unwrap();
         let spub = Identity::from_bytes(skey).public();
@@ -1445,7 +1425,7 @@ mod tests {
     #[test]
     fn stray_local_packet_does_not_steal_peer() {
         let (wg_addr, wg_stop, wg_thread, _) = spawn_echo();
-        let fec = FecParams { k: 4, groups: 4, enabled: true };
+        let fec = FecParams { k: 4, groups: 4, enabled: true, ..FecParams::default() };
         let (udp_bind, tcp_bind, local_bind) = (loopback(39031), loopback(39032), loopback(39033));
         let skey = random_key();
         let server = run_server(server_cfg(udp_bind, tcp_bind, wg_addr, fec, skey)).unwrap();
@@ -1478,7 +1458,7 @@ mod tests {
     #[test]
     fn auto_falls_back_to_tls() {
         let (wg_addr, wg_stop, wg_thread, _) = spawn_echo();
-        let fec = FecParams { k: 4, groups: 4, enabled: true };
+        let fec = FecParams { k: 4, groups: 4, enabled: true, ..FecParams::default() };
         let tcp_bind = loopback(39022);
         let dead_udp = loopback(39021); // 서버를 안 띄운 포트 → UDP HELLO가 실패해야 한다
         let skey = random_key();

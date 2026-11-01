@@ -55,6 +55,23 @@ fn key32(b64: &str, what: &str) -> [u8; 32] {
         .unwrap_or_else(|| die(format!("잘못된 {what}(base64 32바이트 키여야 함)")))
 }
 
+/// 실험용: NAGO_FEC=xor(예전 XOR만) | rs(기본, 상대가 되면 RS) | off, NAGO_RS_K·NAGO_RS_G로 RS 모양
+fn fec_from_env() -> FecParams {
+    let mut p = FecParams::default();
+    match std::env::var("NAGO_FEC").as_deref() {
+        Ok("xor") => p.rs = false,
+        Ok("off") => p.enabled = false,
+        _ => {}
+    }
+    if let Some(k) = std::env::var("NAGO_RS_K").ok().and_then(|v| v.parse().ok()) {
+        p.rs_k = k;
+    }
+    if let Some(g) = std::env::var("NAGO_RS_G").ok().and_then(|v| v.parse().ok()) {
+        p.rs_groups = g;
+    }
+    p
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -68,7 +85,7 @@ fn main() {
                 udp_bind: parse::<SocketAddr>(&args[3], "udp_bind"),
                 tcp_bind: parse::<SocketAddr>(&args[4], "tcp_bind"),
                 upstream: parse::<SocketAddr>(&args[5], "wg0"),
-                fec: FecParams::default(),
+                fec: fec_from_env(),
                 identity: key32(&key, "wg 개인키"),
                 tls_cert_pem: read(&args[7], "tls 인증서"),
                 tls_key_pem: read(&args[8], "tls 키"),
@@ -108,7 +125,7 @@ fn main() {
                 server_udp: SocketAddr::new(ip, udp_port),
                 server_tcp: SocketAddr::new(ip, tcp_port),
                 local_bind: parse::<SocketAddr>(&args[6], "local_bind"),
-                fec: FecParams::default(),
+                fec: fec_from_env(),
                 prefer,
                 sni: "www.cloudflare.com".into(),
                 identity,

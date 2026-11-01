@@ -17,6 +17,8 @@
 
 pub mod crypto;
 pub mod fec;
+pub mod fec_link;
+pub mod fec_rs;
 pub mod frame;
 pub mod proxy;
 pub mod testcert;
