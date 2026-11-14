@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="popup.css" />
+  <title>유튜브 앱 리다이렉트</title>
+</head>
+<body>
+  <header class="head">
+    <span class="logo">&gt;_</span>
+    <h1>유튜브 앱 리다이렉트</h1>
+  </header>
+
+  <div class="row">
+    <div class="row-text">
+      <div class="row-title">앱으로 바로 열기</div>
+      <div class="row-sub">유튜브 링크를 Cercube 앱으로 리다이렉트</div>
+    </div>
+    <label class="switch">
+      <input type="checkbox" id="toggle" />
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="status" id="status">불러오는 중…</div>
+
+  <button id="openCurrent" class="btn" type="button">지금 이 탭을 앱에서 열기</button>
+
+  <p class="note">
+    유튜브(Cercube) 앱이 설치돼 있어야 동작합니다.<br />
+    끄면 평소처럼 브라우저에서 열립니다.<br />
+    music.youtube.com / 임베드 영상은 리다이렉트하지 않습니다.
+  </p>
+
+  <script src="popup.js"></script>
+</body>
+</html>
