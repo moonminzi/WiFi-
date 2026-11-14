@@ -12,7 +12,8 @@
   // (manifest의 all_frames:false 로도 막지만 이중 방어)
   if (window.top !== window.self) return;
 
-  var api = (typeof browser !== "undefined" && browser.storage) ? browser : chrome;
+  // chrome.* 은 크롬·사파리·파이어폭스 모두 콜백 방식을 받는다(browser.* 는 프라미스 전용일 수 있음)
+  var api = (typeof chrome !== "undefined" && chrome.storage) ? chrome : browser;
 
   /**
    * 원본 유튜브 웹 URL → 유튜브 앱 URL 스킴 변환.

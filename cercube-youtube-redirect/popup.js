@@ -2,7 +2,8 @@
 (function () {
   "use strict";
 
-  var api = (typeof browser !== "undefined" && browser.storage) ? browser : chrome;
+  // chrome.* 은 크롬·사파리·파이어폭스 모두 콜백 방식을 받는다(browser.* 는 프라미스 전용일 수 있음)
+  var api = (typeof chrome !== "undefined" && chrome.storage) ? chrome : browser;
 
   var toggle = document.getElementById("toggle");
   var statusEl = document.getElementById("status");

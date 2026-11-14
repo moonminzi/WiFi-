@@ -8,6 +8,8 @@ Safari에서 유튜브 링크를 열면 보통 모바일 웹페이지가 뜨죠.
 - 💻 Chrome · Edge · Firefox 에서도 그대로 동작하는 **크로스 브라우저 Manifest V3** 확장
 - 🔀 켜고/끄는 **토글** 팝업 제공 (끄면 평소처럼 웹으로 열림)
 
+> **왜 필요하냐면:** 정식 유튜브 앱은 유니버설 링크로 Safari 링크를 가로채지만, Cercube처럼 재서명한 앱은 그 권한(associated domains)이 빠져서 링크가 계속 Safari에서 열립니다. 이 확장이 그 자리를 대신합니다.
+>
 > Cercube는 유튜브 앱을 바꿔치기한 거라 OS에는 여전히 "유튜브 앱"으로 등록됩니다. 그래서 `youtube://` 스킴이 그대로 Cercube에서 열립니다. (정식 유튜브 앱이 깔려 있어도 동일하게 동작)
 
 ---
@@ -33,42 +35,52 @@ Safari에서 유튜브 링크를 열면 보통 모바일 웹페이지가 뜨죠.
 
 ## 설치 방법
 
-### A. iOS / iPadOS — 제일 쉬운 길 (유저스크립트) ⭐ 추천
+### A. iOS / iPadOS — IPA로 설치 ⭐ 추천
 
-Xcode도 Mac도 필요 없습니다. App Store의 무료 앱 **[Userscripts](https://apps.apple.com/app/userscripts/id1463298887)** 를 쓰면 됩니다.
+Cercube를 깔 때처럼 **IPA를 사이드로드**하면 됩니다. 안에 껍데기 앱 + Safari 확장(`YTRedirectExtension.appex`)이 들어 있습니다.
+
+1. 레포의 **Releases**에서 최신 `ytredirect-N`의 `YTRedirect.ipa`를 받기
+   (GitHub Actions `Build YT Redirect IPA`가 `cercube-youtube-redirect/` 를 고칠 때마다 자동으로 빌드·게시)
+2. AltStore / Sideloadly / TrollStore / ESign 등으로 설치 — ad-hoc 서명이라 **본인 인증서로 재서명**됩니다
+3. **설정 → 앱 → Safari → 확장 프로그램 → YT 리다이렉트** 켜기
+   (iOS 17 이하: 설정 → Safari → 확장 프로그램)
+4. 권한에서 `youtube.com`, `youtu.be` **허용** (또는 "모든 웹사이트 → 허용")
+5. 홈 화면의 **YT 리다이렉트** 앱을 열면 위 과정 안내 + "유튜브 앱 깔려 있는지 확인" / "Safari로 시험 링크 열기" 버튼이 있습니다
+
+> 재서명 도구가 확장(appex) 번들 ID를 바꾸지 않게 두세요. 앱 번들 ID가 `X`면 확장은 `X.extension` 이어야 iOS가 같이 인식합니다(대부분 도구가 자동 처리).
+>
+> 무료 Apple ID로 재서명하면 7일마다 다시 서명해야 합니다(Cercube와 같음).
+
+### B. iOS / iPadOS — 유저스크립트 (사이드로드 없이)
+
+IPA 설치가 귀찮으면 App Store의 무료 앱 **[Userscripts](https://apps.apple.com/app/userscripts/id1463298887)** 로도 됩니다.
 
 1. App Store에서 **Userscripts** 설치
-2. **설정 → Safari → 확장 프로그램 → Userscripts** 켜기 (모든 웹사이트 권한 "허용")
+2. **설정 → (앱 →) Safari → 확장 프로그램 → Userscripts** 켜기 (모든 웹사이트 권한 "허용")
 3. Userscripts 앱을 한 번 열어 스크립트 저장 폴더를 지정
 4. [`userscript/cercube-youtube-redirect.user.js`](userscript/cercube-youtube-redirect.user.js) 파일 내용을 그 폴더에 넣기
    - 가장 간단: Safari에서 이 레포의 raw 파일을 열면 Userscripts가 "설치" 버튼을 띄워줍니다
    - 또는 Userscripts 앱에서 새 스크립트를 만들어 파일 내용을 붙여넣기
-5. 끝. 이제 Safari에서 유튜브 링크를 누르면 앱으로 넘어갑니다.
+5. 끝. (이 방법은 켜고/끄는 팝업 토글이 없습니다)
 
-### B. iOS / iPadOS — 정식 Safari 확장으로 (Mac + Xcode 필요)
-
-이 폴더를 Safari 웹 확장 앱으로 변환해서 기기에 올리는 방법입니다.
+### C. IPA를 직접 빌드 (Mac + Xcode)
 
 ```bash
-# macOS + Xcode 필요
-xcrun safari-web-extension-converter /path/to/cercube-youtube-redirect
+brew install xcodegen
+cd cercube-youtube-redirect/ios && xcodegen   # YTRedirect.xcodeproj 생성
+open YTRedirect.xcodeproj                     # 서명 팀 지정 후 기기로 실행
 ```
 
-1. 위 명령으로 생성된 Xcode 프로젝트를 엽니다
-2. 서명 팀(무료 Apple ID도 가능)을 지정하고 **iPhone/iPad를 대상**으로 빌드·설치
-3. 기기에서 **설정 → Safari → 확장 프로그램** 에서 "Cercube 유튜브 앱 리다이렉트" 켜기
-4. 권한에서 유튜브 도메인 **허용**
+`ios/project.yml` 이 앱 타깃(`YTRedirect`)과 Safari 확장 타깃(`YTRedirectExtension`)을 만들고, 확장에는 이 폴더의 `manifest.json` · `content.js` · `popup.*` · `icons/` 를 **그대로** 묶습니다(크롬/파이어폭스용과 같은 파일).
 
-> 무료 Apple ID로 설치하면 보통 7일마다 다시 빌드해야 합니다. 그래서 가벼운 A(유저스크립트) 방법을 더 추천합니다.
-
-### C. 데스크톱 Chrome / Edge
+### D. 데스크톱 Chrome / Edge
 
 1. `chrome://extensions` (Edge는 `edge://extensions`) 열기
 2. 우측 상단 **개발자 모드** 켜기
 3. **압축해제된 확장 프로그램을 로드합니다** → 이 `cercube-youtube-redirect` 폴더 선택
 4. 유튜브 링크를 열면 "유튜브 앱으로 열겠습니까?" 식의 외부 앱 열기 확인이 뜹니다
 
-### D. Firefox (임시 로드)
+### E. Firefox (임시 로드)
 
 1. `about:debugging#/runtime/this-firefox` 열기
 2. **임시 부가 기능 로드** → 이 폴더의 `manifest.json` 선택
@@ -102,6 +114,10 @@ cercube-youtube-redirect/
 ├─ icons/                # 16/32/48/128 아이콘
 ├─ userscript/
 │  └─ cercube-youtube-redirect.user.js   # iOS Userscripts 앱용 단독 버전
+├─ ios/                 # IPA: xcodegen 스펙 + 껍데기 앱(설치 안내) + Safari 확장 핸들러
+│  ├─ project.yml
+│  ├─ App/              # SwiftUI 안내 화면, 앱 아이콘
+│  └─ Extension/        # SafariWebExtensionHandler.swift
 └─ README.md
 ```
 
@@ -112,3 +128,4 @@ cercube-youtube-redirect/
 - `youtube://` 스킴은 **유튜브 앱이 설치돼 있어야** 동작합니다. 없으면 웹으로 그대로 열립니다.
 - Safari는 외부 앱으로 넘어갈 때 한 번 확인창을 띄울 수 있습니다(iOS 정책). "열기"를 누르면 됩니다.
 - Chrome 웹스토어 / App Store 정식 등록용이 아니라 **개인용 사이드로드/개발자 로드**를 전제로 만든 확장입니다.
+- IPA 빌드는 `.github/workflows/build-ytredirect-ipa.yml` (macOS 러너, 서명 없이 빌드 → ad-hoc 서명 → Releases 게시).
