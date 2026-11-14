@@ -9,3 +9,5 @@ WifiScanTunnel/WifiScanTunnel.entitlements
 Vendor/WireGuardKit/Sources/WireGuardKitGo/.tmp/
 Vendor/WireGuardKit/Sources/WireGuardKitGo/out/
 NagoTun/target/
+cercube-youtube-redirect/ios/App/Info.plist
+cercube-youtube-redirect/ios/Extension/Info.plist

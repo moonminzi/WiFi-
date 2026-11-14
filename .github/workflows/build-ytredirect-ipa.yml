@@ -1,0 +1,75 @@
+name: Build YT Redirect IPA
+
+# 유튜브 링크 → 유튜브(Cercube) 앱 리다이렉트 Safari 확장(앱 + 확장 appex)만 빌드한다.
+on:
+  push:
+    paths:
+      - 'cercube-youtube-redirect/**'
+      - 'WifiScan/Theme.swift'
+      - 'WifiScan/Fonts/**'
+      - '.github/workflows/build-ytredirect-ipa.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ytredirect-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          cd cercube-youtube-redirect/ios && xcodegen
+
+      - name: Build (no signing)
+        run: |
+          xcodebuild -project cercube-youtube-redirect/ios/YTRedirect.xcodeproj -scheme YTRedirect -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      # 웹 확장 파일이 appex 안(manifest와 같은 자리)에 들어갔는지 확인. 빠지면 Safari에 확장이 안 뜬다.
+      - name: Check extension bundle
+        run: |
+          appex=build/Build/Products/Release-iphoneos/YTRedirect.app/PlugIns/YTRedirectExtension.appex
+          ls -la "$appex" "$appex/icons"
+          for f in manifest.json content.js popup.html popup.css popup.js icons/icon-16.png icons/icon-128.png; do
+            test -f "$appex/$f" || { echo "::error::appex에 $f 가 없습니다"; exit 1; }
+          done
+          plutil -p "$appex/Info.plist" | grep -q 'com.apple.Safari.web-extension' \
+            || { echo "::error::NSExtensionPointIdentifier가 Safari 웹 확장이 아닙니다"; exit 1; }
+          python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$appex/manifest.json"
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/YTRedirect.app Payload/
+          # 확장(PlugIns)을 먼저 서명해야 앱 서명이 깨지지 않는다(ad-hoc, 재서명 도구용)
+          codesign --force --sign - Payload/YTRedirect.app/PlugIns/YTRedirectExtension.appex
+          codesign --force --sign - Payload/YTRedirect.app
+          ls -la Payload/YTRedirect.app Payload/YTRedirect.app/PlugIns
+          zip -qry YTRedirect.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YTRedirect-ipa
+          path: YTRedirect.ipa
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="ytredirect-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" YTRedirect.ipa --target "$GITHUB_SHA" --prerelease \
+            --title "YT Redirect ${tag}" \
+            --notes "유튜브 링크 → 유튜브(Cercube) 앱 리다이렉트 Safari 확장. 서명 안 된 IPA입니다(ad-hoc 서명). 본인 인증서로 재서명 후 설치하고, 설정 → 앱 → Safari → 확장 프로그램에서 'YT 리다이렉트'를 켜세요. 브랜치: ${GITHUB_REF_NAME}"

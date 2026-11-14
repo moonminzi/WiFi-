@@ -2,6 +2,8 @@
 
 > 같은 저장소에 다운로드 매니저 **NAGO DL**(따로 설치하는 IPA)도 있다 → [`NagoDL/README.md`](NagoDL/README.md)
 >
+> 유튜브 링크를 Safari에서 누르면 유튜브(Cercube) 앱으로 넘겨주는 Safari 확장 **YT 리다이렉트**(따로 설치하는 IPA)도 있다 → [`cercube-youtube-redirect/README.md`](cercube-youtube-redirect/README.md)
+>
 > 망가·사진 번역기 **NAGO TL**(따로 설치하는 IPA)은 [moonminzi/TL](https://github.com/moonminzi/TL) 레포로 옮겼다
 
 앱 이름은 **NAGO VPN**. 탭 두 개짜리 앱입니다. 화면은 대시보드 사이트와 같은 터미널 스타일(초록빛 다크 팔레트, JetBrains Mono, `~/vpn $▌` 머리줄)이고 아이콘은 `>_`.
