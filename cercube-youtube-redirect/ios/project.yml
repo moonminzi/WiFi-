@@ -2,8 +2,8 @@ name: YTRedirect
 options:
   bundleIdPrefix: com.example
   deploymentTarget:
-    # 공유 테마(WifiScan/Theme.swift)가 iOS 16 API를 쓴다. Safari 웹 확장(MV3)은 15.4+
-    iOS: "16.0"
+    # 공유 테마(WifiScan/Theme.swift)가 iOS 17 API(Text.foregroundStyle 등)를 쓴다 — NAGO VPN·DL과 같은 17.0
+    iOS: "17.0"
 settings:
   base:
     DEVELOPMENT_TEAM: ""          # ← 본인 Team ID

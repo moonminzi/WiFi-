@@ -37,7 +37,7 @@ Safari에서 유튜브 링크를 열면 보통 모바일 웹페이지가 뜨죠.
 
 ### A. iOS / iPadOS — IPA로 설치 ⭐ 추천
 
-Cercube를 깔 때처럼 **IPA를 사이드로드**하면 됩니다. 안에 껍데기 앱 + Safari 확장(`YTRedirectExtension.appex`)이 들어 있습니다.
+Cercube를 깔 때처럼 **IPA를 사이드로드**하면 됩니다. 안에 껍데기 앱 + Safari 확장(`YTRedirectExtension.appex`)이 들어 있습니다. **iOS/iPadOS 17 이상.**
 
 1. 레포의 **Releases**에서 최신 `ytredirect-N`의 `YTRedirect.ipa`를 받기
    (GitHub Actions `Build YT Redirect IPA`가 `cercube-youtube-redirect/` 를 고칠 때마다 자동으로 빌드·게시)
