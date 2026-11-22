@@ -12,3 +12,4 @@ NagoTun/target/
 tools/uishots/*.xcodeproj
 tools/uishots/Info.plist
 __pycache__/
+windows/*.exe

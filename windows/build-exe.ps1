@@ -14,6 +14,6 @@ $out = Join-Path $PSScriptRoot 'NagoVpn.exe'
 # -requireAdmin: CA 인증서를 시스템 루트 저장소에 설치하려면 관리자 권한이 필요
 # -noConsole: 콘솔 창 없이 GUI만 표시
 Invoke-ps2exe -InputFile $src -OutputFile $out -noConsole -requireAdmin `
-    -title 'NAGO VPN' -product 'NAGO VPN' -version '1.0.0.0'
+    -title 'NAGO VPN' -product 'NAGO VPN' -version '1.1.0.0'
 
 Write-Host "빌드 완료: $out"
