@@ -81,7 +81,18 @@ function Get-EapMschapv2Xml {
 function Connect-Vpn($user, $pass) {
     # rasdial 로 사용자 이름/비밀번호를 넘겨 연결
     $out = & rasdial $VpnName $user $pass 2>&1
-    return ($LASTEXITCODE -eq 0), ($out -join "`n")
+    if ($LASTEXITCODE -eq 0) { return $true, ($out -join "`n") }
+    if ($LASTEXITCODE -eq 703) {
+        # 703(ERROR_INTERACTIVE_MODE): EAP 연결은 rasdial이 비밀번호를 넘기지 못한다.
+        # 윈도우 자체 연결 창을 띄워 거기서 한 번 입력받는다(-RememberCredential이라 다음부터는 rasdial로 바로 됨)
+        [Windows.Forms.MessageBox]::Show(
+            "윈도우 연결 창이 뜹니다.`n사용자 이름: $user`n비밀번호를 넣고 [연결]을 누르세요(처음 한 번만).",
+            'NAGO VPN') | Out-Null
+        Start-Process rasphone -ArgumentList '-d', "`"$VpnName`"" -Wait
+        $st = (Get-VpnConnection -Name $VpnName -ErrorAction SilentlyContinue).ConnectionStatus
+        return ($st -eq 'Connected'), "윈도우 연결 창: $st"
+    }
+    return $false, ($out -join "`n")
 }
 
 function Disconnect-Vpn { & rasdial $VpnName /disconnect 2>&1 | Out-Null }
