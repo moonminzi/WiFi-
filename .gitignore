@@ -11,3 +11,4 @@ Vendor/WireGuardKit/Sources/WireGuardKitGo/out/
 NagoTun/target/
 tools/uishots/*.xcodeproj
 tools/uishots/Info.plist
+__pycache__/

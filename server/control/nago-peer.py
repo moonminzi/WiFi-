@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WireGuard 피어 관리(서버 4대 공통). 대시보드/국가 Lambda가 SSM으로 설치하고 부른다.
+"""WireGuard 피어 관리(서버 4대 공통). 서울의 컨트롤 서버(app.py)가 SSH로 설치하고 부른다.
 
     nago-peer <base64(JSON)>      → 결과 JSON 한 줄
     nago-peer restore <ip>        → kick 뒤 되살리기(systemd 타이머가 부름)
@@ -11,7 +11,7 @@ JSON op:
     remove  {ip}                영구 삭제(wg0.conf에서도 지움)
     rename  {ip, name}
     flags   {ip, adblock}       피어별 스위치. adblock을 켜면 그 피어의 DNS(53)를 차단 DNS로 돌린다
-    sync    {peers: [{pub, ip, adblock}]}  피어 목록(SSM 파라미터 /nago/wg/peers)에 맞춘다. 바뀐 것만
+    sync    {peers: [{pub, ip, adblock}]}  피어 목록(컨트롤 서버의 wg-peers.json)에 맞춘다. 바뀐 것만
                                   건드려서 붙어 있는 사람은 끊기지 않는다
 
     nago-peer apply               저장된 피어별 스위치를 iptables에 다시 올린다(재부팅 뒤 systemd가 부름)

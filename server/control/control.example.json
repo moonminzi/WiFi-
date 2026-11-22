@@ -1,0 +1,22 @@
+{
+  "listen": "127.0.0.1:8080",
+  "token": "setup-control.sh가 만들어 넣음 (대시보드 사이트 ?t=)",
+  "key_sha256": "setup-control.sh가 VPN 비밀번호로 만들어 넣음",
+  "vultr_api_key": "",
+  "ssh_key": "/etc/nago/id_ed25519",
+  "egress_usd_per_gb": 0.01,
+  "nodes": [
+    {"code": "kr", "city": "seoul", "region": "icn", "local": true,
+     "addr": "서울 서버 IP", "id": "서울 서버 IP",
+     "vultr_id": "", "plan": "vc2-2c-4gb", "monthly_usd": 20, "bandwidth_gb": 3000},
+    {"code": "jp", "city": "tokyo", "region": "nrt",
+     "addr": "도쿄 서버 IP", "id": "jp.nago.vpn",
+     "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2000},
+    {"code": "us", "city": "seattle", "region": "sea",
+     "addr": "미국 서버 IP", "id": "us.nago.vpn",
+     "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2000},
+    {"code": "uk", "city": "london", "region": "lhr",
+     "addr": "영국 서버 IP", "id": "uk.nago.vpn",
+     "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2000}
+  ]
+}

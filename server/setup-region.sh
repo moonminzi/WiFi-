@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 #
-# NAGO VPN - 국가 선택용 해외 IKEv2 서버(strongSwan) 구축 스크립트
-# 대상: Ubuntu 22.04 (arm64/amd64). root로 실행하세요.
+# NAGO VPN - IKEv2 서버(strongSwan) 구축 스크립트 (Vultr 서버 4대 공통: kr/jp/us/uk)
+# 대상: Ubuntu 22.04 (amd64/arm64). root로 실행하세요.
 #
-# 서울 서버(setup-strongswan.sh)와 다른 점
-#   - 서버 ID가 공인 IP가 아니라 FQDN(예: jp.nago.vpn). 인스턴스를 껐다 켜서 IP가 바뀌어도
-#     인증서를 다시 만들 필요가 없다. 앱은 API로 현재 IP를 받아 접속하고 ID로 인증서를 검증한다.
-#   - 인증서/비밀번호는 만들지 않고 번들 디렉터리에서 가져온다(기존 CA로 미리 서명해 둔 것).
+#   - 서버 ID: 해외는 FQDN(예: jp.nago.vpn), 서울은 공인 IP(앱·윈도우가 IP로 붙음). 번들의 id 파일로 정한다.
+#   - 인증서/비밀번호는 만들지 않고 번들 디렉터리에서 가져온다(기존 CA로 미리 서명해 둔 것, make-bundle.sh).
 #   - 처음부터 MTU 1500, BBR, TCP 분할 가속(haproxy)을 켠다.
+#   - 서버는 항상 켜 둔다(Vultr는 꺼 둬도 요금이 나감). 대시보드용 송신량 기록(nago-netout)을 남긴다.
 #
 # 번들 디렉터리 내용: ca-cert.pem server-cert.pem server-key.pem ipsec.secrets id
 #
@@ -19,6 +18,13 @@ B="${1:?번들 디렉터리를 지정하세요}"
 ID="$(cat "$B/id")"
 POOL="10.10.10.0/24"
 export DEBIAN_FRONTEND=noninteractive
+
+# Vultr 우분투 이미지는 ufw가 켜져 있고 22번만 열려 있다. 그대로 두면 IKE(udp 500/4500)·WireGuard가
+# 막히고 FORWARD 기본 정책이 DROP이라 NAT도 안 된다. 방화벽은 Vultr 방화벽 그룹으로 건다(README).
+if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    echo ">> ufw 끄기 (Vultr 기본 방화벽)"
+    ufw --force disable
+fi
 
 echo ">> 패키지 설치"
 echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections
@@ -42,6 +48,9 @@ openssl verify -CAfile /etc/ipsec.d/cacerts/ca-cert.pem /etc/ipsec.d/certs/serve
   "$(openssl rsa -noout -modulus -in /etc/ipsec.d/private/server-key.pem | md5sum)" ] \
   || { echo "인증서와 키가 맞지 않음"; exit 1; }
 
+# IP면 그대로(IPv4 ID), 이름이면 @를 붙여 FQDN ID로 보낸다
+if [[ "$ID" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then LEFTID="$ID"; else LEFTID="@${ID}"; fi
+
 echo ">> /etc/ipsec.conf 작성"
 cat > /etc/ipsec.conf <<EOF
 config setup
@@ -59,7 +68,7 @@ conn ikev2-vpn
     dpddelay=300s
     rekey=no
     left=%any
-    leftid=@${ID}
+    leftid=${LEFTID}
     leftcert=server-cert.pem
     leftsendcert=always
     leftsubnet=0.0.0.0/0
@@ -99,7 +108,7 @@ sysctl -q -p /etc/sysctl.d/99-nago.conf
 
 DEFIF=$(ip route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i=="dev") {print $(i+1); exit}}')
 
-echo ">> ${DEFIF} MTU 1500 (AWS 점보 프레임 9001이면 ESP 바깥 패킷이 인터넷 1500을 넘음)"
+echo ">> ${DEFIF} MTU 1500 (점보 프레임이면 ESP 바깥 패킷이 인터넷 1500을 넘음. Vultr는 보통 이미 1500)"
 cat > /etc/netplan/60-nago-mtu.yaml <<EOF
 network:
   version: 2
@@ -206,46 +215,50 @@ systemctl enable haproxy nago-accel
 systemctl restart haproxy
 systemctl restart nago-accel
 
-echo ">> 유휴 자동 중지 (기본 30분 동안 분당 송신 300KB 미만이면 스스로 꺼짐 → EC2 '중지')"
-cat > /usr/local/sbin/nago-idle <<'SH'
+# AWS 때의 유휴 자동 중지는 쓰지 않는다: Vultr는 꺼 둔 서버에도 요금이 그대로 나가서 끄면 손해만 본다.
+if systemctl list-unit-files nago-idle.timer >/dev/null 2>&1; then
+    systemctl disable --now nago-idle.timer >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/nago-idle.timer /etc/systemd/system/nago-idle.service /usr/local/sbin/nago-idle
+    rm -rf /run/nago-idle
+fi
+
+echo ">> 송신량 기록 (5분마다 /var/lib/nago/netout에 '시각 바이트', 대시보드가 SSH로 읽음)"
+cat > /usr/local/sbin/nago-netout <<'SH'
 #!/bin/bash
-# 매분 실행. VPN 사용자가 거의 안 쓰면(분당 송신량 < NAGO_IDLE_BYTES) 카운트를 올리고,
-# NAGO_IDLE_MIN분 연속이면 poweroff 한다. 카운터는 /run(tmpfs)에 있어서 부팅할 때마다 0부터.
-LIMIT_MIN=${NAGO_IDLE_MIN:-30}
-THRESH=${NAGO_IDLE_BYTES:-300000}
+# CloudWatch NetworkOut 대신. 기본 인터페이스 송신 카운터의 증가분을 남긴다.
+# 재부팅으로 카운터가 0부터 다시 시작하면 그 값 자체를 증가분으로 본다. 40일 지난 줄은 지운다.
 DEV=$(ip route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i=="dev") {print $(i+1); exit}}')
-S=/run/nago-idle; mkdir -p "$S"
+D=/var/lib/nago; mkdir -p "$D"
 tx=$(cat "/sys/class/net/$DEV/statistics/tx_bytes")
-last=$(cat "$S/tx" 2>/dev/null || echo "$tx")
-echo "$tx" > "$S/tx"
-idle=$(cat "$S/idle" 2>/dev/null || echo 0)
-if [ $((tx - last)) -lt "$THRESH" ]; then idle=$((idle + 1)); else idle=0; fi
-echo "$idle" > "$S/idle"
-if [ "$idle" -ge "$LIMIT_MIN" ]; then
-    logger -t nago-idle "idle ${idle}m -> poweroff"
-    systemctl poweroff
+last=$(cat "$D/netout.last" 2>/dev/null || echo "$tx")
+echo "$tx" > "$D/netout.last"
+if [ "$tx" -ge "$last" ]; then delta=$((tx - last)); else delta=$tx; fi
+now=$(date -u +%s)
+echo "$now $delta" >> "$D/netout"
+if [ $((now % 86400)) -lt 300 ]; then
+    awk -v cut=$((now - 40 * 86400)) '$1 >= cut' "$D/netout" > "$D/netout.tmp" && mv "$D/netout.tmp" "$D/netout"
 fi
 SH
-chmod +x /usr/local/sbin/nago-idle
-cat > /etc/systemd/system/nago-idle.service <<'UNIT'
+chmod +x /usr/local/sbin/nago-netout
+cat > /etc/systemd/system/nago-netout.service <<'UNIT'
 [Unit]
-Description=NAGO VPN idle check (poweroff when unused)
+Description=NAGO VPN egress counter
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/nago-idle
+ExecStart=/usr/local/sbin/nago-netout
 UNIT
-cat > /etc/systemd/system/nago-idle.timer <<'UNIT'
+cat > /etc/systemd/system/nago-netout.timer <<'UNIT'
 [Unit]
-Description=NAGO VPN idle check every minute
+Description=NAGO VPN egress counter every 5 minutes
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=1min
-AccuracySec=5s
+OnUnitActiveSec=5min
+AccuracySec=10s
 [Install]
 WantedBy=timers.target
 UNIT
 systemctl daemon-reload
-systemctl enable --now nago-idle.timer
+systemctl enable --now nago-netout.timer
 
 echo ">> strongSwan 기동"
 systemctl enable strongswan-starter

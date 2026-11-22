@@ -6,15 +6,15 @@
 
 앱 이름은 **NAGO VPN**. 탭 두 개짜리 앱입니다. 화면은 대시보드 사이트와 같은 터미널 스타일(초록빛 다크 팔레트, JetBrains Mono, `~/vpn $▌` 머리줄)이고 아이콘은 `>_`.
 
-- **vpn** 탭: AWS에 띄운 IKEv2 서버로 연결(공용 와이파이에서 트래픽 보호). 한국·일본·미국·영국 중 나갈 국가를 고를 수 있음
-- **dash** 탭: 모든 서버(kr/jp/us/uk)의 상태·IP·가동 시간·유휴 카운터·IKEv2 접속, 서울 WireGuard 피어, 시간별 송신량, 이번 달 송신량/비용 추정을 한 화면에
+- **vpn** 탭: Vultr에 띄운 IKEv2 서버로 연결(공용 와이파이에서 트래픽 보호). 한국·일본·미국·영국 중 나갈 국가를 고를 수 있음
+- **dash** 탭: 모든 서버(kr/jp/us/uk)의 상태·IP·가동 시간·IKEv2 접속, WireGuard 피어, 시간별 송신량, 이번 달 송신량/비용 추정을 한 화면에
 
 ## VPN 탭
 
 - iOS 내장 Personal VPN(`NEVPNManager`)으로 **IKEv2 + EAP-MSCHAPv2** 연결 — 별도 확장/라이브러리 없음
-- 서버는 AWS EC2의 **strongSwan**. 구축·재현 방법과 접속 안내는 [`server/README.md`](server/README.md) 참고
-- **국가 선택**: 🇰🇷 서울 · 🇯🇵 도쿄 · 🇺🇸 오리건 · 🇬🇧 런던. 연결을 누르면 API(`VPNRegion.swift`)가 그 나라 서버를 켜고(꺼져 있으면 1~2분) 지금 IP를 받아 접속한다. 서버는 거의 안 쓰면 알아서 꺼진다(서울 3시간, 해외 30분)
-- **임시 서버 나라**(2.0.7, 유저용에도 2.1.0): 싱가포르 · 독일 · 프랑스 · 아일랜드 · 스웨덴 · 캐나다 · 브라질 · 호주 · 인도. 카드 아래 `// on demand` 줄(누르면 펴짐, 작은 칸)에서 고르면 국가 API가 그 리전에 서버를 **새로 만들고**(WireGuard 1분쯤, TCP 가속은 30초쯤 뒤) 30분 동안 안 쓰면 서버가 **스스로 지워진다**. 작은 칸엔 왕복 시간을 숫자 대신 막대 3칸(신호 세기처럼, 잰 값은 색)으로 두고, 칸을 **누르고 있으면** 키보드 글쇠처럼 위에 말풍선으로 도시·ms가 뜬다(떼면 고름, 밀어서 벗어나면 취소). 고른 임시 나라의 ms는 칸들 아래 줄에 숫자로(2.1.2). 안 쓰는 동안 드는 돈이 0원이고, 쓰는 동안 시간당 $0.03~0.06 + 데이터. 동시에 2대까지. 광고 차단 DNS는 없다(1.1.1.1). 자세한 건 `server/README.md`
+- 서버는 Vultr의 **strongSwan**(2026-11 AWS EC2에서 옮김). 구축·재현 방법과 접속 안내는 [`server/README.md`](server/README.md) 참고
+- **국가 선택**: 🇰🇷 서울 · 🇯🇵 도쿄 · 🇺🇸 시애틀 · 🇬🇧 런던. 연결을 누르면 국가 API(`VPNRegion.swift`, 서울 컨트롤 서버)에서 그 나라 서버의 IP·ID·WireGuard 키를 받아 접속한다. 이 4대는 항상 켜져 있다(Vultr는 꺼 둬도 요금이 나가서)
+- **임시 서버 나라**(2.0.7, 유저용에도 2.1.0): 싱가포르 · 독일 · 프랑스 · 스웨덴 · 캐나다(토론토) · 브라질 · 호주 · 인도. 카드 아래 `// on demand` 줄(누르면 펴짐, 작은 칸)에서 고르면 국가 API가 그 지역에 Vultr 서버를 **새로 만들고**(WireGuard 1~2분, TCP 가속은 그 뒤) 30분 동안 안 쓰면 컨트롤 서버가 **지운다**(24시간이 지나도). 작은 칸엔 왕복 시간을 숫자 대신 막대 3칸(신호 세기처럼, 잰 값은 색)으로 두고, 칸을 **누르고 있으면** 키보드 글쇠처럼 위에 말풍선으로 도시·ms가 뜬다(떼면 고름, 밀어서 벗어나면 취소). 고른 임시 나라의 ms는 칸들 아래 줄에 숫자로(2.1.2). 안 쓰는 동안 드는 돈이 0원이고, 쓰는 동안 시간당 약 $0.007 + 데이터. 동시에 2대까지. 아일랜드는 Vultr에 지역이 없어 빠졌다(2.1.13). 자세한 건 `server/README.md`
 - **route 지도**(1.9): 점으로 찍은 세계 지도 위에 `you → 나갈 국가` 경로. 국가를 고르면 카메라가 그쪽으로 날아가고,
   연결 중에는 진행 단계(`checking server` → `booting` → `wg register` …)가 바뀔 때마다 웨이포인트가 찍히며 블록 커서가 경로를 따라간다.
   연결되면 그 나라로 확대되고 나라 점이 초록으로 켜진다. 실패하면 커서가 빨갛게 멈췄다가 사라진다
@@ -70,7 +70,7 @@
 - **wg**: 앱 안 WireGuard(iOS는 WifiScanTunnel 확장 + WireGuardKit, 안드로이드는 wireguard-android). udp 443이라 IKEv2가 막힌 와이파이에서도 붙음
 - **auto**: IKEv2를 12초 기다려 안 붙으면 WireGuard로
 - **unicorn**(iOS): 서버로 안 나간다. SNI 차단만 우회한다 — 아래 참고
-- WireGuard 키는 폰에서 처음 한 번 만들고 공개키만 피어 목록(SSM 파라미터 `/nago/wg/peers`)에 등록. 서버 4대 모두 같은 목록으로 맞춰짐(`server/wireguard/setup-wg.sh`, `nago-peer sync`)
+- WireGuard 키는 폰에서 처음 한 번 만들고 공개키만 피어 목록(서울 컨트롤 서버의 `/var/lib/nago/wg-peers.json`)에 등록. 서버 4대 모두 같은 목록으로 맞춰짐(`server/wireguard/setup-wg.sh`, `nago-peer sync`)
 - **wg engine**(iOS): `nagotun`(기본, 설정 값은 예전 이름 `neptun` 그대로) — NordVPN의 Rust 엔진 NepTUN(BSD-3)을 `NagoTun/engine/`에 가져와 고친 우리 엔진(2.1.1). `NagoTun/`(C 인터페이스)으로 감싸고 utun fd를 엔진 스레드가 직접 읽고 씀. 이벤트 루프 기본 1개(벤치: 2개와 같은 속도에 1GB당 CPU 25~32% 덜). 무엇을 왜 바꿨는지·벤치 숫자는 `NagoTun/engine/README.md`, 벤치 도구는 `tools/nagotun-bench/` / `go` — WireGuardKit(공식 WireGuard 앱과 같은 wireguard-go)
   - 리눅스 검증(서울→도쿄): NepTUN 다운 약 250~290Mbps, 커널 WireGuard 약 270Mbps로 같은 급. `NagoTun/examples/linux_tun.rs`로 서버에서 재현 가능
   - **애플에서 NepTUN이 도는 방식**(고정한 rev `ce18515`의 소스 기준): 작업 스레드·스레드 사이 대기열(`packet_workers`)은 애플 밖에서만 만든다.
@@ -157,23 +157,22 @@ vpn 탭은 상태·국가·연결 버튼만 두고, 나머지 설정은 settings
 - 구분 방법: IKE ID를 `adblock.nago`로 보내면 strongSwan이 `ikev2-adblock` 연결을 골라 차단 DNS를 준다. 비밀번호 확인(EAP)은 그대로 사용자 이름
 - 앱 안 WireGuard는 DNS를 10.53.53.53으로 바꾼다. WireGuard 앱(친구 .conf)과 보통 연결은 그대로 1.1.1.1. 잘못 막힌 사이트는 서버의 `/etc/nago-dns/allow.conf`에 `server=/도메인/1.1.1.1`
 - **피어별 adblock (dash 탭)**: 피어를 눌러 `adblock on/off`. 클라이언트 설정과 상관없이 **서버가** 그 피어의 DNS(udp/tcp 53)를 차단 DNS로 돌린다(iptables `NAGO_DNS` 체인, `-s 10.9.0.x -j DNAT`). 친구 .conf처럼 DNS를 못 바꾸는 피어에도 걸린다
-  - 기준은 `/nago/wg/peers`의 `adblock` 값. 켜면 켜져 있는 서버 전부에 sync가 가고, 꺼진 서버는 켤 때 맞춰진다. 서버에는 `/etc/wireguard/nago-flags.json`에 남고 재부팅 뒤 `nago-dns-peers.service`가 다시 건다
+  - 기준은 `wg-peers.json`의 `adblock` 값. 켜면 서버 전부에 sync가 가고, 그때 안 닿은 서버는 다음에 국가 API로 그 서버에 붙을 때 맞춰진다. 서버에는 `/etc/wireguard/nago-flags.json`에 남고 재부팅 뒤 `nago-dns-peers.service`가 다시 건다
   - DNS 고리는 PREROUTING 맨 앞에 둔다. TCP 분할 가속(`NAGO_ACCEL`)보다 아래면 TCP 53이 가속 프록시로 끌려가 DNAT이 안 걸린다
   - 차단 DNS(`setup-adblock.sh`)가 없는 서버에서는 규칙을 걸지 않는다(죽은 DNS로 돌리면 이름 해석이 아예 안 되므로). sync 결과에 `adblockError`로 남는다
   - **DNS over HTTPS/TLS는 못 막는다.** 53번 포트만 돌리는 방식이라, 기기가 DNS를 HTTPS로 물어보면(Chrome 보안 DNS, iOS 암호화 DNS 프로파일, 이 앱의 unicorn 모드) 그냥 지나간다
-  - Lambda 반영: `cd server/dashboard && zip -j /tmp/nago-dash.zip index.py nago-peer.py && aws lambda update-function-code --region ap-northeast-2 --function-name nago-dash --zip-file fileb:///tmp/nago-dash.zip`
+  - 서버 반영: 서울에서 `git pull` 후 `sudo server/control/setup-control.sh` (앱 파일만 다시 깔고 재시작, 설정은 그대로)
 
 ## dash 탭 (통합 대시보드)
 
-- 서버 쪽 Lambda(`server/dashboard/index.py`)가 모든 리전을 모아 JSON으로 준다. 브라우저용 HTML 사이트도 같은 Lambda가 만든다(`?t=<토큰>`)
+- 서울 Vultr 서버의 컨트롤 서버(`server/control/app.py`)가 모든 서버를 SSH로 모아 JSON으로 준다. 브라우저용 HTML 사이트도 같은 서버가 만든다(`?t=<토큰>`)
 - 앱은 VPN 비밀번호(내장 값 또는 키체인)를 `x-nago-key` 헤더로 보내 인증하고, 보이는 동안 30초마다 새로 받는다(당겨서 새로고침도 됨)
-- 비용은 실행 시간(CloudWatch 5분 데이터 개수) × 온디맨드 단가 + 고정 IP/디스크 + 무료 100GB 초과 송신으로 어림한 값
-- **서버 관리**: 서버 줄을 누르면 켜기 / 끄기 / 재부팅 / 유휴 타이머 0으로. 켜고 끈 뒤 몇 번 더 새로 받아 상태 변화를 보여 준다
+- 비용은 Vultr 월 요금(672시간까지 시간 단가, 그 뒤 월 상한)을 이번 달 경과 시간으로 나눈 값 + 포함 대역폭(서버들 합) 초과 송신으로 어림한 값. 송신량은 서버마다 5분씩 남기는 `nago-netout` 기록
+- **서버 관리**: 서버 줄을 누르면 켜기 / 끄기 / 재부팅. 켜기·끄기는 `control.json`에 Vultr API 키가 있어야 되고, 서울은 컨트롤 서버 자신이라 끌 수 없다(재부팅은 됨)
 - **피어 관리**: WireGuard 피어 줄을 누르면 kick(60초 끊기) · 사용량 초기화 · 이름 바꾸기 · 삭제. `wg peer add [+ new]`로 새 피어를 만든다
   - 키는 폰에서 만들고(CryptoKit) 공개키만 서버로 보낸다. 개인키는 QR/.conf 화면에만 있고 닫으면 남지 않는다
-  - 서버 쪽은 Lambda가 SSM으로 `server/dashboard/nago-peer.py`를 서울 서버에 설치·실행한다. 이름은 `/etc/wireguard/nago-names.json`
+  - 서버 쪽은 컨트롤 서버가 `server/control/nago-peer.py`를 각 서버에 SSH로 설치·실행한다. 이름은 `/etc/wireguard/nago-names.json`
   - 바꾸는 요청은 VPN 비밀번호(`x-nago-key`)로만 된다. 사이트 토큰으로는 볼 수만 있다
-  - 서울 서버가 꺼져 있으면 관리할 수 없다(kr로 한 번 연결하면 켜짐)
 
 ## 안드로이드 앱 (`android/`)
 
