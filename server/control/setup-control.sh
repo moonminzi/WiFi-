@@ -61,7 +61,7 @@ with os.fdopen(fd, "w") as fh:
     json.dump(cfg, fh, ensure_ascii=False, indent=2)
     fh.write("\n")
 PY
-    echo "   jp/us/uk의 addr(서버 IP), vultr_id, 요금은 직접 채워 넣고 'systemctl restart nago-control'"
+    echo "   jp의 addr(서버 IP), vultr_id, 요금은 직접 채워 넣고 'systemctl restart nago-control'"
 fi
 # 예전 설정에 새로 생긴 칸을 채운다(public_url, ondemand). 있는 값은 건드리지 않는다
 URL="$PUBLIC_URL" python3 - "$SRC/control.example.json" "$ETC/control.json" <<'PY'
@@ -133,8 +133,16 @@ cat > /etc/caddy/Caddyfile <<CADDY
 
 https://${SITE}:${PORT} {
 ${TLS}
-    encode gzip
-    reverse_proxy 127.0.0.1:8080
+    # NAGO signer(signer/setup-signer.sh, 127.0.0.1:8090). 큰 IPA를 올리고 받으므로 압축·버퍼링 없이 그대로 넘긴다
+    handle /sign* {
+        reverse_proxy 127.0.0.1:8090 {
+            flush_interval -1
+        }
+    }
+    handle {
+        encode gzip
+        reverse_proxy 127.0.0.1:8080
+    }
 }
 CADDY
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null

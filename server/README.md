@@ -190,6 +190,35 @@ journalctl -u caddy -f                 # 인증서 발급·갱신
 - 비용: `vc2-1c-1gb` 시간당 $0.007 + 송신(계정 대역폭 풀 안이면 0). 안 쓰면 0원.
 - 나라 추가: `control.json`의 `ondemand.regions`(`{"sg": {"region": "sgp", "city": "singapore"}}`)와 앱 `VPNRegion`에 넣는다.
 
+## NAGO signer (IPA 서명 → Safari에서 바로 설치)
+
+컴퓨터 없이 아이폰·아이패드 Safari만으로 IPA를 내 인증서로 서명해서 설치한다. 2026-11에 AWS
+(Lambda `nago-sign` + S3 + Secrets Manager + CloudFront)에서 서울 서버로 옮겼다.
+
+- 주소: `https://<서울 IP>:8443/sign/?t=<대시보드 토큰>` (토큰은 `/etc/nago/control.json`의 `token`)
+- 페이지: 인증서·프로파일 요약(여러 개면 골라서), 저장소들(`GH_REPO`, 기본 WiFi- · Nintendo-2)의 최근 릴리스 IPA,
+  IPA 주소, 파일 올리기. `sign`을 누르면 서버에서 백그라운드로 서명하고(창을 닫아도 됨) **설치** 버튼(itms-services)이 생긴다
+- 서명: `rcodesign`(apple-codesign 0.29.0, musl 정적). 앱이 원래 요청한 엔타이틀먼트 중 프로파일이 허락하는 것만 남기고,
+  앱 ID·팀·키체인 그룹은 프로파일에 맞춘다. 번들 ID `profile`(프로파일 앱 ID로) / `keep`(그대로)
+- 링크(설치·IPA·업로드)는 경로+만료에 HMAC 서명(1시간). 서명본·올린 파일·작업 기록은 `/var/lib/nago-sign`에서 하루 뒤 지운다
+- 한 번에 하나씩 서명한다(나머지는 대기). 서명 프로세스는 `Nice=10`이라 VPN 트래픽이 먼저
+
+| 위치 (서울 서버) | 내용 |
+|---|---|
+| `/opt/nago-sign/signer.py`, `bin/rcodesign` | 서버(127.0.0.1:8090), systemd `nago-sign`. Caddy가 `/sign*`를 넘긴다 |
+| `/etc/nago/sign/certs/<번호>-<이름>.json` | 인증서마다 `{"p12": base64, "password": "…", "profile": base64}` (700/600, 레포에 넣지 않음). 번호 순서 = 페이지 순서 |
+| `/var/lib/nago-sign/{signed,uploads,jobs}` | 서명본 · 올린 파일 · 진행 상황 |
+
+설치·갱신:
+
+```bash
+cd /root/server/control && ./setup-control.sh     # Caddyfile에 /sign 경로(한 번)
+cd /root/server/signer && ./setup-signer.sh       # rcodesign이 없으면 cargo로 빌드(몇 분), RCODESIGN_BIN=파일 로 줄 수도 있음
+```
+
+인증서 추가·교체는 위 json 파일을 넣거나 바꾸면 끝(서버 재시작 필요 없음).
+p12는 **옛(legacy) 형식**이어야 한다(키체인에서 내보낸 Apple p12는 그렇다). OpenSSL 3로 만들면 `-legacy`를 붙인다.
+
 ## 포함된 파일
 
 | 파일 | 설명 |
@@ -203,11 +232,12 @@ journalctl -u caddy -f                 # 인증서 발급·갱신
 | `nagoing/setup-nagoing.sh` | nagoing 프록시(막힌 망 우회, TCP 443 · UDP 51821) |
 | `home/nago-home.sh` | 친구 집 PC를 출구로 쓰는 노드 |
 | `control/` | 컨트롤 서버: `app.py`(국가 API·임시 서버·대시보드), `nago-peer.py`(서버에서 도는 피어 관리), `setup-control.sh`, `control.example.json` |
+| `signer/` | NAGO signer: `signer.py`(IPA 서명·OTA 설치 서버), `setup-signer.sh` |
 | `vultr/provision.ps1` | Vultr 서버·방화벽 그룹 만들기 |
 | `setup-strongswan.sh` | (옛) CA까지 새로 만드는 단일 서버 스크립트 |
 
 ## 비용
 
-- 대략 서울 vc2-2c-4gb + 해외 vc2-1c-2gb × 3. 정확한 값은 Vultr 가격표 기준이고 대시보드 `cost`가 매달 어림한다
+- 고정은 서울 vc2-2c-4gb + 도쿄 vc2-1c-2gb, 나머지 나라는 쓸 때만 임시 서버. 정확한 값은 Vultr 가격표 기준이고 대시보드 `cost`가 매달 어림한다
 - 포함 대역폭은 계정의 서버들끼리 합쳐 쓰고(풀), 넘으면 GB당 과금
 - 서버를 지우면(Destroy) 요금이 멈춘다. 꺼 두기(Stop)는 요금이 그대로 나간다
