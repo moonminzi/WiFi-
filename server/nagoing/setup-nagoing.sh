@@ -133,4 +133,4 @@ sleep 1
 systemctl is-active nagoing-proxy && echo "nagoing-proxy: ON  (tls ${TCP_PORT} · udp ${UDP_PORT} → ${WG_ADDR})" || {
   echo "nagoing-proxy 시작 실패 — 로그:"; journalctl -u nagoing-proxy --no-pager -n 20; exit 1;
 }
-echo ">> 잊지 말기: SG에서 inbound tcp ${TCP_PORT} · udp ${UDP_PORT} 열기(위 주석 참고)"
+echo ">> 잊지 말기: Vultr 방화벽 그룹에서 inbound tcp ${TCP_PORT} · udp ${UDP_PORT} 열기(위 주석 참고)"
