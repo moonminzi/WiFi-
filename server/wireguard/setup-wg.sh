@@ -64,7 +64,7 @@ chmod +x /usr/local/sbin/nago-accel
 
 echo ">> udp 443 → 51820, 규칙 저장(wg0/가속 규칙은 빼고 저장: 부팅 때 각자 다시 넣음)"
 systemctl stop wg-quick@wg0 2>/dev/null || true
-/usr/local/sbin/nago-accel off
+/usr/local/sbin/nago-accel off || true   # 새 서버엔 NAGO_ACCEL 체인이 없어서 실패 코드가 나온다(set -e로 멈춤)
 iptables -t nat -C PREROUTING -i "$DEFIF" -p udp --dport 443 -j REDIRECT --to-ports 51820 2>/dev/null \
   || iptables -t nat -A PREROUTING -i "$DEFIF" -p udp --dport 443 -j REDIRECT --to-ports 51820
 netfilter-persistent save >/dev/null 2>&1 || true
