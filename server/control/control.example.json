@@ -13,6 +13,8 @@
     "hourly_usd": 0.007,
     "firewall_group_id": "",
     "regions": {
+      "us": {"region": "sea", "city": "seattle"},
+      "uk": {"region": "lhr", "city": "london"},
       "sg": {"region": "sgp", "city": "singapore"},
       "de": {"region": "fra", "city": "frankfurt"},
       "fr": {"region": "cdg", "city": "paris"},
@@ -29,12 +31,6 @@
      "vultr_id": "", "plan": "vc2-2c-4gb", "monthly_usd": 20, "bandwidth_gb": 3072},
     {"code": "jp", "city": "tokyo", "region": "nrt",
      "addr": "도쿄 서버 IP", "id": "jp.nago.vpn",
-     "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2048},
-    {"code": "us", "city": "seattle", "region": "sea",
-     "addr": "미국 서버 IP", "id": "us.nago.vpn",
-     "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2048},
-    {"code": "uk", "city": "london", "region": "lhr",
-     "addr": "영국 서버 IP", "id": "uk.nago.vpn",
      "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2048}
   ]
 }

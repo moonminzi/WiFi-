@@ -10,8 +10,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * 나갈 국가(iOS VPNRegion과 같다). kr jp us uk는 그 나라 Vultr 지역에 서버가 하나씩 늘 켜져 있다(2026-11 AWS에서 옮김).
- * 그 뒤 나라들은 임시 서버([onDemand]): 고르면 API가 그 지역에 Vultr 서버를 새로 만들고(WireGuard만, 1~2분),
+ * 나갈 국가(iOS VPNRegion과 같다). kr jp는 그 나라 Vultr 지역에 서버가 하나씩 늘 켜져 있다(2026-11 AWS에서 옮김).
+ * 나머지 나라(us uk 포함)는 임시 서버([onDemand]): 고르면 API가 그 지역에 Vultr 서버를 새로 만들고(WireGuard만, 1~2분),
  * 30분 안 쓰면 컨트롤 서버가 지운다(한꺼번에 2대까지).
  * 순서를 바꾸거나 빼지 말 것: 지도 데이터의 나라 번호가 이 순서다.
  * [awsRegion]은 왕복 시간을 잴 때 묻는 근처 AWS 리전(DynamoDB /ping, 계정 없이 됨)이다.
@@ -46,7 +46,7 @@ enum class VpnRegion(val city: String, val vultrRegion: String, val awsRegion: S
 
     companion object {
         /** 늘 있는 서버 */
-        val fixed = listOf(kr, jp, us, uk)
+        val fixed = listOf(kr, jp)
     }
 }
 

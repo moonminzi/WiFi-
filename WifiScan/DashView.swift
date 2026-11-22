@@ -77,7 +77,7 @@ enum DashAPI {
 
 // MARK: - 화면
 
-/// 모든 서버(kr/jp/us/uk), WireGuard 피어, 송신량, 이번 달 비용을 대시보드 사이트와 같은 터미널 창으로 보여 준다.
+/// 모든 서버(고정 kr/jp + 떠 있거나 이번 달에 쓴 임시 서버), WireGuard 피어, 송신량, 이번 달 비용을 대시보드 사이트와 같은 터미널 창으로 보여 준다.
 struct DashView: View {
     @State private var vpn = VPNManager()
     @State private var data: DashData?

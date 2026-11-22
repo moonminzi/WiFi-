@@ -1,5 +1,5 @@
 ﻿<#
-NAGO VPN - Vultr에 서버 4대(kr/jp/us/uk)와 방화벽 그룹을 만든다. 이미 있으면(같은 라벨) 건너뛴다.
+NAGO VPN - Vultr에 고정 서버 2대(kr/jp)와 방화벽 그룹을 만든다. 이미 있으면(같은 라벨) 건너뛴다.
 윈도우 PowerShell 5.1에서 그대로 돈다.
 
   $env:VULTR_API_KEY = '<Vultr API 키>'     # Vultr 계정 → Account → API (내 IP를 Access Control에 추가)
@@ -24,9 +24,8 @@ $ErrorActionPreference = 'Stop'
 # code, Vultr 지역, 플랜. 요금은 Vultr 가격표 기준으로 control.json에 따로 적는다.
 $Nodes = @(
     @{ code = 'kr'; region = 'icn'; plan = 'vc2-2c-4gb' },
-    @{ code = 'jp'; region = 'nrt'; plan = 'vc2-1c-2gb' },
-    @{ code = 'us'; region = 'sea'; plan = 'vc2-1c-2gb' },
-    @{ code = 'uk'; region = 'lhr'; plan = 'vc2-1c-2gb' }
+    @{ code = 'jp'; region = 'nrt'; plan = 'vc2-1c-2gb' }
+    # us(sea)·uk(lhr)는 고정 서버 대신 임시 서버 나라(control.json의 ondemand.regions)
 )
 if ($Only) { $Nodes = @($Nodes | Where-Object { $Only -contains $_.code }) }
 
@@ -114,7 +113,7 @@ $deadline = (Get-Date).AddMinutes(5)
 do {
     Start-Sleep -Seconds 5
     $mine = (Invoke-Vultr GET '/instances?per_page=500' $null).instances |
-        Where-Object { $_.label -in @('nago-kr', 'nago-jp', 'nago-us', 'nago-uk') }
+        Where-Object { $_.label -in @('nago-kr', 'nago-jp') }
     $pending = $mine | Where-Object { $_.main_ip -eq '0.0.0.0' -or -not $_.main_ip }
 } while ($pending -and (Get-Date) -lt $deadline)
 

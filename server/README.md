@@ -1,18 +1,18 @@
 # NAGO VPN 서버 (Vultr)
 
-앱의 **vpn 탭**이 붙는 IKEv2/EAP-MSCHAPv2(strongSwan) + WireGuard 서버 4대와,
+앱의 **vpn 탭**이 붙는 IKEv2/EAP-MSCHAPv2(strongSwan) + WireGuard 고정 서버 2대(서울·도쿄)와 임시 서버 나라들,
 국가 API·대시보드·피어 관리를 맡는 **컨트롤 서버**(서울 서버 안)로 되어 있습니다.
 2026-11에 AWS(EC2 + Lambda + API Gateway + SSM + CloudWatch)에서 Vultr로 옮겼습니다.
 
 ```
-앱 ──HTTPS──▶ 서울 컨트롤 서버(Caddy → app.py) ──SSH──▶ jp/us/uk
+앱 ──HTTPS──▶ 서울 컨트롤 서버(Caddy → app.py) ──SSH──▶ jp (+ 임시 서버)
  │              /region, /?format=json, POST /
  └─UDP 500/4500(IKEv2), UDP 443(WireGuard)──▶ 고른 나라 서버 ──NAT──▶ 인터넷
 ```
 
 | AWS 때 | 지금 |
 |---|---|
-| EC2 4대, 해외는 30분 유휴 시 자동 중지 | Vultr 4대, **항상 켜 둠**(Vultr는 꺼 둬도 요금이 나감) |
+| EC2 4대, 해외는 30분 유휴 시 자동 중지 | Vultr 고정 2대(kr/jp) **항상 켜 둠**(Vultr는 꺼 둬도 요금이 나감). us/uk 등 나머지는 고를 때 만드는 임시 서버 |
 | 국가 API Lambda(`region-api`) + 대시보드 Lambda(`dashboard`) | 서울 서버의 `control/app.py` 하나(응답 모양은 같음) |
 | SSM RunCommand | SSH(서울 → 다른 서버, `/etc/nago/id_ed25519`) |
 | SSM 파라미터 `/nago/wg/peers`, `/nago/wg/servers` | `/var/lib/nago/wg-peers.json`, `wg-servers.json` |
@@ -25,8 +25,8 @@
 |---|---|---|---|
 | kr | 🇰🇷 서울 | `icn` | 서울 공인 IP (앱·윈도우가 IP로 붙음) |
 | jp | 🇯🇵 도쿄 | `nrt` | `jp.nago.vpn` |
-| us | 🇺🇸 시애틀 | `sea` | `us.nago.vpn` |
-| uk | 🇬🇧 런던 | `lhr` | `uk.nago.vpn` |
+
+미국(`sea`)·영국(`lhr`)은 2026-11부터 고정 서버 대신 임시 서버 나라다(아래 "임시 서버 나라").
 
 - 프로토콜: IKEv2 + EAP-MSCHAPv2(사용자 `wifiscan`), WireGuard 10.9.0.0/24(udp 443 → 51820)
 - 인증서는 **NAGO VPN Root CA**(`ca-cert.pem`, 2026-11 새로 만듦)로 서명. 예전 WifiScan VPN Root CA의 키는
@@ -36,7 +36,7 @@
 
 ## 처음부터 세우기
 
-### 1. Vultr 서버 4대 + 방화벽 그룹
+### 1. Vultr 서버 2대 + 방화벽 그룹
 
 윈도우 PowerShell에서(`server/vultr/provision.ps1`):
 
@@ -59,13 +59,11 @@ Git Bash에서(`server/make-bundle.sh`). 서울은 ID가 IP라 서버를 만든 
 export VPN_EAP_USER=wifiscan VPN_EAP_PASS='<VPN 비밀번호>'
 ./server/make-bundle.sh ca-cert.pem ca-key.pem 141.164.x.x      # 서울: ID = 서울 공인 IP
 ./server/make-bundle.sh ca-cert.pem ca-key.pem jp.nago.vpn
-./server/make-bundle.sh ca-cert.pem ca-key.pem us.nago.vpn
-./server/make-bundle.sh ca-cert.pem ca-key.pem uk.nago.vpn
 ```
 
 해외 서버는 예전 AWS 서버의 번들(같은 FQDN)을 그대로 써도 된다.
 
-### 3. 서버마다 (4대 모두)
+### 3. 서버마다 (kr/jp)
 
 ```bash
 scp -r server bundle-<id> root@<서버 IP>:/root/
@@ -92,13 +90,13 @@ NAGO_KEY='<VPN 비밀번호>' ./setup-control.sh          # IP 주소로 HTTPS, 
 
 API는 **TCP 8443**이다(443은 nagoing 프록시). 인증서는 Let's Encrypt IP 인증서를 80번(http-01)으로 받는다.
 
-1. `/etc/nago/control.json`의 jp/us/uk `addr`(서버 IP)를 채운다. 아직 안 만든 서버는 nodes에서 빼 둔다
+1. `/etc/nago/control.json`의 jp `addr`(서버 IP)를 채운다. 아직 안 만든 서버는 nodes에서 빼 둔다
    (자리표시 주소가 앱에 그대로 나감). `vultr_id`, `vultr_api_key`를 넣으면 대시보드에서 켜기/끄기/재부팅과
    정확한 상태·생성 시각을 쓴다. **임시 서버 나라는 `vultr_api_key`가 있어야 된다**(서울 IP를 Vultr API
    Access Control에 추가). `ondemand.firewall_group_id`에 `nago-vpn` 그룹 ID를 넣는다.
    API 키 없이 쓸 때는 서버마다 `"created": "2026-11-22T14:20:25+00:00"`(Vultr의 date_created)를 넣어야
    첫 달 비용이 1일부터로 부풀지 않는다. `monthly_usd`, `bandwidth_gb`는 Vultr 가격표 값으로
-2. 마지막에 출력된 SSH 공개키를 jp/us/uk의 `/root/.ssh/authorized_keys`에 넣는다
+2. 마지막에 출력된 SSH 공개키를 jp의 `/root/.ssh/authorized_keys`에 넣는다
 3. `systemctl restart nago-control` 후 확인:
    ```bash
    curl -s -H "x-nago-key: <VPN 비밀번호>" https://<서울 IP>:8443/region?r=jp
@@ -116,7 +114,7 @@ scp wg-peers.json root@<서울 IP>:/var/lib/nago/wg-peers.json
 ssh root@<서울 IP> 'chmod 600 /var/lib/nago/wg-peers.json && systemctl restart nago-control'
 ```
 
-국가 API로 서버에 한 번씩 붙거나(5분에 한 번 sync), dash 탭에서 피어 하나를 바꾸면 4대 모두에 반영된다.
+국가 API로 서버에 한 번씩 붙거나(5분에 한 번 sync), dash 탭에서 피어 하나를 바꾸면 고정 서버 모두에 반영된다(임시 서버는 만들 때 피어 목록을 받는다).
 
 ### 6. 앱 주소 바꾸기
 
@@ -160,6 +158,8 @@ journalctl -u caddy -f                 # 인증서 발급·갱신
 
 | 코드 | 나라 | Vultr 지역 |
 |---|---|---|
+| `us` | 미국(시애틀) | `sea` |
+| `uk` | 영국(런던) | `lhr` |
 | `sg` | 싱가포르 | `sgp` |
 | `de` | 독일(프랑크푸르트) | `fra` |
 | `fr` | 프랑스(파리) | `cdg` |
@@ -196,7 +196,7 @@ journalctl -u caddy -f                 # 인증서 발급·갱신
 |---|---|
 | `ca-cert.pem` / `WifiScanVPN.mobileconfig` | 루트 CA 인증서(공개)와 아이폰에 설치·신뢰시키는 프로파일 |
 | `make-bundle.sh` | 기존 CA로 서버 인증서 번들을 만든다(내 PC) |
-| `setup-region.sh` | IKEv2 서버 구성(4대 공통) + 송신량 기록 |
+| `setup-region.sh` | IKEv2 서버 구성(고정 서버 공통) + 송신량 기록 |
 | `wireguard/setup-wg.sh` | WireGuard 구성 |
 | `adblock/setup-adblock.sh` | 광고 차단 DNS |
 | `agent/` | nago-agent(사람별 광고 차단·통계·실시간 도메인·집 출구), `setup-agent.sh` |

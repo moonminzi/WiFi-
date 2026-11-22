@@ -1,9 +1,9 @@
 import Foundation
 
-/// VPN 탭에서 고르는 국가. kr jp us uk는 그 나라 Vultr 지역에 서버가 하나씩 늘 켜져 있다(2026-11 AWS에서 옮김).
-/// 한국 서버는 인증서 ID가 공인 IP이고, 해외 서버는 인증서 ID를 FQDN(예: jp.nago.vpn)으로 두고
+/// VPN 탭에서 고르는 국가. kr jp는 그 나라 Vultr 지역에 서버가 하나씩 늘 켜져 있다(2026-11 AWS에서 옮김).
+/// 한국 서버는 인증서 ID가 공인 IP이고, 일본 서버는 인증서 ID를 FQDN(jp.nago.vpn)으로 두고
 /// 주소는 API로 받아 온다.
-/// 그 뒤 나라들은 임시 서버(`onDemand`): 고르면 API가 그 지역에 Vultr 서버를 새로 만들고(WireGuard만, 1~2분),
+/// 나머지 나라(us uk 포함)는 임시 서버(`onDemand`): 고르면 API가 그 지역에 Vultr 서버를 새로 만들고(WireGuard만, 1~2분),
 /// 30분 안 쓰면 컨트롤 서버가 지운다(관리자용·유저용 모두, 한꺼번에 2대까지).
 enum VPNRegion: String, CaseIterable, Identifiable {
     // 순서를 바꾸거나 빼지 말 것: 지도 데이터(WorldDots)의 나라 번호가 이 순서다
@@ -14,7 +14,7 @@ enum VPNRegion: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     /// 늘 있는 서버
-    static let fixed: [VPNRegion] = [.kr, .jp, .us, .uk]
+    static let fixed: [VPNRegion] = [.kr, .jp]
 
     /// 고를 때 서버를 새로 만드는 나라
     var onDemand: Bool { !Self.fixed.contains(self) }
