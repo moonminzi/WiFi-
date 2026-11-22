@@ -1,6 +1,7 @@
 # NAGO VPN (Windows)
 
-iOS 앱과 **같은 AWS strongSwan 서버**(IKEv2 + EAP-MSCHAPv2)에 붙는 Windows 클라이언트입니다.
+iOS 앱과 **같은 서울 Vultr strongSwan 서버**(IKEv2 + EAP-MSCHAPv2, `141.164.54.197`)에 붙는 Windows 클라이언트입니다.
+2026-11에 서버와 루트 CA가 바뀌었으므로 예전 exe는 접속이 안 됩니다. 새로 빌드한 exe를 쓰세요(새 CA는 처음 연결할 때 자동 설치).
 Windows 내장 VPN을 쓰므로 별도 드라이버/엔진 설치가 필요 없고, PowerShell GUI를 `.exe`로 빌드합니다.
 
 ## 포함 파일

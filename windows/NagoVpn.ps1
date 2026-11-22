@@ -1,4 +1,4 @@
-# NAGO VPN - Windows 클라이언트 (IKEv2 + EAP-MSCHAPv2)
+﻿# NAGO VPN - Windows 클라이언트 (IKEv2 + EAP-MSCHAPv2)
 # Windows 내장 VPN을 사용하므로 별도 드라이버/엔진이 필요 없습니다.
 # ps2exe 로 .exe 로 빌드할 수 있습니다 (build-exe.ps1 참고).
 
@@ -6,7 +6,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $VpnName  = 'NAGO VPN'
-$Server   = '3.38.243.135'          # AWS strongSwan 서버 공인 IP
+$Server   = '141.164.54.197'        # 서울 Vultr strongSwan 서버 공인 IP (인증서 ID도 이 IP)
 $CaPath   = Join-Path $PSScriptRoot 'ca-cert.pem'
 
 function Ensure-CaTrusted {

@@ -8,7 +8,8 @@ NAGO VPN - Vultr에 서버 4대(kr/jp/us/uk)와 방화벽 그룹을 만든다. �
   .\provision.ps1 -Only kr                   # 일부만(예: 서울 먼저)
 
 만드는 것
-  - 방화벽 그룹 nago-vpn: udp 500/4500(IKEv2), udp 51820/443(WireGuard), tcp 22(SSH), tcp 80/443(서울 API·인증서), icmp
+  - 방화벽 그룹 nago-vpn: udp 500/4500(IKEv2), udp 51820/443(WireGuard), tcp 443 + udp 51821(nagoing),
+    tcp 22(SSH), tcp 80/8443(서울 인증서·API), icmp
   - 서버: Ubuntu 22.04, 라벨 nago-<code>, IPv6 끔. 플랜/지역은 아래 $Nodes에서 바꾼다
 끝나면 control.json의 nodes에 넣을 값(addr, vultr_id)을 출력한다.
 #>
@@ -73,7 +74,9 @@ if (-not $fw -and $PSCmdlet.ShouldProcess('firewall group nago-vpn', 'create')) 
         @{ protocol = 'udp'; port = '443';   notes = 'WireGuard (443->51820)' },
         @{ protocol = 'tcp'; port = '22';    notes = 'SSH' },
         @{ protocol = 'tcp'; port = '80';    notes = 'ACME http-01 (kr)' },
-        @{ protocol = 'tcp'; port = '443';   notes = 'control API (kr)' },
+        @{ protocol = 'tcp'; port = '443';   notes = 'nagoing proxy (TLS)' },
+        @{ protocol = 'udp'; port = '51821'; notes = 'nagoing proxy (UDP)' },
+        @{ protocol = 'tcp'; port = '8443';  notes = 'control API (kr)' },
         @{ protocol = 'icmp'; port = '';     notes = 'ping / PMTU' }
     )
     foreach ($r in $rules) {

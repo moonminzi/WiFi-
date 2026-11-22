@@ -13,12 +13,11 @@
 #
 # 빌드: NagoTun 크레이트(엔진 포함)를 그대로 빌드한다 — crates.io에서 의존 크레이트를 받으므로 서버에 외부 접속이 필요하다.
 #
-# ★ AWS 보안그룹(SG)에서 다음을 열어야 바깥에서 닿는다(호스트 iptables INPUT은 ACCEPT라 따로 안 건드린다):
+# ★ Vultr 방화벽 그룹(nago-vpn)에서 다음이 열려 있어야 바깥에서 닿는다(server/vultr/provision.ps1이 연다.
+#   호스트 iptables INPUT은 ACCEPT라 따로 안 건드린다):
 #     - inbound TCP 443      0.0.0.0/0
 #     - inbound UDP 51821     0.0.0.0/0
-#   예) aws ec2 authorize-security-group-ingress --group-id <sg> --ip-permissions \
-#        IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges='[{CidrIp=0.0.0.0/0}]' \
-#        IpProtocol=udp,FromPort=51821,ToPort=51821,IpRanges='[{CidrIp=0.0.0.0/0}]'
+#   서울 서버의 컨트롤 API(Caddy)는 이 때문에 TCP 8443을 쓴다.
 #
 # 환경변수(선택): NAGO_PSK(난독화 키, 클라와 같아야 함), NAGO_UDP_PORT, NAGO_TCP_PORT, WG_ADDR, REPO, FORCE_BUILD=1
 set -euo pipefail

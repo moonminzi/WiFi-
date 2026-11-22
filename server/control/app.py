@@ -2,13 +2,19 @@
 """NAGO VPN 컨트롤 서버. 서울 Vultr 서버에서 돌고, AWS 시절 Lambda 두 개(국가 API, 대시보드)를 대신한다.
 
     GET  /region?r=<code>   + 헤더 x-nago-key → {"region","state","ready","ip","id","wgPub","wgPort"}
+                                                임시 서버 나라(sg de …)면 없을 때 새로 만든다(+ "onDemand", "launched")
     GET  /?t=<TOKEN>                          → 터미널 스타일 HTML (브라우저)
     GET  /?format=json      + 헤더 x-nago-key → JSON (앱)
     POST / {op, ...}        + 헤더 x-nago-key → 피어 관리 add|kick|reset|remove|rename|flags
-                                                서버 관리 start|stop|reboot|wake (node)
+                                                서버 관리 start|stop|reboot|wake (node), 임시 서버 지우기 drop
+    GET  /agent/<file>                        → 임시 서버가 받아 가는 nago-agent.py / setup-agent.sh (공개 파일)
     GET  /healthz                             → ok
 
 응답 모양은 Lambda 때와 같아서 앱은 주소만 바꾸면 된다.
+
+임시 서버(ondemand): AWS 때는 서버가 30분 유휴 시 스스로 꺼지면(종료 동작 = terminate) 지워졌다.
+Vultr에는 그런 동작이 없고 꺼 둬도 요금이 나가서, 이 서버의 정리 스레드가 1분마다 임시 서버를 보고
+30분 유휴(서버의 nago-idle 카운터, SSH로 읽음)거나 24시간이 지나면 Vultr API로 지운다.
 
 - 설정: /etc/nago/control.json (NAGO_CONFIG로 바꿀 수 있음). control.example.json 참고
 - 상태: /var/lib/nago/ (NAGO_STATE) — wg-peers.json(피어 목록의 기준), wg-servers.json(서버별 wg 공개키)
@@ -44,7 +50,7 @@ with open(os.path.join(HERE, "nago-peer.py"), encoding="utf-8") as _fh:
     PEER_ADMIN = _fh.read()
 
 PEER_OPS = ("add", "kick", "reset", "remove", "rename", "flags")
-NODE_OPS = ("start", "stop", "reboot", "wake")
+NODE_OPS = ("start", "stop", "reboot", "wake", "drop")
 WG_PEERS = "wg-peers.json"
 WG_SERVERS = "wg-servers.json"
 WG_NET = "10.9.0."
@@ -58,12 +64,25 @@ VULTR_MONTH_HOURS = 672.0
 LIVE_TTL = 10       # 서버 상태/SSH 결과 재사용 시간(초)
 SYNC_EVERY = 300    # 국가 API가 같은 서버에 피어 동기화를 다시 보내기까지(초)
 
+# 임시 서버
+OD_LABEL = "nago-od-"           # Vultr 라벨: nago-od-<code>
+OD_STATE = "ondemand.json"      # {instance_id: {code, pub, created}} — 만든 서버의 wg 공개키
+OD_USAGE = "ondemand-usage.json"  # {instance_id: {code, created, gone, tx}} — 이번 달 비용·송신량용 기록
+OD_READY = "NAGO_WG_READY"
+OD_GRACE_SEC = 240              # 준비 표시를 못 읽어도 만든 지 이만큼 지나면 준비된 걸로 본다(Vultr는 만들기가 느림)
+OD_IDLE_MIN = 30                # 이만큼(분) 거의 안 쓰면 지운다
+OD_TTL_SEC = 24 * 3600          # 이만큼 지나면 무조건 지운다
+OD_REAP_EVERY = 60
+AGENT_FILES = ("nago-agent.py", "setup-agent.sh")
+PEER_IP_RE = re.compile(r"^10\.9\.0\.([2-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])$")
+
 CFG = {}
 NODES = []
 _cache = {}
 _last_net = {}      # 서버가 잠깐 안 닿아도 마지막 송신량은 보여 준다
 _last_sync = {}
 _store_lock = threading.Lock()
+_od_lock = threading.Lock()     # 앱이 몇 초마다 다시 물어도 같은 나라에 서버를 둘 만들지 않게
 
 
 def configure(cfg):
@@ -77,6 +96,11 @@ def configure(cfg):
                 raise SystemExit("config: node %r has no '%s'" % (n.get("code"), k))
     if not any(n["code"] == "kr" for n in cfg["nodes"]):
         raise SystemExit("config: a node with code 'kr' is required (peer admin runs there)")
+    for code, rc in ((cfg.get("ondemand") or {}).get("regions") or {}).items():
+        if not rc.get("region"):
+            raise SystemExit("config: ondemand region %r has no 'region'" % code)
+        if any(n["code"] == code for n in cfg["nodes"]):
+            raise SystemExit("config: %r is both a node and an ondemand region" % code)
     CFG.clear()
     CFG.update(cfg)
     NODES[:] = cfg["nodes"]
@@ -157,9 +181,13 @@ def run_on(node, script, timeout):
     if node.get("local"):
         cmd = ["bash", "-s"]
     else:
-        cmd = ["ssh", "-i", CFG.get("ssh_key", "/etc/nago/id_ed25519"),
-               "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-               "-o", "UserKnownHostsFile=" + os.path.join(STATE_DIR, "known_hosts"),
+        if node.get("ephemeral"):
+            # 임시 서버: Vultr가 IP를 다른 서버에 다시 주므로 호스트 키를 기억하면 다음 서버에서 막힌다
+            hosts = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
+        else:
+            hosts = ["-o", "StrictHostKeyChecking=accept-new",
+                     "-o", "UserKnownHostsFile=" + os.path.join(STATE_DIR, "known_hosts")]
+        cmd = ["ssh", "-i", CFG.get("ssh_key", "/etc/nago/id_ed25519"), "-o", "BatchMode=yes", *hosts,
                "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5", "-o", "LogLevel=ERROR",
                "%s@%s" % (node.get("ssh_user", "root"), node["addr"]), "bash -s"]
     try:
@@ -304,13 +332,23 @@ def collect():
             stats = dict(zip([n["code"] for n in running], ex.map(node_status, running)))
         return descs, stats
 
+    def od_live():
+        if not (CFG.get("vultr_api_key") and od_regions()):
+            return {}
+        try:
+            return {i["code"]: i for i in sorted(od_instances(), key=lambda i: i["created"] or now)}
+        except Exception as e:   # 임시 서버 집계가 안 돼도 나머지는 보여 준다
+            log("ondemand live: %r" % e)
+            return {}
+
     descs, stats = cached("live", LIVE_TTL, live)
-    return build(now, descs, stats)
+    od = cached("od_live", LIVE_TTL, od_live)
+    return build(now, descs, stats, od, od_month(now) if od_regions() else {})
 
 
 # ---------------------------------------------------------------- 정리(JSON 모양 — 앱의 DashData와 같음)
 
-def build(now, descs, stats):
+def build(now, descs, stats, od=None, odm=None):
     mstart = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     nodes, hourly_total, egress_total, fixed = [], {}, 0.0, 0.0
@@ -333,6 +371,33 @@ def build(now, descs, stats):
             "idle": s["idle"] if s else None, "idleLimit": n.get("idle_limit"),
             "ike": s["ike"] if s else 0, "leases": s["leases"] if s else [], "load": s["load"] if s else None,
             "hours": round(hours, 2), "egressGB": round(egress, 3), "usd": round(usd, 2),
+        })
+
+    # 임시 서버 나라: 지금 떠 있거나 이번 달에 쓴 나라만
+    od, odm = od or {}, odm or {}
+    od_hourly = float(od_cfg().get("hourly_usd", 0.007))
+    for code, rc in od_regions().items():
+        live, m = od.get(code), odm.get(code)
+        if not live and not m:
+            continue
+        m = m or {"minutes": 0.0, "bytes": 0.0, "servers": 0}
+        hours = m["minutes"] / 60
+        egress = m["bytes"] / 1e9
+        egress_total += egress
+        if live:
+            state = "running" if live["status"] == "active" and live["power"] == "running" else "pending"
+        else:
+            state = "stopped"
+        usd = hours * od_hourly
+        fixed += usd
+        nodes.append({
+            "code": code, "city": rc.get("city", code), "region": rc["region"],
+            "type": live["plan"] if live else od_cfg().get("plan", "vc2-1c-1gb"), "state": state,
+            "ip": live["ip"] if live else None,
+            "up": int((now - live["created"]).total_seconds()) if live and state == "running" and live["created"] else None,
+            "idle": None, "idleLimit": OD_IDLE_MIN, "ike": 0, "leases": [], "load": None,
+            "hours": round(hours, 2), "egressGB": round(egress, 3), "usd": round(usd, 2),
+            "onDemand": True, "servers": m["servers"],
         })
 
     now_s = int(now.timestamp())
@@ -417,8 +482,15 @@ def bar(value, maximum, width):
 def node_lines(x):
     tag = {"running": ("ok", "[ OK ]"), "pending": ("warn", "[ .. ]"), "stopping": ("warn", "[ .. ]"),
            "stopped": ("dim", "[ -- ]")}.get(x["state"], ("err", "[FAIL]"))
+    od = x.get("onDemand")
     head = "%s %s  %s %s" % (span("k", x["code"]), span("dim", x["city"].ljust(7)), span(tag[0], tag[1]),
-                             span("num", x["ip"] or x["state"]))
+                             span("num", x["ip"] or ("no server" if od and x["state"] == "stopped" else x["state"])))
+    if od:
+        if x["state"] == "running":
+            bits = [x["type"], "up " + dur(x["up"])] if x["up"] is not None else [x["type"]]
+            return head + "\n   " + span("dim", " · ".join(bits + ["on demand · deletes after %dm idle" % x["idleLimit"]]))
+        return head + "\n   " + span("dim", "on demand · %d server%s this month · made on connect"
+                                     % (x.get("servers", 0), "" if x.get("servers") == 1 else "s"))
     if x["state"] == "running":
         bits = [x["type"]]
         if x["up"] is not None:
@@ -590,8 +662,12 @@ def peer_admin(req):
 
 
 def node_admin(req):
-    """서버 켜기/끄기/재부팅, 유휴 카운터 0으로(wake). 켜기는 Vultr API가 있어야 된다."""
+    """서버 켜기/끄기/재부팅, 유휴 카운터 0으로(wake). 켜기는 Vultr API가 있어야 된다. 임시 서버 나라는 drop만."""
     op = req.get("op")
+    if req.get("node") in od_regions() and not node_by_code(req.get("node")):
+        return od_admin(req)
+    if op == "drop":
+        raise ApiError(400, "drop is only for on-demand countries")
     node = node_by_code(req.get("node"))
     if not node:
         raise ApiError(400, "unknown node")
@@ -633,6 +709,474 @@ def node_admin(req):
     return {"ok": True, "node": node["code"], "state": state}
 
 
+# ---------------------------------------------------------------- 임시 서버 나라 (ondemand)
+
+def od_cfg():
+    return CFG.get("ondemand") or {}
+
+
+def od_regions():
+    """{"sg": {"region": "sgp", "city": "singapore"}, ...}"""
+    return od_cfg().get("regions") or {}
+
+
+def utcnow():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def iso(t):
+    return t.isoformat() if t else None
+
+
+_P = 2 ** 255 - 19
+
+
+def x25519_public(private):
+    """WireGuard 공개키(RFC 7748 X25519, 기준점 9). 표준 라이브러리만으로 계산한다."""
+    k = bytearray(private)
+    k[0] &= 248
+    k[31] &= 127
+    k[31] |= 64
+    n = int.from_bytes(k, "little")
+    x1, x2, z2, x3, z3, swap = 9, 1, 0, 9, 1, 0
+    for t in reversed(range(255)):
+        bit = (n >> t) & 1
+        swap ^= bit
+        if swap:
+            x2, x3, z2, z3 = x3, x2, z3, z2
+        swap = bit
+        a, b = (x2 + z2) % _P, (x2 - z2) % _P
+        aa, bb = a * a % _P, b * b % _P
+        e = (aa - bb) % _P
+        c, d = (x3 + z3) % _P, (x3 - z3) % _P
+        da, cb = d * a % _P, c * b % _P
+        x3, z3 = (da + cb) ** 2 % _P, x1 * (da - cb) ** 2 % _P
+        x2, z2 = aa * bb % _P, e * (aa + 121665 * e) % _P
+    if swap:
+        x2, z2 = x3, z3
+    return (x2 * pow(z2, _P - 2, _P) % _P).to_bytes(32, "little")
+
+
+def wg_keypair():
+    private = bytearray(os.urandom(32))
+    private[0] &= 248
+    private[31] = (private[31] & 127) | 64
+    return base64.b64encode(bytes(private)).decode(), base64.b64encode(x25519_public(private)).decode()
+
+
+# 임시 서버가 첫 부팅 때 한 번 돌리는 스크립트(Vultr user-data). AWS 때와 같은 구성이고 다른 점은
+#   - Vultr 우분투 이미지의 ufw를 끈다(켜져 있으면 wg가 막힘)
+#   - 유휴 검사는 카운터만 올리고 끄지 않는다(지우는 건 컨트롤 서버 몫). 컨트롤 서버 SSH 키를 넣는다
+#   - nago-agent 파일은 깃허브 대신 컨트롤 서버(@AGENT_URL@)에서 받는다
+OD_SCRIPT = r"""#!/bin/bash
+# NAGO VPN 임시 서버(@CODE@). WireGuard를 먼저 올리고(바로 연결됨), TCP 분할 가속(haproxy)·광고 차단 DNS·nago-agent는
+# 그 뒤에 백그라운드로 깐다. 30분 동안 거의 안 쓰거나 24시간이 지나면 서울 컨트롤 서버가 Vultr API로 지운다.
+exec > >(tee -a /var/log/nago-ondemand.log) 2>&1
+command -v ufw >/dev/null && ufw --force disable
+install -d -m 700 /root/.ssh
+echo '@SSHKEY@' >> /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+DEFIF=$(ip route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i=="dev") {print $(i+1); exit}}')
+
+modprobe tcp_bbr 2>/dev/null
+modprobe nf_conntrack 2>/dev/null
+printf '%s\n' net.ipv4.ip_forward=1 net.core.default_qdisc=fq net.ipv4.tcp_congestion_control=bbr \
+  net.ipv4.tcp_mtu_probing=1 net.core.rmem_max=67108864 net.core.wmem_max=67108864 \
+  'net.ipv4.tcp_rmem=4096 131072 67108864' 'net.ipv4.tcp_wmem=4096 65536 67108864' \
+  net.ipv4.tcp_slow_start_after_idle=0 net.ipv4.tcp_fastopen=3 net.netfilter.nf_conntrack_max=262144 \
+  > /etc/sysctl.d/99-nago.conf
+sysctl -q -p /etc/sysctl.d/99-nago.conf
+
+wg_up() {
+  umask 027
+  printf '%s\n' '[NetDev]' 'Name=wg0' 'Kind=wireguard' 'MTUBytes=1420' '' '[WireGuard]' \
+    'PrivateKey=@KEY@' 'ListenPort=51820' > /etc/systemd/network/90-nago-wg0.netdev
+  printf '@PEERS@' >> /etc/systemd/network/90-nago-wg0.netdev
+  chgrp systemd-network /etc/systemd/network/90-nago-wg0.netdev
+  umask 022
+  printf '[Match]\nName=wg0\n\n[Network]\nAddress=10.9.0.1/24\n' > /etc/systemd/network/90-nago-wg0.network
+  networkctl reload
+  for i in $(seq 1 40); do ip -4 addr show wg0 2>/dev/null | grep -q 10.9.0.1 && return 0; sleep 0.5; done
+  return 1
+}
+if ! wg_up; then
+  apt-get -o DPkg::Lock::Timeout=60 update -y && apt-get -o DPkg::Lock::Timeout=60 install -y "linux-modules-extra-$(uname -r)"
+  modprobe wireguard
+  wg_up
+fi
+
+if command -v iptables >/dev/null; then
+  iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -o "$DEFIF" -j MASQUERADE
+  iptables -A FORWARD -i wg0 -j ACCEPT
+  iptables -A FORWARD -o wg0 -j ACCEPT
+  iptables -t nat -A PREROUTING -i "$DEFIF" -p udp --dport @PORT@ -j REDIRECT --to-ports 51820
+  iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+else
+  printf '%s\n' 'table ip nago {' \
+    "  chain pre { type nat hook prerouting priority dstnat; iifname \"$DEFIF\" udp dport @PORT@ redirect to :51820; }" \
+    "  chain post { type nat hook postrouting priority srcnat; ip saddr 10.9.0.0/24 oifname \"$DEFIF\" masquerade; }" \
+    '  chain fwd { type filter hook forward priority mangle; tcp flags syn tcp option maxseg size set rt mtu; }' \
+    '}' | nft -f -
+fi
+
+# 매분: 분당 송신 300KB 미만인 분이 이어지면 카운터를 올린다(/run이라 부팅마다 0부터). 끄지는 않는다 —
+# 컨트롤 서버가 SSH로 읽어서 30이 넘으면 지운다
+printf '%s\n' '#!/bin/bash' \
+  'DEV=$(ip route get 1.1.1.1 | awk '"'"'{for (i=1; i<=NF; i++) if ($i=="dev") {print $(i+1); exit}}'"'"')' \
+  'S=/run/nago-idle; mkdir -p "$S"' \
+  'tx=$(cat "/sys/class/net/$DEV/statistics/tx_bytes")' \
+  'last=$(cat "$S/tx" 2>/dev/null || echo "$tx")' \
+  'echo "$tx" > "$S/tx"' \
+  'idle=$(cat "$S/idle" 2>/dev/null || echo 0)' \
+  'if [ $((tx - last)) -lt 300000 ]; then idle=$((idle + 1)); else idle=0; fi' \
+  'echo "$idle" > "$S/idle"' \
+  > /usr/local/sbin/nago-idle
+chmod +x /usr/local/sbin/nago-idle
+printf '[Unit]\nDescription=NAGO idle counter\n[Service]\nType=oneshot\nExecStart=/usr/local/sbin/nago-idle\n' \
+  > /etc/systemd/system/nago-idle.service
+printf '[Unit]\nDescription=NAGO idle counter every minute\n[Timer]\nOnBootSec=1min\nOnUnitActiveSec=1min\nAccuracySec=5s\n[Install]\nWantedBy=timers.target\n' \
+  > /etc/systemd/system/nago-idle.timer
+systemctl daemon-reload
+systemctl enable --now nago-idle.timer
+
+echo "@READY@ wg0=$(cat /sys/class/net/wg0/operstate 2>/dev/null || echo missing) peers=@NPEERS@"
+
+# ---- TCP 분할 가속(고정 서버의 nago-accel과 같음)
+cat > /usr/local/sbin/nago-accel <<'SH'
+#!/bin/bash
+GUARD="INPUT -p tcp --dport 12345 -m conntrack ! --ctstate DNAT -j DROP"
+WG_MATCH="-i wg0 -p tcp"
+case "$1" in
+on)
+  iptables -t nat -N NAGO_ACCEL 2>/dev/null; iptables -t nat -F NAGO_ACCEL
+  for n in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 169.254.0.0/16 100.64.0.0/10; do
+    iptables -t nat -A NAGO_ACCEL -d $n -j RETURN
+  done
+  iptables -t nat -A NAGO_ACCEL -p tcp -j REDIRECT --to-ports 12345
+  iptables -C $GUARD 2>/dev/null || iptables -I $GUARD
+  iptables -t nat -C PREROUTING $WG_MATCH -j NAGO_ACCEL 2>/dev/null || iptables -t nat -I PREROUTING $WG_MATCH -j NAGO_ACCEL ;;
+off)
+  iptables -t nat -D PREROUTING $WG_MATCH -j NAGO_ACCEL 2>/dev/null
+  iptables -D $GUARD 2>/dev/null
+  iptables -t nat -F NAGO_ACCEL 2>/dev/null; iptables -t nat -X NAGO_ACCEL 2>/dev/null ;;
+esac
+SH
+chmod +x /usr/local/sbin/nago-accel
+cat > /usr/local/sbin/nago-accel-setup <<'SH'
+#!/bin/bash
+exec > >(tee -a /var/log/nago-ondemand.log) 2>&1
+export DEBIAN_FRONTEND=noninteractive
+for i in 1 2 3; do
+  apt-get -o DPkg::Lock::Timeout=120 -q update && \
+    apt-get -o DPkg::Lock::Timeout=120 -q install -y --no-install-recommends haproxy && break
+  sleep 5
+done
+command -v haproxy >/dev/null || { echo "NAGO_ACCEL_FAIL no haproxy"; exit 1; }
+cat > /etc/haproxy/haproxy.cfg <<'CFG'
+global
+    log /dev/log local0 warning
+    chroot /var/lib/haproxy
+    user haproxy
+    group haproxy
+    maxconn 40000
+
+defaults
+    log global
+    mode tcp
+    option dontlognull
+    option splice-auto
+    timeout connect 8s
+    timeout client 6h
+    timeout server 6h
+    timeout client-fin 30s
+    timeout server-fin 30s
+
+frontend nago_split
+    bind :12345
+    default_backend nago_orig
+
+backend nago_orig
+    server orig 0.0.0.0
+CFG
+haproxy -c -f /etc/haproxy/haproxy.cfg || { echo "NAGO_ACCEL_FAIL config"; exit 1; }
+printf '%s\n' '[Unit]' 'Description=NAGO VPN TCP split acceleration (off when haproxy stops)' \
+  'After=haproxy.service' 'BindsTo=haproxy.service' '[Service]' 'Type=oneshot' \
+  'ExecStart=/usr/local/sbin/nago-accel on' 'ExecStop=/usr/local/sbin/nago-accel off' 'RemainAfterExit=yes' \
+  '[Install]' 'WantedBy=multi-user.target haproxy.service' > /etc/systemd/system/nago-accel.service
+systemctl daemon-reload
+systemctl restart haproxy && systemctl enable --now nago-accel && \
+  echo "NAGO_ACCEL_READY uptime=$(cut -d. -f1 /proc/uptime)s"
+SH
+chmod +x /usr/local/sbin/nago-accel-setup
+systemd-run --unit nago-accel-setup /usr/local/sbin/nago-accel-setup
+
+# ---- 광고 차단 DNS + nago-agent. 다 깔릴 때까지 10.53.53.53:53은 1.1.1.1로 넘겨 두고, 에이전트가 뜨면 뗀다.
+ip link add nago-dns type dummy 2>/dev/null; ip addr add 10.53.53.53/32 dev nago-dns 2>/dev/null; ip link set nago-dns up
+for pr in udp tcp; do
+  iptables -t nat -I PREROUTING -i wg0 -d 10.53.53.53 -p $pr --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null
+done
+cat > /usr/local/sbin/nago-agent-setup <<'SH'
+#!/bin/bash
+exec > >(tee -a /var/log/nago-ondemand.log) 2>&1
+export DEBIAN_FRONTEND=noninteractive
+for i in 1 2 3 4 5; do
+  command -v dnsmasq >/dev/null && break
+  apt-get -o DPkg::Lock::Timeout=180 -q install -y --no-install-recommends dnsmasq-base \
+    || { apt-get -o DPkg::Lock::Timeout=180 -q update; sleep 5; }
+done
+command -v dnsmasq >/dev/null || { echo "NAGO_AGENT_FAIL no dnsmasq"; exit 1; }
+mkdir -p /etc/nago-dns /var/lib/nago-dns /root/nago-agent
+printf 'bind-interfaces\nlisten-address=127.0.0.1\nport=5354\nno-resolv\nserver=1.1.1.1\n' > /etc/nago-dns/dnsmasq.conf
+printf '%s\n' '[Unit]' 'Description=NAGO VPN dns cache' '[Service]' \
+  'ExecStartPre=-/usr/sbin/ip link add nago-dns type dummy' 'ExecStartPre=-/usr/sbin/ip addr add 10.53.53.53/32 dev nago-dns' \
+  'ExecStartPre=/usr/sbin/ip link set nago-dns up' \
+  'ExecStart=/usr/sbin/dnsmasq -k -C /etc/nago-dns/dnsmasq.conf --pid-file=/run/nago-dns.pid' 'Restart=always' \
+  '[Install]' 'WantedBy=multi-user.target' > /etc/systemd/system/nago-dns.service
+systemctl daemon-reload && systemctl enable --now nago-dns
+cd /root/nago-agent
+for f in nago-agent.py setup-agent.sh; do
+  curl -fsSL --retry 3 --max-time 60 -o $f "@AGENT_URL@/$f" || { echo "NAGO_AGENT_FAIL download $f"; exit 1; }
+done
+if bash setup-agent.sh && /usr/local/sbin/nago-dns-guard; then
+  for pr in udp tcp; do
+    iptables -t nat -D PREROUTING -i wg0 -d 10.53.53.53 -p $pr --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null
+  done
+  echo "NAGO_AGENT_READY uptime=$(cut -d. -f1 /proc/uptime)s"
+else
+  echo "NAGO_AGENT_FAIL setup (dns stays on 1.1.1.1)"
+fi
+SH
+chmod +x /usr/local/sbin/nago-agent-setup
+systemd-run --unit nago-agent-setup /usr/local/sbin/nago-agent-setup
+"""
+
+# 정리 스레드가 SSH로 읽는 것: 유휴 카운터(분)와 기본 인터페이스 송신 바이트
+OD_PROBE = r"""echo "IDLE $(cat /run/nago-idle/idle 2>/dev/null || echo 0)"
+DEV=$(ip route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i=="dev") {print $(i+1); exit}}')
+echo "TX $(cat /sys/class/net/$DEV/statistics/tx_bytes 2>/dev/null || echo 0)"
+grep -q NAGO_WG_READY /var/log/nago-ondemand.log 2>/dev/null && echo READY
+"""
+
+
+def od_node(inst):
+    """run_on에 넘길 모양. 임시 서버는 IP가 다시 쓰이므로 호스트 키를 기억하지 않는다."""
+    return {"code": inst["code"], "addr": inst["ip"], "ephemeral": True}
+
+
+def od_instances():
+    """Vultr에 있는 임시 서버(만드는 중 포함) — 라벨 nago-od-<code>"""
+    out = []
+    for i in vultr("GET", "/instances?per_page=500").get("instances", []):
+        label = i.get("label") or ""
+        code = label[len(OD_LABEL):] if label.startswith(OD_LABEL) else None
+        if code not in od_regions():
+            continue
+        ip = i.get("main_ip")
+        out.append({"id": i["id"], "code": code, "status": i.get("status"), "power": i.get("power_status"),
+                    "ip": ip if ip and ip != "0.0.0.0" else None, "created": parse_time(i.get("date_created")),
+                    "plan": i.get("plan") or "-", "region": i.get("region")})
+    return out
+
+
+def od_find(code, insts):
+    mine = [i for i in insts if i["code"] == code]
+    return max(mine, key=lambda i: i["created"] or utcnow()) if mine else None
+
+
+def od_peers():
+    """지금 피어 목록(공개키, ip). 스크립트에 그대로 들어가니 모양을 확인한다."""
+    return [(p["pub"], p["ip"]) for p in wg_peers()
+            if KEY_RE.match(str(p.get("pub", ""))) and PEER_IP_RE.match(str(p.get("ip", "")))]
+
+
+def od_create(code):
+    rc, oc = od_regions()[code], od_cfg()
+    private, public = wg_keypair()
+    peers = od_peers()
+    with open(CFG.get("ssh_key", "/etc/nago/id_ed25519") + ".pub", encoding="utf-8") as fh:
+        ssh_pub = fh.read().strip()
+    script = (OD_SCRIPT.replace("@CODE@", code).replace("@KEY@", private).replace("@PORT@", str(WG_PORT))
+              .replace("@READY@", OD_READY).replace("@NPEERS@", str(len(peers))).replace("@SSHKEY@", ssh_pub)
+              .replace("@AGENT_URL@", CFG["public_url"].rstrip("/") + "/agent")
+              # printf 서식 문자열로 들어간다: \n은 printf가 줄바꿈으로 바꾼다(키·ip에는 %나 \가 없다)
+              .replace("@PEERS@", "".join("\\n[WireGuardPeer]\\nPublicKey=%s\\nAllowedIPs=%s/32\\n" % p
+                                          for p in peers)))
+    body = {"region": rc["region"], "plan": oc.get("plan", "vc2-1c-1gb"), "os_id": int(oc.get("os_id", 2284)),
+            "label": OD_LABEL + code, "hostname": OD_LABEL + code, "tags": ["nago-ondemand"],
+            "user_data": base64.b64encode(script.encode()).decode(), "enable_ipv6": False, "backups": "disabled"}
+    if oc.get("firewall_group_id"):
+        body["firewall_group_id"] = oc["firewall_group_id"]
+    i = vultr("POST", "/instances", body)["instance"]
+    created = parse_time(i.get("date_created")) or utcnow()
+    with _store_lock:
+        state = read_json(OD_STATE, {})
+        state[i["id"]] = {"code": code, "pub": public, "created": iso(created)}
+        write_json(OD_STATE, state)
+        usage = read_json(OD_USAGE, {})
+        usage[i["id"]] = {"code": code, "created": iso(created), "gone": None, "tx": 0}
+        write_json(OD_USAGE, usage)
+    log("ondemand %s: created %s in %s" % (code, i["id"], rc["region"]))
+    return {"id": i["id"], "code": code, "status": i.get("status", "pending"), "power": i.get("power_status"),
+            "ip": None, "created": created, "plan": body["plan"], "region": rc["region"]}
+
+
+def od_probe(inst):
+    """{"idle": 분, "tx": 바이트, "ready": bool} 또는 None(SSH 안 됨)"""
+    r = run_on(od_node(inst), OD_PROBE, 10)
+    if not r.ok:
+        return None
+    out = {"idle": 0, "tx": 0, "ready": False}
+    for line in r.out.splitlines():
+        key, _, val = line.partition(" ")
+        if key in ("IDLE", "TX"):
+            try:
+                out[key.lower()] = int(val.strip() or 0)
+            except ValueError:
+                pass
+        elif key == "READY":
+            out["ready"] = True
+    return out
+
+
+def od_ready(inst):
+    """WireGuard가 올라왔는지: 서버가 로그에 남긴 준비 표시를 SSH로 본다. 못 읽어도 만든 지 오래면 준비로."""
+    if inst["status"] != "active" or inst["power"] != "running" or not inst["ip"]:
+        return False
+    p = od_probe(inst)
+    if p and p["ready"]:
+        return True
+    return bool(inst["created"]) and (utcnow() - inst["created"]).total_seconds() > OD_GRACE_SEC
+
+
+def od_destroy(iid):
+    vultr("DELETE", "/instances/%s" % iid)
+    log("ondemand: destroyed %s" % iid)
+
+
+def handle_ondemand(code):
+    if not CFG.get("vultr_api_key") or not CFG.get("public_url"):
+        return json_response(503, {"error": "on-demand servers need vultr_api_key and public_url in control.json"})
+    with _od_lock:
+        insts = od_instances()
+        inst = od_find(code, insts)
+        state = None
+        if not inst:
+            limit = int(od_cfg().get("max", 2))
+            if len(insts) >= limit:
+                return json_response(409, {"error": "too many on-demand servers", "max": limit})
+            inst = od_create(code)
+            state = "creating"
+    pub = read_json(OD_STATE, {}).get(inst["id"], {}).get("pub")
+    running = inst["status"] == "active" and inst["power"] == "running"
+    return json_response(200, {
+        "region": code, "state": state or ("running" if running else "pending"),
+        "ready": state is None and od_ready(inst),
+        "ip": inst["ip"] if running else None, "id": code + ".nago.vpn",
+        "wgPub": pub, "wgPort": WG_PORT, "onDemand": True, "launched": iso(inst["created"]),
+    })
+
+
+def od_reap_once(now=None):
+    """임시 서버 정리: 30분 유휴·24시간·오래 안 닿음이면 지운다. 이번 달 기록(송신량·지운 때)도 남긴다."""
+    if not (CFG.get("vultr_api_key") and od_regions()):
+        return []
+    now = now or utcnow()
+    insts = od_instances()
+    dropped = []
+    with _store_lock:
+        usage = read_json(OD_USAGE, {})
+    for inst in insts:
+        age = (now - inst["created"]).total_seconds() if inst["created"] else 0
+        u = usage.setdefault(inst["id"], {"code": inst["code"], "created": iso(inst["created"]), "gone": None, "tx": 0})
+        if inst["created"]:
+            u["created"] = iso(inst["created"])   # 시각은 Vultr 기록이 기준
+        reason = None
+        if age > OD_TTL_SEC:
+            reason = "24h"
+        elif inst["ip"] and inst["status"] == "active" and age > 300:
+            p = od_probe(inst)
+            if p:
+                u["tx"] = max(int(u.get("tx") or 0), p["tx"])
+                u["fails"] = 0
+                if p["idle"] >= OD_IDLE_MIN:
+                    reason = "idle %dm" % p["idle"]
+            else:
+                u["fails"] = int(u.get("fails") or 0) + 1
+                if u["fails"] >= 10 and age > 1800:
+                    reason = "unreachable"
+        if reason:
+            try:
+                od_destroy(inst["id"])
+            except Exception as e:
+                log("ondemand %s: destroy failed: %r" % (inst["code"], e))
+                continue
+            u["gone"] = iso(now)
+            dropped.append((inst["code"], reason))
+            log("ondemand %s: dropped (%s)" % (inst["code"], reason))
+    live = {i["id"] for i in insts} - {iid for iid, u in usage.items() if u.get("gone")}
+    cutoff = now - datetime.timedelta(days=40)
+    with _store_lock:
+        fresh = read_json(OD_USAGE, {})     # 그사이 새로 만든 서버 기록을 지우지 않게 합친다
+        for iid, u in usage.items():
+            fresh[iid] = dict(fresh.get(iid, {}), **u)
+        for iid, u in list(fresh.items()):
+            if not u.get("gone") and iid not in live and (parse_time(u.get("created")) or now) < now - datetime.timedelta(minutes=10):
+                u["gone"] = iso(now)
+            if u.get("gone") and (parse_time(u["gone"]) or now) < cutoff:
+                del fresh[iid]
+        write_json(OD_USAGE, fresh)
+        state = read_json(OD_STATE, {})
+        for iid in [k for k in state if k not in live and fresh.get(k, {}).get("gone")]:
+            del state[iid]
+        write_json(OD_STATE, state)
+    _cache.pop("od_live", None)
+    return dropped
+
+
+def od_reaper():
+    while True:
+        time.sleep(OD_REAP_EVERY)
+        try:
+            od_reap_once()
+        except Exception as e:
+            log("ondemand reaper: %r" % e)
+
+
+def od_month(now):
+    """이번 달 임시 서버 사용량 {code: {"minutes", "bytes", "servers"}} — ondemand-usage.json 기록에서"""
+    mstart = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    out = {}
+    for u in read_json(OD_USAGE, {}).values():
+        start, end = parse_time(u.get("created")), parse_time(u.get("gone")) or now
+        if not start or end < mstart:
+            continue
+        m = out.setdefault(u.get("code"), {"minutes": 0.0, "bytes": 0.0, "servers": 0})
+        m["minutes"] += max(0.0, (end - max(start, mstart)).total_seconds() / 60)
+        m["bytes"] += float(u.get("tx") or 0)
+        m["servers"] += 1
+    return out
+
+
+def od_admin(req):
+    """임시 서버 나라: drop만 된다(떠 있는 서버를 바로 지움). 만드는 건 vpn 탭에서 연결할 때 국가 API가 한다."""
+    code = req.get("node")
+    if req.get("op") != "drop":
+        raise ApiError(400, "%s is on demand - connect from the vpn tab to make a server" % code)
+    if not CFG.get("vultr_api_key"):
+        raise ApiError(409, "needs vultr_api_key")
+    inst = od_find(code, od_instances())
+    if not inst:
+        return {"ok": True, "node": code, "state": "none"}
+    od_destroy(inst["id"])
+    with _store_lock:
+        usage = read_json(OD_USAGE, {})
+        if inst["id"] in usage:
+            usage[inst["id"]]["gone"] = iso(utcnow())
+            write_json(OD_USAGE, usage)
+    _cache.pop("od_live", None)
+    return {"ok": True, "node": code, "state": "stopping"}
+
+
 # ---------------------------------------------------------------- 요청 처리 (Lambda 이벤트와 같은 모양의 dict)
 
 def json_response(status, data):
@@ -657,8 +1201,11 @@ def handle_region(event):
         return json_response(403, {"error": "forbidden"})
     code = event["query"].get("r", "")
     node = node_by_code(code)
+    if not node and code in od_regions():
+        return handle_ondemand(code)
     if not node:
-        return json_response(404, {"error": "unknown region", "regions": sorted(n["code"] for n in NODES)})
+        return json_response(404, {"error": "unknown region", "regions": sorted(n["code"] for n in NODES),
+                                   "onDemand": sorted(od_regions())})
     d = cached("describe:" + code, LIVE_TTL, lambda: describe(node))
     ready = d["state"] == "running"
     srv = wg_servers().get(code, {})
@@ -726,6 +1273,17 @@ def route(method, path, query, headers, body):
         return {"statusCode": 200, "headers": {"content-type": "text/plain"}, "body": "ok\n"}
     if method == "GET" and path == "/region":
         return handle_region(event)
+    if method == "GET" and path.startswith("/agent/"):
+        # 임시 서버가 첫 부팅 때 받아 가는 파일(레포에 공개된 것과 같음). 정해진 두 파일만
+        name = path[len("/agent/"):]
+        if name not in AGENT_FILES:
+            return json_response(404, {"error": "not found"})
+        agent_dir = os.environ.get("NAGO_AGENT_DIR", os.path.join(HERE, "agent"))
+        try:
+            with open(os.path.join(agent_dir, name), encoding="utf-8") as fh:
+                return {"statusCode": 200, "headers": {"content-type": "text/plain; charset=utf-8"}, "body": fh.read()}
+        except FileNotFoundError:
+            return json_response(404, {"error": "agent files not installed"})
     if path == "/":
         if method == "POST":
             return handle_post(event)
@@ -784,7 +1342,10 @@ def main():
     os.makedirs(STATE_DIR, exist_ok=True)
     srv = ThreadingHTTPServer((host or "127.0.0.1", int(port)), Handler)
     srv.daemon_threads = True
-    log("nago-control on %s:%s, nodes: %s" % (host, port, ", ".join(n["code"] for n in NODES)))
+    log("nago-control on %s:%s, nodes: %s, on demand: %s" % (host, port, ", ".join(n["code"] for n in NODES),
+                                                              ", ".join(sorted(od_regions())) or "-"))
+    if od_regions():
+        threading.Thread(target=od_reaper, daemon=True).start()
     srv.serve_forever()
 
 

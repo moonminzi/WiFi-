@@ -1,4 +1,4 @@
-# NagoVpn.ps1 -> NagoVpn.exe 빌드 스크립트
+﻿# NagoVpn.ps1 -> NagoVpn.exe 빌드 스크립트
 # PowerShell(관리자 아님 OK)에서 이 파일이 있는 폴더로 이동 후 실행하세요.
 #   powershell -ExecutionPolicy Bypass -File build-exe.ps1
 

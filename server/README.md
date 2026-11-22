@@ -74,6 +74,8 @@ cd /root/server
 ./setup-region.sh /root/bundle-<id>     # strongSwan, BBR, 가속, 송신량 기록
 ./wireguard/setup-wg.sh                 # WireGuard (마지막 줄 WGPUB = 서버 공개키)
 ./adblock/setup-adblock.sh              # 광고 차단 DNS (--adblock)
+./agent/setup-agent.sh                  # nago-agent(사람별 광고 차단·통계·집 출구), adblock 다음에
+./nagoing/setup-nagoing.sh              # nagoing 프록시(TCP 443 TLS · UDP 51821), Rust 빌드라 몇 분 걸림
 rm -rf /root/bundle-<id>                # 번들엔 비밀번호와 서버 개인키가 있음
 ```
 
@@ -84,20 +86,23 @@ rm -rf /root/bundle-<id>                # 번들엔 비밀번호와 서버 개�
 
 ```bash
 cd /root/server/control
-NAGO_KEY='<VPN 비밀번호>' ./setup-control.sh          # IP 주소로 HTTPS
+NAGO_KEY='<VPN 비밀번호>' ./setup-control.sh          # IP 주소로 HTTPS, 포트 8443
 # 도메인이 있으면: NAGO_KEY=... DOMAIN=vpn.example.com ./setup-control.sh
 ```
 
+API는 **TCP 8443**이다(443은 nagoing 프록시). 인증서는 Let's Encrypt IP 인증서를 80번(http-01)으로 받는다.
+
 1. `/etc/nago/control.json`의 jp/us/uk `addr`(서버 IP)를 채운다. 아직 안 만든 서버는 nodes에서 빼 둔다
    (자리표시 주소가 앱에 그대로 나감). `vultr_id`, `vultr_api_key`를 넣으면 대시보드에서 켜기/끄기/재부팅과
-   정확한 상태·생성 시각을 쓴다(없어도 동작. API 키를 쓰면 서울 IP를 Vultr API Access Control에 추가).
+   정확한 상태·생성 시각을 쓴다. **임시 서버 나라는 `vultr_api_key`가 있어야 된다**(서울 IP를 Vultr API
+   Access Control에 추가). `ondemand.firewall_group_id`에 `nago-vpn` 그룹 ID를 넣는다.
    API 키 없이 쓸 때는 서버마다 `"created": "2026-11-22T14:20:25+00:00"`(Vultr의 date_created)를 넣어야
    첫 달 비용이 1일부터로 부풀지 않는다. `monthly_usd`, `bandwidth_gb`는 Vultr 가격표 값으로
 2. 마지막에 출력된 SSH 공개키를 jp/us/uk의 `/root/.ssh/authorized_keys`에 넣는다
 3. `systemctl restart nago-control` 후 확인:
    ```bash
-   curl -s -H "x-nago-key: <VPN 비밀번호>" https://<서울 IP>/region?r=jp
-   curl -s -H "x-nago-key: <VPN 비밀번호>" "https://<서울 IP>/?format=json" | head -c 400
+   curl -s -H "x-nago-key: <VPN 비밀번호>" https://<서울 IP>:8443/region?r=jp
+   curl -s -H "x-nago-key: <VPN 비밀번호>" "https://<서울 IP>:8443/?format=json" | head -c 400
    ```
 
 ### 5. AWS에서 피어 목록 옮기기 (한 번)
@@ -117,11 +122,12 @@ ssh root@<서울 IP> 'chmod 600 /var/lib/nago/wg-peers.json && systemctl restart
 
 | 파일 | 바꿀 것 |
 |---|---|
-| `WifiScan/VPNRegion.swift` | `RegionAPI.endpoint` → `https://<서울 IP>/region`, kr `fallback` IP |
-| `WifiScan/DashView.swift` | `DashAPI.endpoint` → `https://<서울 IP>/?format=json` |
+| `WifiScan/VPNRegion.swift` | `RegionAPI.endpoint` → `https://<서울 IP>:8443/region`, kr `fallback` IP |
+| `WifiScan/DashView.swift` | `DashAPI.endpoint` → `https://<서울 IP>:8443/?format=json` |
 | `android/.../Regions.kt` | `ENDPOINT`, kr `fallback` IP |
 | `android/.../WgVpn.kt` | `DASH` |
 | `windows/NagoVpn.ps1` | `$Server` |
+| `server/home/nago-home.sh` | `DASH` |
 
 ### 7. AWS 정리 (새 앱이 다 깔린 뒤)
 
@@ -152,45 +158,37 @@ journalctl -u caddy -f                 # 인증서 발급·갱신
 
 가끔만 필요한 나라는 서버를 미리 두지 않고, 고를 때 만들어서 안 쓰면 지운다. 안 쓰는 동안 드는 돈이 없다.
 
-| 코드 | 나라 | 리전 |
+| 코드 | 나라 | Vultr 지역 |
 |---|---|---|
-| `sg` | 싱가포르 | `ap-southeast-1` |
-| `de` | 독일 | `eu-central-1` |
-| `fr` | 프랑스 | `eu-west-3` |
-| `ie` | 아일랜드 | `eu-west-1` |
-| `se` | 스웨덴 | `eu-north-1` |
-| `ca` | 캐나다 | `ca-central-1` |
-| `br` | 브라질 | `sa-east-1` |
-| `au` | 호주 | `ap-southeast-2` |
-| `in` | 인도 | `ap-south-1` |
+| `sg` | 싱가포르 | `sgp` |
+| `de` | 독일(프랑크푸르트) | `fra` |
+| `fr` | 프랑스(파리) | `cdg` |
+| `se` | 스웨덴(스톡홀름) | `sto` |
+| `ca` | 캐나다(**토론토**, AWS 때는 몬트리올) | `yto` |
+| `br` | 브라질(상파울루) | `sao` |
+| `au` | 호주(시드니) | `syd` |
+| `in` | 인도(뭄바이) | `bom` |
 
-- 국가 API(`region-api/index.py`, Lambda `nago-region`)가 `GET /region?r=sg`에 떠 있는 서버가 없으면 새로 만든다.
-  Ubuntu 24.04 arm64(`c7g.medium`), 기본 VPC, 보안 그룹 `nago-ondemand`(udp 443/51820만), 태그 `nago:ondemand=<코드>`.
-  만들 때 `state: "creating"`, WireGuard가 올라오면 `ready: true`(서버가 콘솔에 남기는 `NAGO_WG_READY`로 판단).
-- **WireGuard를 먼저** 올린다. 패키지 없이 커널 wireguard + systemd-networkd로(user-data 한 번), 그래서 연결은 1분 안팎이면 된다.
-  서버 키는 Lambda가 만들어 user-data로 넘기고 공개키는 태그 `nago:wgpub`로 돌려준다. 피어는 만들 때의 `/nago/wg/peers`
-  (만든 뒤 새로 등록한 기기는 다음 서버부터). IKEv2·광고 차단 DNS는 없다.
-- **TCP 분할 가속**은 그 뒤에 백그라운드(`nago-accel-setup`)로 haproxy를 깔아 켠다 — 고정 서버(`setup-region.sh`)와 같은 방식.
-  WireGuard가 뜬 뒤 30초쯤이면 콘솔에 `NAGO_ACCEL_READY`가 찍히고, 그 뒤 새로 여는 TCP 연결부터 서버에서 끊어 다시 잇는다
-  (먼 구간은 서버의 BBR·큰 버퍼로). 그동안에도 연결은 되고, 설치가 실패해도 가속만 없을 뿐이다. haproxy가 멈추면
-  `nago-accel.service`(BindsTo=haproxy)가 리다이렉트 규칙을 같이 내려 TCP가 죽은 포트로 가지 않는다.
-- **지우기**: 서버 안의 유휴 검사(분당 송신 300KB 미만이 30분)가 `poweroff` → 종료 동작이 `terminate`라 서버가 그대로 지워진다.
-  24시간이 지나도 꺼진다. AWS 쪽 안전장치로 CloudWatch 경보(`nago-ondemand-<인스턴스>`, 5분 송신 1MB 미만이 1시간이면 terminate)도
-  건다 — 서버가 멎어서 스스로 못 끄는 경우용. 지난 경보는 다음에 그 리전에 서버를 만들 때 치운다.
-- **대시보드**(`nago-dash`): 지금 떠 있거나 이번 달에 쓴 임시 서버 나라가 서버 목록·지도·비용에 `onDemand: true`로 붙는다.
-  지워진 서버는 목록에서 사라지므로 이번 달 사용량은 CloudTrail `RunInstances` 기록(태그 `nago:ondemand`)으로 인스턴스를 찾아
-  CloudWatch(CPU 데이터 개수 = 켜져 있던 분, NetworkOut)로 센다(10분 캐시). 떠 있는 서버는 `POST {op: "drop", node: "sg"}`로 바로 지운다.
-  대시보드 Lambda 환경 변수 `ONDEMAND`(`{"sg":{"region":"ap-southeast-1","city":"singapore"},...}`), 인라인 정책 `nago-ondemand`
-  (cloudtrail:LookupEvents, 태그 붙은 인스턴스만 ec2:TerminateInstances).
-- **동시에 2대까지**(`ONDEMAND_MAX`). 넘으면 409. 연결해 둔 채로 두면 터널이 핸드셰이크가 끊길 때 API를 다시 불러 새 서버를 만든다
-  (늘 있는 서버를 다시 켜는 것과 같은 동작).
-- 비용: 서버 시간당 $0.03~0.06(공인 IPv4 포함, 초 단위) + 송신 GB당 $0.09~0.15(전 리전 합쳐 매달 100GB 무료). 안 쓰면 0원.
-- 나라 추가: Lambda 환경 변수 `ONDEMAND`(`{"sg":{"region":"ap-southeast-1"},...}`)와 IAM 인라인 정책 `nago-ondemand`의
-  `aws:RequestedRegion` 목록, 앱 `VPNRegion`에 넣는다. 2019년 이후 생긴 리전(홍콩·대만·태국 등)은 계정에서 리전을 먼저 켜야 한다.
-- 관리·점검: Lambda를 직접 부르면(IAM 권한 필요) 비밀번호 없이 된다 — `{"nago_internal": "region", "r": "sg"}`.
-  API Gateway로 들어온 요청은 이 길로 올 수 없다.
-- Lambda 반영: `cd server/region-api && zip -X /tmp/region.zip index.py && aws lambda update-function-code --region ap-northeast-2 --function-name nago-region --zip-file fileb:///tmp/region.zip`
-  (제한 시간 25초 — 처음 만드는 요청이 10초 가까이 걸린다)
+아일랜드(`ie`)는 Vultr에 지역이 없어 빠졌다. 앱은 칸을 숨긴다(지도 점 번호가 밀리지 않게 목록에는 남김).
+
+- 컨트롤 서버(`control/app.py`)가 `GET /region?r=sg`에 떠 있는 서버가 없으면 Vultr API로 새로 만든다.
+  Ubuntu 24.04 x64, `vc2-1c-1gb`, 라벨 `nago-od-<코드>`, 방화벽 그룹 `nago-vpn`(`ondemand.firewall_group_id`).
+  만들 때 `state: "creating"`, WireGuard가 올라오면 `ready: true` — 서버가 `/var/log/nago-ondemand.log`에 남기는
+  `NAGO_WG_READY`를 SSH로 본다(못 읽어도 만든 지 4분이 지나면 준비로). Vultr는 만드는 데 1~2분 걸린다.
+- **WireGuard를 먼저** 올린다. 패키지 없이 커널 wireguard + systemd-networkd로(user-data 한 번). 서버 키는 컨트롤 서버가
+  만들어 user-data로 넘기고 공개키는 `/var/lib/nago/ondemand.json`에 둔다. 피어는 만들 때의 `wg-peers.json`
+  (만든 뒤 새로 등록한 기기는 다음 서버부터). user-data가 Vultr 이미지의 ufw를 끄고 컨트롤 서버 SSH 키를 넣는다.
+- **TCP 분할 가속**·**광고 차단 DNS + nago-agent**는 그 뒤에 백그라운드로 깐다(고정 서버와 같은 방식). 에이전트 파일은
+  깃허브 대신 컨트롤 서버(`https://<서울 IP>:8443/agent/…`)에서 받는다. 다 깔릴 때까지 10.53.53.53은 1.1.1.1로 넘겨 둔다.
+- **지우기**: AWS처럼 "꺼지면 지워짐"이 Vultr에는 없고, 꺼 둬도 요금이 나간다. 그래서 컨트롤 서버의 정리 스레드가 1분마다
+  임시 서버의 유휴 카운터(분당 송신 300KB 미만인 분, 서버의 `nago-idle` 타이머)를 SSH로 읽어 **30분 유휴면 지운다**.
+  **24시간**이 지나도 지우고, 30분이 지났는데 SSH가 10번 연달아 안 되면(멎은 서버) 지운다.
+  컨트롤 서버가 멈춰 있으면 안 지워지니 주의(대시보드에 떠 있는 게 보인다).
+- **대시보드**: 지금 떠 있거나 이번 달에 쓴 임시 서버 나라가 `onDemand: true`로 붙는다. 이번 달 사용량은
+  `/var/lib/nago/ondemand-usage.json`(만든 때·지운 때·송신 바이트)에서 센다. `POST {op: "drop", node: "sg"}`로 바로 지운다.
+- **동시에 2대까지**(`ondemand.max`). 넘으면 409.
+- 비용: `vc2-1c-1gb` 시간당 $0.007 + 송신(계정 대역폭 풀 안이면 0). 안 쓰면 0원.
+- 나라 추가: `control.json`의 `ondemand.regions`(`{"sg": {"region": "sgp", "city": "singapore"}}`)와 앱 `VPNRegion`에 넣는다.
 
 ## 포함된 파일
 
@@ -201,7 +199,10 @@ journalctl -u caddy -f                 # 인증서 발급·갱신
 | `setup-region.sh` | IKEv2 서버 구성(4대 공통) + 송신량 기록 |
 | `wireguard/setup-wg.sh` | WireGuard 구성 |
 | `adblock/setup-adblock.sh` | 광고 차단 DNS |
-| `control/` | 컨트롤 서버: `app.py`(API·대시보드), `nago-peer.py`(서버에서 도는 피어 관리), `setup-control.sh`, `control.example.json` |
+| `agent/` | nago-agent(사람별 광고 차단·통계·실시간 도메인·집 출구), `setup-agent.sh` |
+| `nagoing/setup-nagoing.sh` | nagoing 프록시(막힌 망 우회, TCP 443 · UDP 51821) |
+| `home/nago-home.sh` | 친구 집 PC를 출구로 쓰는 노드 |
+| `control/` | 컨트롤 서버: `app.py`(국가 API·임시 서버·대시보드), `nago-peer.py`(서버에서 도는 피어 관리), `setup-control.sh`, `control.example.json` |
 | `vultr/provision.ps1` | Vultr 서버·방화벽 그룹 만들기 |
 | `setup-strongswan.sh` | (옛) CA까지 새로 만드는 단일 서버 스크립트 |
 

@@ -12,7 +12,7 @@
 # - 안전장치: VPN 쪽에서 들어온 트래픽은 이 집의 내부망(192.168.x 등)·이 PC 자체로는 못 간다. 인터넷으로만
 # - 필요: 리눅스(커널 WireGuard·ipip), wireguard-tools, iptables, curl, python3. 데비안·우분투·라즈베리파이 OS에서 apt로 깐다
 set -euo pipefail
-DASH="https://d6hphd5k56.execute-api.ap-northeast-2.amazonaws.com/?format=json"
+DASH="https://141.164.54.197:8443/?format=json"   # 서울 Vultr 컨트롤 서버(피어 등록)
 AGENT="http://10.53.53.53:8053"
 DIR=/etc/nago-home
 IF=nagohome

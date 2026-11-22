@@ -25,19 +25,15 @@ sudo bash server/nagoing/setup-nagoing.sh
 
 둘 다 풀어서 로컬 `wg0`(127.0.0.1:51820)로 넘긴다. WireGuard 설정·키는 하나도 안 바뀐다(기존 피어 그대로).
 
-## ★ AWS 보안그룹
+## ★ Vultr 방화벽 그룹
 
-호스트 iptables의 INPUT은 ACCEPT라 따로 안 건드리지만, **AWS 보안그룹에서 다음을 열어야** 바깥에서 닿는다:
+호스트 iptables의 INPUT은 ACCEPT라 따로 안 건드리지만, **Vultr 방화벽 그룹(`nago-vpn`)에서 다음이 열려 있어야** 바깥에서 닿는다
+(`server/vultr/provision.ps1`이 연다):
 
 - inbound **TCP 443** `0.0.0.0/0`
 - inbound **UDP 51821** `0.0.0.0/0`
 
-```bash
-aws ec2 authorize-security-group-ingress --group-id <sg-id> --region <region> \
-  --ip-permissions \
-    IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges='[{CidrIp=0.0.0.0/0}]' \
-    IpProtocol=udp,FromPort=51821,ToPort=51821,IpRanges='[{CidrIp=0.0.0.0/0}]'
-```
+서울 서버의 컨트롤 API(Caddy)는 그래서 TCP 8443을 쓴다(2026-11 Vultr로 옮기면서).
 
 ## v2 키 (자동)
 
