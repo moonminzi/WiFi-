@@ -58,6 +58,12 @@ jobs:
           "$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner" verify --print-certs \
             android/app/build/outputs/apk/release/app-release.apk | grep -E "DN|SHA-256"
 
+      # 서명 키가 secrets에 없으면 서명 안 한 release APK(com.nago.vpn)를 같이 올린다 →
+      # 키를 가진 PC에서 zipalign + apksigner로 서명하면 기존 앱 위에 덮어 깔린다(비밀번호·키는 들어 있지 않음)
+      - name: Build unsigned release APK
+        if: env.HAS_KEY != 'true'
+        run: gradle -p android assembleRelease
+
       - uses: actions/upload-artifact@v4
         if: env.HAS_KEY == 'true'
         with:
@@ -92,10 +98,16 @@ jobs:
             echo
             echo "비밀번호는 들어 있지 않습니다 — 앱 settings → account에서 입력하세요. Android 13 이상, ARM 폰(arm64-v8a · armeabi-v7a)."
           } > notes.md
+          extra=""
+          if [ "$HAS_KEY" != "true" ] && [ -f android/app/build/outputs/apk/release/app-release-unsigned.apk ]; then
+            extra="NAGO-VPN-${version}-unsigned.apk"
+            cp android/app/build/outputs/apk/release/app-release-unsigned.apk "$extra"
+            echo "- \`${extra}\` — 서명 안 한 release APK. nago-release 키로 서명해야 깔린다(키 가진 사람용)" >> notes.md
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$asset" --clobber
+            gh release upload "$tag" "$asset" $extra --clobber
             gh release edit "$tag" --title "NAGO VPN Android ${version}" --notes-file notes.md
           else
-            gh release create "$tag" "$asset" --target "$GITHUB_SHA" \
+            gh release create "$tag" "$asset" $extra --target "$GITHUB_SHA" \
               --title "NAGO VPN Android ${version}" --notes-file notes.md
           fi
