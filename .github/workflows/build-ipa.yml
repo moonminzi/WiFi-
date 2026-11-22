@@ -2,8 +2,7 @@ name: Build unsigned IPA
 
 on:
   push:
-    # feat/vultr-nagoing: Vultr로 옮긴 2.1.13을 main에 합치기 전에 빌드·배포하려고 잠깐 넣음(합칠 때 빼도 됨)
-    branches: [main, feat/vultr-nagoing]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
