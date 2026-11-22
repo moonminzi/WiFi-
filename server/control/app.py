@@ -195,8 +195,10 @@ def parse_time(s):
 
 
 def describe(node):
-    """{"state", "ip", "type", "created"} — Vultr API가 없거나 안 되면 설정값(항상 켜져 있다고 봄)."""
-    base = {"state": "running", "ip": node["addr"], "type": node.get("plan", "-"), "created": None}
+    """{"state", "ip", "type", "created"} — Vultr API가 없거나 안 되면 설정값(항상 켜져 있다고 봄).
+    created는 설정의 "created"(ISO 시각, 서버를 만든 때)로 줄 수 있다. 없으면 이번 달 1일부터로 셈."""
+    base = {"state": "running", "ip": node["addr"], "type": node.get("plan", "-"),
+            "created": parse_time(node.get("created"))}
     if not vultr_enabled(node):
         return base
     try:
@@ -216,7 +218,7 @@ def describe(node):
     else:
         state = "running"
     return {"state": state, "ip": i.get("main_ip") or node["addr"], "type": i.get("plan") or base["type"],
-            "created": parse_time(i.get("date_created"))}
+            "created": parse_time(i.get("date_created")) or base["created"]}
 
 
 # ---------------------------------------------------------------- 수집

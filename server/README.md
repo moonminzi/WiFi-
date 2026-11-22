@@ -29,7 +29,9 @@
 | uk | 🇬🇧 런던 | `lhr` | `uk.nago.vpn` |
 
 - 프로토콜: IKEv2 + EAP-MSCHAPv2(사용자 `wifiscan`), WireGuard 10.9.0.0/24(udp 443 → 51820)
-- 인증서는 예전과 **같은 CA**(`ca-cert.pem`)로 서명 → 기기에 CA를 다시 설치할 필요 없음
+- 인증서는 **NAGO VPN Root CA**(`ca-cert.pem`, 2026-11 새로 만듦)로 서명. 예전 WifiScan VPN Root CA의 키는
+  AWS 서버와 함께 사라져서, 아이폰은 새 `WifiScanVPN.mobileconfig` 설치 + 신뢰가 한 번 필요하다
+  (안드로이드·윈도우는 앱에 들어 있음). CA 개인키는 레포 밖에 두고 따로 백업한다
 - **CA 개인키와 VPN 비밀번호는 이 저장소에 두지 않습니다.** 공개해도 되는 CA 인증서와 mobileconfig만 있음
 
 ## 처음부터 세우기
@@ -86,9 +88,11 @@ NAGO_KEY='<VPN 비밀번호>' ./setup-control.sh          # IP 주소로 HTTPS
 # 도메인이 있으면: NAGO_KEY=... DOMAIN=vpn.example.com ./setup-control.sh
 ```
 
-1. `/etc/nago/control.json`의 jp/us/uk `addr`(서버 IP)를 채운다. `vultr_id`, `vultr_api_key`를 넣으면
-   대시보드에서 켜기/끄기/재부팅과 정확한 상태·생성 시각을 쓴다(없어도 동작). `monthly_usd`, `bandwidth_gb`는
-   Vultr 가격표의 실제 값으로(비용 어림에만 쓰임)
+1. `/etc/nago/control.json`의 jp/us/uk `addr`(서버 IP)를 채운다. 아직 안 만든 서버는 nodes에서 빼 둔다
+   (자리표시 주소가 앱에 그대로 나감). `vultr_id`, `vultr_api_key`를 넣으면 대시보드에서 켜기/끄기/재부팅과
+   정확한 상태·생성 시각을 쓴다(없어도 동작. API 키를 쓰면 서울 IP를 Vultr API Access Control에 추가).
+   API 키 없이 쓸 때는 서버마다 `"created": "2026-11-22T14:20:25+00:00"`(Vultr의 date_created)를 넣어야
+   첫 달 비용이 1일부터로 부풀지 않는다. `monthly_usd`, `bandwidth_gb`는 Vultr 가격표 값으로
 2. 마지막에 출력된 SSH 공개키를 jp/us/uk의 `/root/.ssh/authorized_keys`에 넣는다
 3. `systemctl restart nago-control` 후 확인:
    ```bash
