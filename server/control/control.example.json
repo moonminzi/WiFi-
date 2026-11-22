@@ -8,15 +8,15 @@
   "nodes": [
     {"code": "kr", "city": "seoul", "region": "icn", "local": true,
      "addr": "서울 서버 IP", "id": "서울 서버 IP",
-     "vultr_id": "", "plan": "vc2-2c-4gb", "monthly_usd": 20, "bandwidth_gb": 3000},
+     "vultr_id": "", "plan": "vc2-2c-4gb", "monthly_usd": 20, "bandwidth_gb": 3072},
     {"code": "jp", "city": "tokyo", "region": "nrt",
      "addr": "도쿄 서버 IP", "id": "jp.nago.vpn",
-     "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2000},
+     "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2048},
     {"code": "us", "city": "seattle", "region": "sea",
      "addr": "미국 서버 IP", "id": "us.nago.vpn",
-     "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2000},
+     "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2048},
     {"code": "uk", "city": "london", "region": "lhr",
      "addr": "영국 서버 IP", "id": "uk.nago.vpn",
-     "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2000}
+     "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2048}
   ]
 }

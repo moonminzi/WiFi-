@@ -1,10 +1,11 @@
-<#
+﻿<#
 NAGO VPN - Vultr에 서버 4대(kr/jp/us/uk)와 방화벽 그룹을 만든다. 이미 있으면(같은 라벨) 건너뛴다.
 윈도우 PowerShell 5.1에서 그대로 돈다.
 
   $env:VULTR_API_KEY = '<Vultr API 키>'     # Vultr 계정 → Account → API (내 IP를 Access Control에 추가)
   .\provision.ps1 -SshPublicKey "$HOME\.ssh\id_ed25519.pub"
   .\provision.ps1 -WhatIf                    # 만들지 않고 무엇을 할지만 보기
+  .\provision.ps1 -Only kr                   # 일부만(예: 서울 먼저)
 
 만드는 것
   - 방화벽 그룹 nago-vpn: udp 500/4500(IKEv2), udp 51820/443(WireGuard), tcp 22(SSH), tcp 80/443(서울 API·인증서), icmp
@@ -14,6 +15,7 @@ NAGO VPN - Vultr에 서버 4대(kr/jp/us/uk)와 방화벽 그룹을 만든다. �
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$SshPublicKey,
+    [string[]]$Only,
     [string]$OsName = 'Ubuntu 22.04 LTS x64'
 )
 $ErrorActionPreference = 'Stop'
@@ -25,6 +27,7 @@ $Nodes = @(
     @{ code = 'us'; region = 'sea'; plan = 'vc2-1c-2gb' },
     @{ code = 'uk'; region = 'lhr'; plan = 'vc2-1c-2gb' }
 )
+if ($Only) { $Nodes = @($Nodes | Where-Object { $Only -contains $_.code }) }
 
 if (-not $env:VULTR_API_KEY) { throw 'VULTR_API_KEY 환경 변수를 먼저 설정하세요.' }
 $Api = 'https://api.vultr.com/v2'
@@ -107,7 +110,8 @@ Write-Host "`nIP 기다리는 중..."
 $deadline = (Get-Date).AddMinutes(5)
 do {
     Start-Sleep -Seconds 5
-    $mine = (Invoke-Vultr GET '/instances?per_page=500' $null).instances | Where-Object { $_.label -like 'nago-*' }
+    $mine = (Invoke-Vultr GET '/instances?per_page=500' $null).instances |
+        Where-Object { $_.label -in @('nago-kr', 'nago-jp', 'nago-us', 'nago-uk') }
     $pending = $mine | Where-Object { $_.main_ip -eq '0.0.0.0' -or -not $_.main_ip }
 } while ($pending -and (Get-Date) -lt $deadline)
 
