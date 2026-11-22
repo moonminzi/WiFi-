@@ -419,9 +419,12 @@ def build(now, descs, stats, od=None, odm=None):
                       "hsAgo": (now_s - a["hs"]) if a["hs"] > 0 else None,
                       "rx": a["rx"], "tx": a["tx"], "ep": a["ep"], "node": a["node"]})
 
+    # 최근 8시간을 빈 시간 없이 채운다(기록이 없는 시간은 0) — 앱·사이트 막대그래프가 늘 8칸으로 그려지게
     cutoff = now.replace(minute=0, second=0, microsecond=0) - datetime.timedelta(hours=7)
-    hourly = [{"h": ts.astimezone(KST).strftime("%H"), "gb": round(v / 1e9, 3)}
-              for ts, v in sorted(hourly_total.items()) if ts >= cutoff]
+    hourly = []
+    for i in range(8):
+        ts = cutoff + datetime.timedelta(hours=i)
+        hourly.append({"h": ts.astimezone(KST).strftime("%H"), "gb": round(hourly_total.get(ts, 0.0) / 1e9, 3)})
     # Vultr는 서버들 포함 대역폭을 한 계정에서 합쳐 쓴다(풀). 넘으면 GB당 단가.
     free_gb = float(sum(float(n.get("bandwidth_gb") or 0) for n in NODES) or 1000.0)
     egress_usd = max(0.0, egress_total - free_gb) * float(CFG.get("egress_usd_per_gb", 0.01))
