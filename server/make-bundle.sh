@@ -14,7 +14,8 @@
 #
 # 번들에는 비밀번호와 서버 개인키가 들어 있으니 서버에 설치한 뒤 지우고, 레포에 올리지 마세요.
 set -euo pipefail
-export MSYS_NO_PATHCONV=1   # Git Bash가 -subj "/CN=..."를 윈도우 경로로 바꾸지 않게
+# Git Bash가 -subj "/CN=..."를 윈도우 경로로 바꾸지 않게(그 인자만 뺀다. 다른 절대 경로는 그대로 바뀌어야 함)
+export MSYS2_ARG_CONV_EXCL="/CN="
 
 CA_CERT="${1:?ca-cert.pem 경로}"
 CA_KEY="${2:?ca-key.pem 경로}"
