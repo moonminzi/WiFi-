@@ -3,7 +3,7 @@
     npm pack world-atlas@2.0.2 && tar xzf world-atlas-2.0.2.tgz
     python3 tools/worldgrid.py package > WifiScan/WorldDotsData.swift
 
-PIL(Pillow)이 필요하다. 칸 값: `.` 바다, `#` 땅, `k` `j` `u` `g` 나갈 국가(kr jp us uk = VPNRegion 순서).
+PIL(Pillow)이 필요하다. 칸 값: `.` 바다, `#` 땅, 나머지 글자는 나갈 국가(LETTERS = VPNRegion 순서).
 """
 import json, math, sys
 from PIL import Image, ImageDraw
@@ -14,7 +14,11 @@ COLS = int(360 / STEP)
 ROWS = int((Y_TOP - Y_BOT) / STEP)
 SS = 4                      # 칸 하나를 SS×SS로 쪼개서 덮인 비율을 잰다
 TH = 64                     # 칸의 1/4 이상이 땅이면 점
-COUNTRIES = {"410": "k", "392": "j", "840": "u", "826": "g"}   # ISO 숫자 코드: kr jp us uk
+# ISO 숫자 코드 → 글자. 글자 순서(LETTERS)가 VPNRegion.allCases 순서다(WorldDots.letters와 같아야 함).
+COUNTRIES = {"410": "k", "392": "j", "840": "u", "826": "g",      # kr jp us uk (늘 있는 서버)
+             "702": "s", "276": "d", "250": "f", "372": "e",      # sg de fr ie (임시 서버)
+             "752": "w", "124": "c", "076": "b", "036": "a", "356": "i"}   # se ca br au in
+LETTERS = "".join(COUNTRIES.values())
 
 
 def merc(lat):
@@ -86,8 +90,12 @@ def main(geo):
 
     ctopo = json.load(open(f"{geo}/countries-50m.json"))
     carcs = decode_arcs(ctopo)
-    masks = {COUNTRIES[g["id"]]: coverage(polygons(g, carcs))
-             for g in ctopo["objects"]["countries"]["geometries"] if g.get("id") in COUNTRIES}
+    # 같은 코드가 여럿일 수 있다(036: 호주 + 애시모어 카르티에 제도) — 합쳐서 한 나라로
+    polys = {}
+    for g in ctopo["objects"]["countries"]["geometries"]:
+        if g.get("id") in COUNTRIES:
+            polys.setdefault(COUNTRIES[g["id"]], []).extend(polygons(g, carcs))
+    masks = {c: coverage(ps) for c, ps in polys.items()}
 
     lines = []
     for j in range(ROWS):

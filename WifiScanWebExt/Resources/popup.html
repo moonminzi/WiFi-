@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header><span class="dim">~/</span>nago <span class="dim">$</span><span class="cursor"></span></header>
+
+  <section>
+    <div class="row"><span class="key">NAGO Blocker</span><span id="blocker" class="dim">…</span></div>
+    <div id="blocker-note" class="note"></div>
+  </section>
+
+  <section>
+    <div class="row"><span class="key">site</span><span id="host" class="val">…</span></div>
+    <div class="row"><span class="key">hidden by me</span><span id="count" class="val">0</span></div>
+    <ul id="rules"></ul>
+    <button id="pick" class="primary">✛ hide an element</button>
+    <label class="row toggle"><span class="key">pause on this site</span><input id="pause" type="checkbox"></label>
+  </section>
+
+  <p id="err" class="note warn"></p>
+  <p class="note">banner blocker hides ad boxes everywhere in safari · "hide an element" is for what it misses</p>
+  <script src="popup.js"></script>
+</body>
+</html>

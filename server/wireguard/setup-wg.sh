@@ -1,9 +1,11 @@
 #!/bin/bash
-# 해외 서버(jp/us/uk)에 WireGuard(wg0)를 올린다. 여러 번 실행해도 안전.
+# 서버(kr/jp/us/uk)에 WireGuard(wg0)를 올린다. setup-region.sh 다음에 실행. 여러 번 실행해도 안전.
 #
-# - 서울과 같은 대역 10.9.0.0/24(서버 10.9.0.1), 포트 udp 51820 + udp 443(→51820, 잘 안 막히는 포트)
-# - 서버 키는 서버마다 따로 만든다(개인키는 서버 밖으로 안 나감). 공개키는 마지막 줄에 출력
-# - 피어 목록은 여기서 넣지 않는다. Lambda가 SSM 파라미터 /nago/wg/peers를 nago-peer sync로 맞춘다
+# - 모든 서버가 같은 대역 10.9.0.0/24(서버 10.9.0.1), 포트 udp 51820 + udp 443(→51820, 잘 안 막히는 포트)
+# - 서버 키는 서버마다 따로 만든다(개인키는 서버 밖으로 안 나감). 공개키는 마지막 줄에 출력.
+#   옛 서버의 키를 그대로 쓰려면 실행 전에 옛 wg0.conf를 /etc/wireguard/에 복사해 두면 된다
+#   (친구들 WireGuard .conf에서 Endpoint만 바꾸면 됨)
+# - 피어 목록은 여기서 넣지 않는다. 서울 컨트롤 서버가 wg-peers.json을 nago-peer sync로 맞춘다
 # - TCP 분할 가속(nago-accel)에 wg0 사용자도 포함
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -64,7 +66,7 @@ chmod +x /usr/local/sbin/nago-accel
 
 echo ">> udp 443 → 51820, 규칙 저장(wg0/가속 규칙은 빼고 저장: 부팅 때 각자 다시 넣음)"
 systemctl stop wg-quick@wg0 2>/dev/null || true
-/usr/local/sbin/nago-accel off
+/usr/local/sbin/nago-accel off || true   # 새 서버엔 NAGO_ACCEL 체인이 없어서 실패 코드가 나온다(set -e로 멈춤)
 iptables -t nat -C PREROUTING -i "$DEFIF" -p udp --dport 443 -j REDIRECT --to-ports 51820 2>/dev/null \
   || iptables -t nat -A PREROUTING -i "$DEFIF" -p udp --dport 443 -j REDIRECT --to-ports 51820
 netfilter-persistent save >/dev/null 2>&1 || true

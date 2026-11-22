@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 /// 앱 안 WireGuard용 이 폰의 키와 주소.
-/// 키는 처음 한 번 폰에서 만들어 키체인에 두고, 공개키만 서버 피어 목록에 등록한다(대시보드 Lambda).
+/// 키는 처음 한 번 폰에서 만들어 키체인에 두고, 공개키만 서버 피어 목록에 등록한다(서울 컨트롤 서버).
 /// 같은 키로 다시 등록하면 같은 주소가 오므로, 관리자가 지웠어도 다음 연결 때 저절로 다시 들어간다.
 enum WGClient {
     struct Registration {

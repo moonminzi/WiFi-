@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- net scan의 portal 검사만 평문 HTTP를 쓴다(로그인 창·HTTP 바꿔치기를 보려면 평문이어야 한다). 나머지는 모두 HTTPS -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">captive.apple.com</domain>
+    </domain-config>
+</network-security-config>

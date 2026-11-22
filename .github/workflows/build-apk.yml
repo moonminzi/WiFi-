@@ -6,9 +6,15 @@ on:
     paths: ['android/**', 'NagoTun/**', '.github/workflows/build-apk.yml']
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # 저장소 secrets에 서명 키가 있으면 release APK도 만든다(Settings → Secrets and variables → Actions)
+      HAS_KEY: ${{ secrets.NAGO_KEYSTORE_B64 != '' && secrets.NAGO_KEYSTORE_PASS != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -35,3 +41,61 @@ jobs:
         with:
           name: NagoVPN-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      # 친구 폰에 깔린 앱 위에 덮어 깔리는 release APK(nago-release 키, com.nago.vpn).
+      # 비밀번호(preset.txt)는 넣지 않는다 — 공개 레포라 artifact는 GitHub 계정이 있으면 누구나 받을 수 있다.
+      # 비밀번호를 넣은 전달용 APK는 로컬에서 만든다(README 안드로이드 앱).
+      - name: Build signed release APK
+        if: env.HAS_KEY == 'true'
+        env:
+          NAGO_KEYSTORE_B64: ${{ secrets.NAGO_KEYSTORE_B64 }}
+          NAGO_KEYSTORE_PASS: ${{ secrets.NAGO_KEYSTORE_PASS }}
+        run: |
+          echo "$NAGO_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/nago-release.jks"
+          NAGO_KEYSTORE="$RUNNER_TEMP/nago-release.jks" NAGO_KEY_ALIAS=nago gradle -p android assembleRelease
+          rm -f "$RUNNER_TEMP/nago-release.jks"
+          # 서명 확인: 인증서 SHA-256이 39:B6:BC:E6…이어야 기존 앱 위에 깔린다
+          "$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner" verify --print-certs \
+            android/app/build/outputs/apk/release/app-release.apk | grep -E "DN|SHA-256"
+
+      - uses: actions/upload-artifact@v4
+        if: env.HAS_KEY == 'true'
+        with:
+          name: NagoVPN-release-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+
+      # 버전마다 릴리스 하나(android-2.1.7 같은 태그). 같은 버전을 다시 빌드하면 그 릴리스의 APK·설명만 바꾼다.
+      # 서명 키가 있으면 서명한 release APK(기존 앱 위에 덮어 깔림), 없으면 디버그 APK(com.nago.vpn.debug, 따로 깔림).
+      # 둘 다 비밀번호는 들어 있지 않다(앱 settings에서 입력). 설명은 release-notes/android-<버전>.md가 있으면 그것 + 설치 안내.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^ *versionName = "\(.*\)"/\1/p' android/app/build.gradle.kts)
+          code=$(sed -n 's/^ *versionCode = \([0-9]*\)/\1/p' android/app/build.gradle.kts)
+          tag="android-${version}"
+          if [ "$HAS_KEY" = "true" ]; then
+            asset="NAGO-VPN-${version}.apk"
+            cp android/app/build/outputs/apk/release/app-release.apk "$asset"
+            kind="서명한 release APK(com.nago.vpn) — 예전에 깐 NAGO VPN 위에 그대로 덮어 깔립니다."
+          else
+            asset="NAGO-VPN-${version}-debug.apk"
+            cp android/app/build/outputs/apk/debug/app-debug.apk "$asset"
+            kind="디버그 APK(com.nago.vpn.debug) — 서명 키가 달라 예전 앱과 따로 깔립니다."
+          fi
+          {
+            if [ -f "release-notes/android-${version}.md" ]; then cat "release-notes/android-${version}.md"; echo; fi
+            echo "---"
+            echo "- \`${asset}\` — ${kind}"
+            echo
+            echo "NAGO VPN Android ${version} (${code}) · \`${GITHUB_SHA::7}\`"
+            echo
+            echo "비밀번호는 들어 있지 않습니다 — 앱 settings → account에서 입력하세요. Android 13 이상, ARM 폰(arm64-v8a · armeabi-v7a)."
+          } > notes.md
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset" --clobber
+            gh release edit "$tag" --title "NAGO VPN Android ${version}" --notes-file notes.md
+          else
+            gh release create "$tag" "$asset" --target "$GITHUB_SHA" \
+              --title "NAGO VPN Android ${version}" --notes-file notes.md
+          fi

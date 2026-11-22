@@ -1,0 +1,40 @@
+{
+  "listen": "127.0.0.1:8080",
+  "token": "setup-control.sh가 만들어 넣음 (대시보드 사이트 ?t=)",
+  "key_sha256": "setup-control.sh가 VPN 비밀번호로 만들어 넣음",
+  "vultr_api_key": "",
+  "ssh_key": "/etc/nago/id_ed25519",
+  "public_url": "setup-control.sh가 넣음 (https://<서울 IP>:8443, 임시 서버가 nago-agent를 받아 감)",
+  "egress_usd_per_gb": 0.01,
+  "ondemand": {
+    "max": 2,
+    "plan": "vc2-1c-1gb",
+    "os_id": 2284,
+    "hourly_usd": 0.007,
+    "firewall_group_id": "",
+    "regions": {
+      "sg": {"region": "sgp", "city": "singapore"},
+      "de": {"region": "fra", "city": "frankfurt"},
+      "fr": {"region": "cdg", "city": "paris"},
+      "se": {"region": "sto", "city": "stockholm"},
+      "ca": {"region": "yto", "city": "toronto"},
+      "br": {"region": "sao", "city": "são paulo"},
+      "au": {"region": "syd", "city": "sydney"},
+      "in": {"region": "bom", "city": "mumbai"}
+    }
+  },
+  "nodes": [
+    {"code": "kr", "city": "seoul", "region": "icn", "local": true,
+     "addr": "서울 서버 IP", "id": "서울 서버 IP",
+     "vultr_id": "", "plan": "vc2-2c-4gb", "monthly_usd": 20, "bandwidth_gb": 3072},
+    {"code": "jp", "city": "tokyo", "region": "nrt",
+     "addr": "도쿄 서버 IP", "id": "jp.nago.vpn",
+     "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2048},
+    {"code": "us", "city": "seattle", "region": "sea",
+     "addr": "미국 서버 IP", "id": "us.nago.vpn",
+     "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2048},
+    {"code": "uk", "city": "london", "region": "lhr",
+     "addr": "영국 서버 IP", "id": "uk.nago.vpn",
+     "vultr_id": "", "plan": "vc2-1c-2gb", "monthly_usd": 10, "bandwidth_gb": 2048}
+  ]
+}

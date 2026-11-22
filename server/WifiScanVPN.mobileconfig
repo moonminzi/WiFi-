@@ -12,52 +12,42 @@
 			<key>PayloadIdentifier</key>
 			<string>com.example.wifiscan.vpn.ca</string>
 			<key>PayloadUUID</key>
-			<string>78d59245-a800-4789-8d4d-945ac8cf1eaf</string>
+			<string>fdf2e5f3-0771-4e50-881c-bf2a18cfb5ab</string>
 			<key>PayloadDisplayName</key>
-			<string>WifiScan VPN Root CA</string>
+			<string>NAGO VPN Root CA</string>
 			<key>PayloadCertificateFileName</key>
 			<string>ca-cert.cer</string>
 			<key>PayloadContent</key>
 			<data>
-			MIIERTCCAq2gAwIBAgIUY/PdiIFmOrXQZ7rh0mnElXFz1XowDQYJ
-			KoZIhvcNAQELBQAwMjEdMBsG
-			A1UEAwwUV2lmaVNjYW4gVlBOIFJvb3QgQ0ExETAPBgNVBAoMCFdp
-			ZmlTY2FuMB4XDTI2MTAwNTE3
-			MDczNFoXDTM2MTAwMjE3MDczNFowMjEdMBsGA1UEAwwUV2lmaVNj
-			YW4gVlBOIFJvb3QgQ0ExETAP
-			BgNVBAoMCFdpZmlTY2FuMIIBojANBgkqhkiG9w0BAQEFAAOCAY8A
-			MIIBigKCAYEAtJJpNmNK7Lr5
-			CqJ1TnvsWVyD7UDlACYFo1HXogmm6EkxqtOf/HsWalLvVIHO2xpG
-			PW2lDj3ZsdQmiex0m/jZoEYV
-			BBC8lQHwBiJaX9x+xc3RLWy5EwRedRN8JflOh3W7ETXnCErSaNY8
-			e4032E7LPMI6nHD+l9Xbtw0K
-			SryTe/rzFB8LFHA5LOkMEalLZ/t+/nAnd98UgNg3CHOUHOQq66K6
-			x2V5/g8Cv1cAveuyCXixXfzh
-			X2jrXEZcd2dc2E0ZhrfqjYnEB0ua8Tq7TB634lMvWU4v+k7+qucI
-			LzwbvyUTnSqWXRFT6r36Qwlm
-			oSLL7qF05yKyQ1OCK9VV2wgqjBPOMzvqqIQZjTgrZVfM4/HCn1g9
-			b2mbfXSDSQ/waAH9plGL83fw
-			4ZraU8D5+/iIHc34KBVfM1hN53I1Ha7UcEZOcmy/ZK+ZMWj9jSr+
-			dEg69X/OlgSYq6BLLmf2ezSk
-			ZBKdFSKO3Qexkj1FigB8TPFx9C7dCxHihQPnsS80EiNTAgMBAAGj
-			UzBRMB0GA1UdDgQWBBSKKeKd
-			7RqL+qBdMgdab96IwkIFAzAfBgNVHSMEGDAWgBSKKeKd7RqL+qBd
-			Mgdab96IwkIFAzAPBgNVHRMB
-			Af8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBgQCD4QfjMKwHmDsf
-			jjmBb4pmwBldxAD9fj3cN32v
-			6hklcmGQdCoH/vTH/hadKqoUXVNoyswyTS6hPv1plsnBTvHvrBzl
-			nR7NwqHb3NqS0/a0qFR/cF82
-			MsxlWY1o/FnbsNqJLT//ZDxnU45mbj9WD9zZGk6eDyqYuY1pzvLW
-			3NalP0ax26X7OsNfW9mZ6mwV
-			CuLiFsFXi534pwHKy7d3wMtsO72V9uTUYAB8Ngg+QKW8j+yR9aZZ
-			wMqvnSKgEoiFcZLCBgkurOYM
-			1lLuAcPBnMOTwWvY+oTVsq6H8sK9DdCSAk8a1F99iAEm7vqxbv+m
-			mVORH/2tV7AW203qHYvizQ6l
-			C0b259+Kv+D0NpCCm4bI3TxB0AqDbvE9T3Z6hKuc8QEKxLBWkcYy
-			s000MQAoUnVKNfIHjip1qJZr
-			a9iN6NDbO/QrHRNmTUlY4a1jVTdrbOyeANs+N5FZUPexDfxxqOxY
-			TFBE1CLFlGFbERJax3mnYgvn
-			M0mWb3hmqJ9Xo9DZF5k=
+			MIIERDCCAqygAwIBAgITc7UO9t6wNAYv9M/pzjOBYC62sDANBgkq
+			hkiG9w0BAQsFADAqMRkwFwYDVQQDDBBOQUdPIFZQTiBSb290IENB
+			MQ0wCwYDVQQKDAROQUdPMB4XDTI2MTEyMjE0MzYzMVoXDTM2MTEx
+			OTE0MzYzMVowKjEZMBcGA1UEAwwQTkFHTyBWUE4gUm9vdCBDQTEN
+			MAsGA1UECgwETkFHTzCCAaIwDQYJKoZIhvcNAQEBBQADggGPADCC
+			AYoCggGBAMEOixE2QnYPNuDgmj7j64aNNvn7uA0jCNOSf7zP5Iau
+			a/7Y1cmQd4B3HhZ6zONaWMgH03EWSZK3W5ZHUQsV8tsGtz6VLXAx
+			kWxUWK/kMvfvRyAN5g4M7lfw5fNXlplfIUf8MkxWqT2hDm1nd28a
+			eKlu+IHue7BYYu4KK6l+CUtoVdIP4wV2I5x/s6vA0yD1AlPP5RWS
+			QDbKBHwKsh+i7oHxSVkmZlHECaUGs4tz5apt3GH0EJjGvHys6c+p
+			rRcILIumeD/3TcE6nNOwP9SVH5r63aJSrjDKrOraJ/eZlqHRjL53
+			+hySzP4oveEmU6fnVV6XNArNpp0HcWboOk0+y78r191rLa3afpX+
+			T9wmLdfc58EEAoOG4bHkLg1alWw9rnMTyQFRimaoWprLH0k/S0K+
+			WVBGk3wL5t4fcZucTGs5xeI4qyVV00BLLH2DGPhlHUnBWIjw3hsW
+			eb9/vkOsILjrYYmIHfksw5MV+bthA6GVp4ddmWEV7dy9zjp8G3zc
+			BQIDAQABo2MwYTAfBgNVHSMEGDAWgBRX42xWhJ0XY9lsf9+D6lBI
+			DSw2RDAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAd
+			BgNVHQ4EFgQUV+NsVoSdF2PZbH/fg+pQSA0sNkQwDQYJKoZIhvcN
+			AQELBQADggGBAD/jRpS/UF1nE9yi1bNZx/r4WVn7d1mxe5kLGjCT
+			RS8ezXv+8qDZ09QxNNmT92OrXawmRE6X3hzw9Q9rdVfitWVobVi9
+			YSzchYuQN8NNc/1kdmOFyGFaQmyTR/bNVhCzOHbWevXXhNGZeVHM
+			2ZmpLars9i0xnvoZCgHgVwgua8MXl9NBWlaoL5S3e14lq1MK9NQz
+			Je2CVtsClyE4Qvgg3VpX034qy1uOCqUGnDRyQeR3d8aEvnAGuXto
+			XyWAZO4+x5c3pO/bW2os4frxJDM5Tk6XoTdNLmvB833j6HHgDp37
+			+xor8Gg27z0/o+aR4u/7zFoU8G6znROecPG4rEPnkAGHZK0vq7AO
+			gny0Z+bGwyKUPnTWVw+5VJtDA9VOe2FRrobNccgS/UPMp6LuYck9
+			lba8ti0f2Oak9+7XjaYzVOc53U1lwV1DMpk1NJTGGyTmpGT0h7kc
+			AoY8T2FF0UkK71ux14HRM1A2vLkbyVu6NWJd//p9xfTeG3VNHdZU
+			m/N2Mg==
 			</data>
 		</dict>
 	</array>
@@ -68,12 +58,12 @@
 	<key>PayloadIdentifier</key>
 	<string>com.example.wifiscan.vpn</string>
 	<key>PayloadUUID</key>
-	<string>22bd742e-7613-47d7-911f-ca613b98f0da</string>
+	<string>15eaec8d-5451-4c25-8031-5404c6d90be5</string>
 	<key>PayloadDisplayName</key>
-	<string>WifiScan VPN CA</string>
+	<string>NAGO VPN CA</string>
 	<key>PayloadDescription</key>
-	<string>WifiScan VPN 서버(3.38.243.135)의 루트 CA 인증서. 설치 후 설정 → 일반 → 정보 → 인증서 신뢰 설정에서 신뢰를 켜세요.</string>
+	<string>NAGO VPN 서버(Vultr)의 루트 CA 인증서. 설치 후 설정 → 일반 → 정보 → 인증서 신뢰 설정에서 신뢰를 켜세요. 예전 WifiScan VPN CA 프로필은 이걸로 바뀝니다.</string>
 	<key>PayloadOrganization</key>
-	<string>WifiScan</string>
+	<string>NAGO</string>
 </dict>
 </plist>

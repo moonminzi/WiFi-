@@ -41,8 +41,10 @@ object NagoVpn {
         else IkeFqdnIdentification(id)
     }
 
+    /** [fast]: 데이터(ESP)를 AES-256-GCM(하드웨어 AES, 암호화·인증 한 번에)으로 먼저 제안한다(settings → --fast) */
     fun profile(
         context: Context, target: Target, user: String, password: String, adblock: Boolean, allowLan: Boolean,
+        fast: Boolean = true,
     ): Ikev2VpnProfile {
         // IKE(제어용): 서버 제안 aes256-sha256-modp2048과 맞춘다(안드로이드 IKE는 ECP 그룹이 없음).
         val ikeSa = IkeSaProposal.Builder()
@@ -65,7 +67,8 @@ object NagoVpn {
             .addIkeSaProposal(ikeSa)
             .build()
 
-        // 데이터(ESP): AES-256-GCM(하드웨어 AES)을 먼저, 재키 때 서버가 GCM+PFS만 받는 경우를 위해 CBC도 같이 낸다.
+        // 데이터(ESP): --fast면 AES-256-GCM(하드웨어 AES)을 먼저, 재키 때 서버가 GCM+PFS만 받는 경우를 위해 CBC도 같이 낸다.
+        // 끄면 CBC + HMAC만(예전 기본값과 같음).
         val gcm = ChildSaProposal.Builder()
             .addEncryptionAlgorithm(SaProposal.ENCRYPTION_ALGORITHM_AES_GCM_16, SaProposal.KEY_LEN_AES_256)
             .build()
@@ -74,7 +77,7 @@ object NagoVpn {
             .addIntegrityAlgorithm(SaProposal.INTEGRITY_ALGORITHM_HMAC_SHA2_256_128)
             .build()
         val child = TunnelModeChildSessionParams.Builder()
-            .addChildSaProposal(gcm)
+            .apply { if (fast) addChildSaProposal(gcm) }
             .addChildSaProposal(cbc)
             .addInternalAddressRequest(OsConstants.AF_INET)
             .addInternalDnsServerRequest(OsConstants.AF_INET)

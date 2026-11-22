@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "NAGO",
+  "description": "NAGO VPN: banner blocker status, hide any element on a site, pause per site.",
+  "version": "2.1.12",
+  "icons": {
+    "48": "icon-48.png",
+    "96": "icon-96.png",
+    "128": "icon-128.png",
+    "256": "icon-256.png",
+    "512": "icon-512.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "toolbar-16.png",
+      "19": "toolbar-19.png",
+      "32": "toolbar-32.png",
+      "38": "toolbar-38.png",
+      "48": "toolbar-48.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "js": ["content.js"],
+      "matches": ["<all_urls>"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "permissions": ["storage", "nativeMessaging", "activeTab", "tabs"],
+  "host_permissions": ["<all_urls>"]
+}

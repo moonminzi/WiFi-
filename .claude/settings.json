@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Edit",
+      "Write",
+      "Read",
+      "WebFetch",
+      "WebSearch",
+      "mcp__AWS_MCP",
+      "mcp__github",
+      "mcp__claude-code-remote"
+    ]
+  }
+}

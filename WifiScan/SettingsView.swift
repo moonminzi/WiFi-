@@ -6,12 +6,19 @@ struct SettingsView: View {
     @State private var vpn = VPNManager()
 
     @AppStorage("vpnUsername") private var username = "wifiscan"
+    @AppStorage("appearance") private var appearance: Appearance = .system
     @AppStorage("vpnProtocol") private var proto: VPNProto = .auto
     @AppStorage("wgEngine") private var wgEngine = "neptun"
-    /// NepTUN 스레드 사이 대기열 묶음 수. 작을수록 다운로드 중 핑이 낮고, 클수록 몰릴 때 덜 버린다
-    @AppStorage("wgQueue") private var wgQueue = 8
+    /// NepTUN 이벤트 루프 수. 2면 내려받기와 올리기(ACK 포함)가 다른 코어에서 돈다.
+    /// (예전 queue 설정은 iOS에서 NepTUN이 쓰지 않아 뺐다 — README)
+    @AppStorage("wgLoops") private var wgLoops = 1
     @AppStorage("vpnFastMode") private var fastMode = true
     @AppStorage("vpnAdblock") private var adblock = false
+    /// 광고 차단 강도·내 규칙(AdblockFilter). 연결 중에도 바꿀 수 있고 바로 서버에 보낸다
+    @AppStorage(AdblockFilter.Key.level) private var dnsLevel: AdblockFilter.Level = .normal
+    @AppStorage(AdblockFilter.Key.block) private var ruleBlock = ""
+    @AppStorage(AdblockFilter.Key.allow) private var ruleAllow = ""
+    @State private var newRule = ""
     @AppStorage("vpnAutoConnect") private var autoConnect: VPNAutoConnect = .off
     @AppStorage("vpnKillSwitch") private var killSwitch = false
     @AppStorage("vpnAllowLAN") private var allowLAN = true
@@ -24,6 +31,10 @@ struct SettingsView: View {
     @AppStorage(UnicornSettings.Key.blockQUIC) private var uniBlockQUIC = true
     @AppStorage(UnicornSettings.Key.handleIPv6) private var uniIPv6 = true
     @AppStorage(UnicornSettings.Key.resolver) private var uniResolver: UnicornSettings.Resolver = .cloudflare
+    // nagoing(막힌 망 우회) — nagotun(neptun) 엔진에서 켠다. 키는 NagoingSettings.Key에 모여 있다.
+    @AppStorage(NagoingSettings.Key.on) private var nagoOn = false
+    @AppStorage(NagoingSettings.Key.prefer) private var nagoPrefer: NagoingSettings.Prefer = .auto
+    @AppStorage(NagoingSettings.Key.fec) private var nagoFec = true
 
     @State private var password = ""
     /// 키체인에 비밀번호가 들어 있는지. 들어 있으면 입력칸 대신 ●●●● 로 보여 준다.
@@ -46,16 +57,32 @@ struct SettingsView: View {
             if locked {
                 StatusLine(kind: .warn, text: "locked while connected")
             }
-            accountBlock
-            protocolBlock
-            if proto == .unicorn {
-                unicornBlock
+            appearanceBlock
+            if Edition.isUser {
+                // 유저용: 고를 것만. 프로토콜·엔진은 기본값(auto · neptun)을 그대로 쓴다
+                if preset == nil {
+                    accountBlock
+                }
+                connectionBlock
+                dnsBlock
+                if adblock { adblockBlock }
+                SafariBlockerBlock()
+                logsBlock
+                aboutBlock
+            } else {
+                accountBlock
+                protocolBlock
+                if proto == .unicorn {
+                    unicornBlock
+                }
+                connectionBlock
+                dnsBlock
+                if adblock { adblockBlock }
+                SafariBlockerBlock()
+                serverBlock
+                logsBlock
+                aboutBlock
             }
-            connectionBlock
-            dnsBlock
-            serverBlock
-            logsBlock
-            aboutBlock
         }
         .task {
             await vpn.reload()
@@ -69,8 +96,16 @@ struct SettingsView: View {
             // 끄면 저장된 설정에도 바로 반영한다(다음 연결까지 기다리면 그동안 통신이 계속 막힐 수 있다).
             if !on { Task { await vpn.releaseKillSwitch() } }
         }
+        .onChange(of: nagoOn) { _, on in
+            // 끄면 저장된 nagoing 프로필도 일반 WG로 되돌린다(iOS 설정·자동 연결이 계속 nagoing으로 붙지 않게).
+            if !on { Task { await vpn.revertNagoing() } }
+        }
         .onChange(of: needsOurTunnel) { _, needed in
             if needed, !proto.usesTunnel { proto = .wireguard }
+        }
+        .onChange(of: "\(dnsLevel.rawValue)|\(ruleBlock)|\(ruleAllow)") { _, _ in
+            // 붙어 있으면 바로 서버에 보낸다(안 붙어 있으면 다음 연결 때 vpn 탭이 맞춘다)
+            Task { await NagoAgent.shared.syncFilter() }
         }
         .onDisappear(perform: savePassword)
         .sheet(isPresented: $showLogs) { LogsView(vpn: vpn) }
@@ -80,8 +115,11 @@ struct SettingsView: View {
 
     private var accountBlock: some View {
         TermBlock(label: "account") {
-            TermField(key: "user", text: $username, placeholder: "wifiscan")
-            TermDivider()
+            // 유저용은 이름을 기본값(wifiscan) 그대로 쓰고 비밀번호만 받는다
+            if !Edition.isUser {
+                TermField(key: "user", text: $username, placeholder: "wifiscan")
+                TermDivider()
+            }
             if preset != nil || savedPassword {
                 HStack(spacing: 10) {
                     Text("pw")
@@ -116,13 +154,25 @@ struct SettingsView: View {
             if proto == .auto || proto == .wireguard {
                 TermDivider()
                 row("engine") {
-                    TermChoice(options: [(label: "neptun", value: "neptun"), (label: "go", value: "go")],
+                    TermChoice(options: [(label: "NagoTun", value: "neptun"), (label: "go", value: "go")],
                                selection: $wgEngine)
                 }
                 if wgEngine == "neptun" {
                     TermDivider()
-                    row("queue") {
-                        TermChoice(options: [8, 16, 64].map { (label: "\($0)", value: $0) }, selection: $wgQueue)
+                    row("loops") {
+                        TermChoice(options: [1, 2].map { (label: "\($0)", value: $0) }, selection: $wgLoops)
+                    }
+                    TermDivider()
+                    toggle("--nagoing", isOn: $nagoOn)
+                    if nagoOn {
+                        Text("tunnels wireguard through networks that block vpns: quic-style udp first, real tls 1.3 on tcp 443 if udp is blocked. turn on only where wg won't connect — it costs some speed and battery.")
+                            .font(Term.mono(12))
+                            .foregroundStyle(Term.muted)
+                        row("prefer") {
+                            TermChoice(options: NagoingSettings.Prefer.allCases.map { (label: $0.label, value: $0) },
+                                       selection: $nagoPrefer)
+                        }
+                        toggle("--fec", isOn: $nagoFec)
                     }
                 }
             }
@@ -195,17 +245,102 @@ struct SettingsView: View {
     private var dnsBlock: some View {
         TermBlock(label: "dns") {
             toggle("--adblock", isOn: $adblock)
-            TermDivider()
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                TermField(key: "custom", text: $customDNS, placeholder: "1.1.1.1", keyboard: .numbersAndPunctuation)
-                Text(dnsValid ? "wg" : "invalid")
-                    .font(Term.mono(12))
-                    .foregroundStyle(dnsValid ? Term.muted : Term.red)
+            if !Edition.isUser {
+                TermDivider()
+                customDNSRow
             }
-            .disabled(adblock)
-            .opacity(adblock ? 0.4 : 1)
         }
         .locked(locked)
+    }
+
+    /// `// adblock` 강도 [light][normal][strict] · 내 규칙(나만 막기 ✗ · 나만 풀기 ✓). 연결 중에도 바로 바뀐다
+    private var adblockBlock: some View {
+        TermBlock(label: "adblock") {
+            VStack(alignment: .leading, spacing: 8) {
+                key("strength")
+                TermChoice(options: AdblockFilter.Level.allCases.map { (label: $0.rawValue, value: $0) },
+                           selection: $dnsLevel)
+                Text(dnsLevel.note)
+                    .font(Term.mono(11.5))
+                    .foregroundStyle(Term.muted)
+            }
+            TermDivider()
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    key("my rules")
+                    Spacer()
+                    Text("only you · this server and the next")
+                        .font(Term.mono(10.5))
+                        .foregroundStyle(Term.muted.opacity(0.8))
+                }
+                TermField(key: "domain", text: $newRule, placeholder: "ads.example.com", keyboard: .URL)
+                    .onSubmit { addRule(block: true) }
+                HStack(spacing: 8) {
+                    Button("✗ block") { addRule(block: true) }
+                        .buttonStyle(.term)
+                    Button("✓ allow") { addRule(block: false) }
+                        .buttonStyle(.term)
+                    Spacer()
+                    if !newRule.isEmpty, AdblockFilter.clean(newRule) == nil {
+                        Text("not a domain").font(Term.mono(11)).foregroundStyle(Term.red)
+                    }
+                }
+                .disabled(AdblockFilter.clean(newRule) == nil)
+                let blocked = ruleBlock.split(separator: "\n").map(String.init)
+                let allowed = ruleAllow.split(separator: "\n").map(String.init)
+                if blocked.isEmpty && allowed.isEmpty {
+                    Text("none yet · or long-press a domain in live")
+                        .font(Term.mono(11.5))
+                        .foregroundStyle(Term.muted)
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(allowed, id: \.self) { ruleRow($0, block: false) }
+                        ForEach(blocked, id: \.self) { ruleRow($0, block: true) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func ruleRow(_ domain: String, block: Bool) -> some View {
+        HStack(spacing: 8) {
+            Text(block ? "✗" : "✓").foregroundStyle(block ? Term.red : Term.green)
+            Text(domain).foregroundStyle(Term.text).lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 6)
+            Button {
+                AdblockFilter.remove(domain)
+                reloadRules()
+            } label: {
+                Text("remove").foregroundStyle(Term.muted)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("remove rule for \(domain)")
+        }
+        .font(Term.mono(12))
+    }
+
+    private func addRule(block: Bool) {
+        guard let domain = AdblockFilter.clean(newRule) else { return }
+        if block { AdblockFilter.block(domain) } else { AdblockFilter.allow(domain) }
+        newRule = ""
+        reloadRules()
+    }
+
+    /// AdblockFilter가 UserDefaults에 직접 쓰므로 @AppStorage 값을 다시 읽어 화면을 맞춘다
+    private func reloadRules() {
+        ruleBlock = AdblockFilter.list(AdblockFilter.Key.block).joined(separator: "\n")
+        ruleAllow = AdblockFilter.list(AdblockFilter.Key.allow).joined(separator: "\n")
+    }
+
+    private var customDNSRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            TermField(key: "custom", text: $customDNS, placeholder: "1.1.1.1", keyboard: .numbersAndPunctuation)
+            Text(dnsValid ? "wg" : "invalid")
+                .font(Term.mono(12))
+                .foregroundStyle(dnsValid ? Term.muted : Term.red)
+        }
+        .disabled(adblock)
+        .opacity(adblock ? 0.4 : 1)
     }
 
     private var serverBlock: some View {
@@ -217,8 +352,22 @@ struct SettingsView: View {
         }
     }
 
+    /// 마지막 몇 줄(연결 단계 · 실패 이유 — 예전 vpn 탭의 boot log)을 바로 보여 주고, 전체는 view로
     private var logsBlock: some View {
         TermBlock(label: "logs") {
+            let recent = Array(log.lines.suffix(6))
+            if !recent.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(recent.enumerated()), id: \.offset) { _, line in
+                        // "MM-dd HH:mm:ss 내용"에서 날짜는 떼고 시각부터
+                        Text(String(line.dropFirst(6)))
+                            .foregroundStyle(line.contains("✗") ? Term.red : Term.muted)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+                .font(Term.mono(10.5))
+            }
             Button {
                 showLogs = true
             } label: {
@@ -234,14 +383,24 @@ struct SettingsView: View {
 
     private var aboutBlock: some View {
         TermBlock(label: "about") {
-            Text("nago vpn \(Self.version)")
-            Text("neptun ce18515 · wireguard-go 1.0.16")
-                .foregroundStyle(Term.muted)
+            Text("nago vpn \(Self.version) · \(Edition.label)")
+            if !Edition.isUser {
+                Text("NagoTun 2.2.3-nago.1 (NepTUN ce18515) · wireguard-go 1.0.16")
+                    .foregroundStyle(Term.muted)
+            }
         }
         .font(Term.mono(13))
     }
 
     // MARK: - 조각
+
+    /// 색 모드: 기기 설정을 따르거나 다크·라이트로 고정. 연결 중에도 바꿀 수 있다(잠그지 않음)
+    private var appearanceBlock: some View {
+        TermBlock(label: "appearance") {
+            TermChoice(options: Appearance.allCases.map { (label: $0.rawValue, value: $0) }, selection: $appearance)
+        }
+        .animation(.easeInOut(duration: 0.3), value: appearance)
+    }
 
     private func key(_ text: String) -> some View {
         Text(text)

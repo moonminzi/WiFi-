@@ -11,3 +11,7 @@ Vendor/WireGuardKit/Sources/WireGuardKitGo/out/
 NagoTun/target/
 cercube-youtube-redirect/ios/App/Info.plist
 cercube-youtube-redirect/ios/Extension/Info.plist
+tools/uishots/*.xcodeproj
+tools/uishots/Info.plist
+__pycache__/
+windows/*.exe
