@@ -648,7 +648,7 @@ struct VPNView: View {
             Button("stay on \(savedRegion.rawValue)", role: .cancel) {}
         } message: { target in
             Text(target.onDemand
-                 ? "disconnects \(savedRegion.rawValue), then makes a new server in \(target.geo.city) (~1m)"
+                 ? "disconnects \(savedRegion.rawValue), then makes a new server in \(target.geo.city) (~2m)"
                  : "disconnects \(savedRegion.rawValue), then connects \(target.rawValue)")
         }
     }
@@ -659,7 +659,7 @@ struct VPNView: View {
             HStack(alignment: .center, spacing: 6) {
                 FoldChevron(folded: foldOnDemand)
                 Text("// on demand").foregroundStyle(Term.muted)
-                Text("+\(VPNRegion.allCases.filter(\.onDemand).count) · new server ~1m")
+                Text("+\(VPNRegion.allCases.filter { $0.onDemand && $0.available }.count) · new server ~2m")
                     .foregroundStyle(Term.muted.opacity(0.7))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
@@ -679,7 +679,7 @@ struct VPNView: View {
             .accessibilityLabel(foldOnDemand ? "on demand countries, collapsed" : "on demand countries")
             if !foldOnDemand {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 74), spacing: 6)], alignment: .leading, spacing: 6) {
-                    ForEach(VPNRegion.allCases.filter(\.onDemand)) { option in
+                    ForEach(VPNRegion.allCases.filter { $0.onDemand && $0.available }) { option in
                         regionChip(option)
                     }
                 }

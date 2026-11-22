@@ -3,7 +3,7 @@ import SwiftUI
 
 // MARK: - 데이터
 
-/// 통합 대시보드 API(Lambda)가 돌려주는 모든 서버 상태. 필드 이름은 서버 JSON과 같다.
+/// 통합 대시보드 API(서울 컨트롤 서버)가 돌려주는 모든 서버 상태. 필드 이름은 서버 JSON과 같다.
 struct DashData: Decodable {
     struct Node: Decodable {
         let code: String
@@ -62,7 +62,7 @@ struct DashData: Decodable {
 }
 
 enum DashAPI {
-    static let endpoint = URL(string: "https://d6hphd5k56.execute-api.ap-northeast-2.amazonaws.com/?format=json")!
+    static let endpoint = URL(string: "https://141.164.54.197:8443/?format=json")!
 
     static func fetch(key: String) async throws -> DashData {
         var request = URLRequest(url: endpoint, timeoutInterval: 30)
@@ -200,7 +200,9 @@ struct DashView: View {
         } else if node.state == "stopped" {
             Button("start") { nodeOp("start", node) }
         } else if node.state == "running" {
-            Button("reset idle (\(node.idle ?? 0)m)") { nodeOp("wake", node) }
+            if let idle = node.idle {   // 유휴 자동 중지가 있는 서버만(Vultr 고정 서버는 항상 켜 둬서 없음)
+                Button("reset idle (\(idle)m)") { nodeOp("wake", node) }
+            }
             Button("reboot") { nodeOp("reboot", node) }
             Button("stop", role: .destructive) { nodeOp("stop", node) }
         }
@@ -379,7 +381,7 @@ struct DashView: View {
                 }
                 gap
                 section {
-                    command("cw netout --hourly --tz=KST")
+                    command("netout --hourly --tz=KST")
                     hourlyLines(data.hourly)
                 }
                 gap
@@ -488,9 +490,9 @@ struct DashView: View {
 
     private func nodeDetail(_ node: DashData.Node) -> String {
         if node.isOnDemand { return Self.onDemandDetail(node, withType: true) }
-        guard node.state == "running" else { return "\(node.type) · boots on connect" }
+        guard node.state == "running" else { return "\(node.type) · \(node.state)" }
         var bits = [node.type]
-        if let up = node.up { bits.append("up " + Self.duration(up)) }
+        if let up = node.up { bits.append("up " + Self.duration(up)) } else { bits.append("ssh: no answer") }
         if let idle = node.idle, let limit = node.idleLimit { bits.append("idle \(idle)/\(limit)m") }
         bits.append("ike \(node.ike)")
         return bits.joined(separator: " · ")
@@ -557,12 +559,12 @@ struct DashView: View {
         ForEach(data.nodes, id: \.code) { node in
             line(
                 Text(node.code).foregroundStyle(Term.key)
-                    + Text(" " + pad(node.type, 10)).foregroundStyle(Term.muted)
+                    + Text(" " + pad(node.type, 12)).foregroundStyle(Term.muted)
                     + Text(String(format: "%.1fh", node.hours).leftPad(7)).foregroundStyle(Term.num)
                     + Text(String(format: "  $%.2f", node.usd)).foregroundStyle(Term.num)
             )
         }
-        line(Text(pad("egress >100GB", 22)).foregroundStyle(Term.muted)
+        line(Text(pad(String(format: "egress >%.0fGB", data.month.freeGB), 24)).foregroundStyle(Term.muted)
             + Text(String(format: "$%.2f", data.month.egressUSD)).foregroundStyle(Term.num))
         line(Text("total").foregroundStyle(Term.key) + Text(" ≈ ").foregroundStyle(Term.muted)
             + Text(String(format: "$%.2f", data.month.usd)).foregroundStyle(Term.green)
@@ -696,7 +698,7 @@ private struct NodeCard: View {
 
     private var detail: String {
         if node.isOnDemand { return DashView.onDemandDetail(node, withType: false) }
-        guard node.state == "running" else { return "boots on connect" }
+        guard node.state == "running" else { return node.state }
         var bits: [String] = []
         if let up = node.up { bits.append("up " + DashView.duration(up)) }
         bits.append("ike \(node.ike)")

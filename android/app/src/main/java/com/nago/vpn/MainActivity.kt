@@ -815,7 +815,7 @@ class MainActivity : ComponentActivity() {
             title = { Text("hop to ${target.city}?", style = Term.mono(16.sp, FontWeight.Bold, Term.text)) },
             text = {
                 Text(
-                    if (target.onDemand) "disconnects ${from.name}, then makes a new server in ${target.city} (~1m)"
+                    if (target.onDemand) "disconnects ${from.name}, then makes a new server in ${target.city} (~2m)"
                     else "disconnects ${from.name}, then connects ${target.name}",
                     style = Term.mono(12.sp, color = Term.muted),
                 )
@@ -1078,7 +1078,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun OnDemandPanel(link: LinkState, shown: VpnRegion, locked: Boolean) {
         val connected = link == LinkState.Connected
-        val regions = VpnRegion.entries.filter { it.onDemand }
+        val regions = VpnRegion.entries.filter { it.onDemand && it.available }
         Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 2.dp)) {
             OnDemandHeader(
                 ui.foldOnDemand, regions.size,

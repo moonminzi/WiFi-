@@ -112,19 +112,19 @@ data class Geo(val lat: Double, val lon: Double, val city: String) {
     }
 }
 
-/** 그 나라 AWS 리전이 있는 곳 */
+/** 그 나라 Vultr 서버가 있는 곳 */
 val VpnRegion.geo: Geo
     get() = when (this) {
         VpnRegion.kr -> Geo(37.5665, 126.978, city)
         VpnRegion.jp -> Geo(35.6762, 139.6503, city)
-        VpnRegion.us -> Geo(45.84, -119.70, city)
+        VpnRegion.us -> Geo(47.6062, -122.3321, city)
         VpnRegion.uk -> Geo(51.5074, -0.1278, city)
         VpnRegion.sg -> Geo(1.3521, 103.8198, city)
         VpnRegion.de -> Geo(50.1109, 8.6821, city)
         VpnRegion.fr -> Geo(48.8566, 2.3522, city)
         VpnRegion.ie -> Geo(53.3498, -6.2603, city)
         VpnRegion.se -> Geo(59.3293, 18.0686, city)
-        VpnRegion.ca -> Geo(45.5017, -73.5673, city)
+        VpnRegion.ca -> Geo(43.6532, -79.3832, city)
         VpnRegion.br -> Geo(-23.5505, -46.6333, city)
         VpnRegion.au -> Geo(-33.8688, 151.2093, city)
         VpnRegion.`in` -> Geo(19.0760, 72.8777, city)
@@ -848,7 +848,7 @@ class RouteMapModel {
 
     private fun drawNodes(s: DrawScope, tm: TextMeasurer, view: View, highlighted: VpnRegion?) {
         for (region in VpnRegion.entries) {
-            if (region == highlighted || origin.km(region.geo) <= 150) continue
+            if (!region.available || region == highlighted || origin.km(region.geo) <= 150) continue
             drawNode(s, tm, view, region, on = false)
         }
     }
@@ -902,7 +902,7 @@ class RouteMapModel {
     private fun drawYou(s: DrawScope, tm: TextMeasurer, view: View) = with(s) {
         val p = view.point(origin.world)
         // you 바로 밑에 가려진 나라(서울에서 kr)는 you를 눌러 고른다
-        for (region in VpnRegion.entries) if (origin.km(region.geo) <= 150) hits += region to p
+        for (region in VpnRegion.entries) if (region.available && origin.km(region.geo) <= 150) hits += region to p
         drawCircle(Term.text, 3.2f * density, p)
         drawCircle(Term.text.copy(alpha = 0.35f), 6.5f * density, p, style = Stroke(1 * density))
         when {

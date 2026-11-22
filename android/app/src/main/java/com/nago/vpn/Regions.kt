@@ -10,37 +10,42 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * 나갈 국가(iOS VPNRegion과 같다). kr jp us uk는 그 나라 AWS 리전에 서버가 하나씩 늘 있다(꺼 두었다가 켬).
- * 그 뒤 나라들은 임시 서버([onDemand]): 고르면 API가 그 리전에 서버를 새로 만들고(WireGuard만, 1분쯤),
- * 30분 안 쓰면 서버가 스스로 지워진다(한꺼번에 2대까지).
+ * 나갈 국가(iOS VPNRegion과 같다). kr jp us uk는 그 나라 Vultr 지역에 서버가 하나씩 늘 켜져 있다(2026-11 AWS에서 옮김).
+ * 그 뒤 나라들은 임시 서버([onDemand]): 고르면 API가 그 지역에 Vultr 서버를 새로 만들고(WireGuard만, 1~2분),
+ * 30분 안 쓰면 컨트롤 서버가 지운다(한꺼번에 2대까지).
+ * 순서를 바꾸거나 빼지 말 것: 지도 데이터의 나라 번호가 이 순서다.
+ * [awsRegion]은 왕복 시간을 잴 때 묻는 근처 AWS 리전(DynamoDB /ping, 계정 없이 됨)이다.
  */
-enum class VpnRegion(val city: String, val awsRegion: String) {
-    kr("seoul", "ap-northeast-2"),
-    jp("tokyo", "ap-northeast-1"),
-    us("oregon", "us-west-2"),
-    uk("london", "eu-west-2"),
-    sg("singapore", "ap-southeast-1"),
-    de("frankfurt", "eu-central-1"),
-    fr("paris", "eu-west-3"),
-    ie("dublin", "eu-west-1"),
-    se("stockholm", "eu-north-1"),
-    ca("montreal", "ca-central-1"),
-    br("são paulo", "sa-east-1"),
-    au("sydney", "ap-southeast-2"),
-    `in`("mumbai", "ap-south-1");
+enum class VpnRegion(val city: String, val vultrRegion: String, val awsRegion: String) {
+    kr("seoul", "icn", "ap-northeast-2"),
+    jp("tokyo", "nrt", "ap-northeast-1"),
+    us("seattle", "sea", "us-west-2"),
+    uk("london", "lhr", "eu-west-2"),
+    sg("singapore", "sgp", "ap-southeast-1"),
+    de("frankfurt", "fra", "eu-central-1"),
+    fr("paris", "cdg", "eu-west-3"),
+    ie("dublin", "-", "eu-west-1"),
+    se("stockholm", "sto", "eu-north-1"),
+    ca("toronto", "yto", "ca-central-1"),
+    br("são paulo", "sao", "sa-east-1"),
+    au("sydney", "syd", "ap-southeast-2"),
+    `in`("mumbai", "bom", "ap-south-1");
 
     /** 고를 때 서버를 새로 만드는 나라 */
     val onDemand: Boolean get() = this !in fixed
 
-    /** `tokyo · ap-northeast-1` 처럼 보여 줄 한 줄 */
-    val detail: String get() = "$city · $awsRegion" + if (onDemand) " · on demand" else ""
+    /** 지금 고를 수 있는 나라. 아일랜드는 Vultr에 지역이 없어서 숨긴다(지도 번호 때문에 항목은 남김) */
+    val available: Boolean get() = this != ie
 
-    /** API가 안 될 때 바로 붙어 볼 주소/ID. 고정 IP인 한국 서버만 있다. */
+    /** `tokyo · nrt` 처럼 보여 줄 한 줄 (뒤는 Vultr 지역 코드) */
+    val detail: String get() = "$city · $vultrRegion" + if (onDemand) " · on demand" else ""
+
+    /** API가 안 될 때 바로 붙어 볼 주소/ID. 한국 서버만 있다(API도 같은 서버에서 돈다). */
     val fallback: Target?
-        get() = if (this == kr) Target("3.38.243.135", "3.38.243.135", justBooted = false) else null
+        get() = if (this == kr) Target("141.164.54.197", "141.164.54.197", justBooted = false) else null
 
     companion object {
-        /** 늘 있는 서버(꺼 두었다가 켬) */
+        /** 늘 있는 서버 */
         val fixed = listOf(kr, jp, us, uk)
     }
 }
@@ -65,9 +70,9 @@ sealed class ApiError(message: String) : Exception(message) {
     object TooManyServers : ApiError("409: 2 temp servers already up · they delete after 30m idle")
 }
 
-/** 국가별 서버를 켜고 지금 주소를 받아 오는 API (AWS Lambda). 인증은 VPN 비밀번호로 한다. */
+/** 국가별 서버의 지금 주소·ID·WireGuard 키를 받아 오는 API (서울 Vultr 서버, 8443). 인증은 VPN 비밀번호로 한다. */
 object RegionApi {
-    private const val ENDPOINT = "https://wqzk1bnms3.execute-api.ap-northeast-2.amazonaws.com/region"
+    private const val ENDPOINT = "https://141.164.54.197:8443/region"
 
     private class Status(
         val state: String, val ready: Boolean, val ip: String?, val id: String,
@@ -118,7 +123,7 @@ object RegionApi {
                 progress(
                     when (s.state) {
                         "stopping" -> "${region.name}: stopping → restart…"
-                        "creating" -> "${region.name}: new server · ~1m"
+                        "creating" -> "${region.name}: new server · ~2m"
                         else -> "${region.name}: booting…"
                     }
                 )

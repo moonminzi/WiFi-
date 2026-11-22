@@ -4,7 +4,7 @@ import SwiftUI
 
 // MARK: - API
 
-/// 서울 WireGuard 피어 관리. 대시보드 Lambda에 POST하면 서울 서버에서 nago-peer가 실행된다.
+/// WireGuard 피어 관리. 서울 컨트롤 서버에 POST하면 피어 목록을 바꾸고 서버마다 nago-peer로 맞춘다.
 enum PeerAPI {
     struct Reply: Decodable {
         let ok: Bool?

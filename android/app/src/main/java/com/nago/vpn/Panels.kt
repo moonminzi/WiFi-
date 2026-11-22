@@ -498,7 +498,7 @@ fun OnDemandHeader(folded: Boolean, count: Int, trailing: @Composable () -> Unit
     ) {
         FoldChevron(folded)
         Text("// on demand", style = Term.mono(11.sp, color = Term.muted))
-        Text("+$count · new server ~1m", style = Term.mono(11.sp, color = Term.muted.copy(alpha = 0.7f)), maxLines = 1,
+        Text("+$count · new server ~2m", style = Term.mono(11.sp, color = Term.muted.copy(alpha = 0.7f)), maxLines = 1,
             overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
         Spacer(Modifier.weight(1f))
         trailing()

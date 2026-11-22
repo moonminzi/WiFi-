@@ -29,11 +29,11 @@ enum class VpnProto(val label: String) {
 
 /**
  * 앱 안 WireGuard(wireguard-android의 GoBackend).
- * 이 폰의 키는 처음 한 번 만들어 앱 저장소에 두고, 공개키만 서버 피어 목록에 등록한다(대시보드 Lambda).
+ * 이 폰의 키는 처음 한 번 만들어 앱 저장소에 두고, 공개키만 서버 피어 목록에 등록한다(서울 컨트롤 서버).
  * 같은 키로 다시 등록하면 같은 주소가 오므로, 관리자가 지웠어도 다음 연결 때 저절로 다시 들어간다.
  */
 object WgVpn {
-    private const val DASH = "https://d6hphd5k56.execute-api.ap-northeast-2.amazonaws.com/?format=json"
+    private const val DASH = "https://141.164.54.197:8443/?format=json"
 
     val state = MutableStateFlow(Tunnel.State.DOWN)
 
