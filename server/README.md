@@ -228,6 +228,8 @@ p12는 **옛(legacy) 형식**이어야 한다(키체인에서 내보낸 Apple p1
 - `<id>`는 추측할 수 없는 무작위 12자. 기간이 지나면 링크가 404가 되고 파일을 지운다(5분마다 정리)
 - 한도: 올려 둔 파일 합계 25GB, 서버 디스크는 늘 8GB 남김(`nago-share.service`의 `SHARE_MAX_GB` · `SHARE_MIN_FREE_GB`)
 - 이어받기(Range) 지원. 누가 받아 가면 폰 알림(같은 파일은 10분에 한 번)
+- QR: 목록의 `QR` 버튼, 받기 페이지 아래(컴퓨터에서 연 링크를 폰으로). `qrencode` 패키지로 만든다
+- 받기 속도는 모든 다운로드 합계 300Mbps까지(`SHARE_RATE_MBPS`): 같은 서버의 VPN이 회선을 먼저 쓰게. CPU·디스크도 VPN보다 뒤(`Nice`·`IOSchedulingClass=idle`)
 - 파일: `/var/lib/nago-share/<id>/{meta.json,data}`, 서버 `/opt/nago-share/share.py`(127.0.0.1:8091), Caddy가 `/share*`를 넘긴다
 
 ```bash

@@ -23,6 +23,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -44,10 +45,45 @@ DEFAULT_HOURS = 72
 PENDING_SEC = 6 * 3600                   # 만들어 놓고 다 못 올린 항목은 이만큼 지나면 지운다
 NOTIFY_EVERY = 600                       # 같은 파일 받기 알림은 10분에 한 번만
 ID_RE = re.compile(r"[A-Za-z0-9_-]{12}")
+# 받기 속도 한도(모든 다운로드 합계, Mbps). 같은 서버의 VPN이 먼저 쓰도록 회선을 다 쓰지 않는다. 0이면 제한 없음
+RATE_MBPS = float(os.environ.get("SHARE_RATE_MBPS", "300"))
+QRENCODE = os.environ.get("QRENCODE", "/usr/bin/qrencode")
 
 _cache = {}
 _lock = threading.Lock()
 _notified = {}
+
+
+class Throttle:
+    """모든 다운로드가 함께 쓰는 속도 제한(토큰 버킷). take(n)은 n바이트를 보내도 될 때까지 기다린다."""
+
+    def __init__(self, mbps):
+        self.rate = mbps * 1e6 / 8 if mbps > 0 else 0
+        self.next = 0.0
+        self.lock = threading.Lock()
+
+    def take(self, n):
+        if not self.rate:
+            return
+        with self.lock:
+            now = time.monotonic()
+            self.next = max(self.next, now - 0.5) + n / self.rate     # 0.5초어치는 몰아서 보낼 수 있다
+            wait = self.next - now
+        if wait > 0:
+            time.sleep(wait)
+
+
+THROTTLE = Throttle(RATE_MBPS)
+
+
+def qr_svg(text):
+    """qrencode(우분투 패키지)로 QR SVG. 없으면 None"""
+    try:
+        r = subprocess.run([QRENCODE, "-t", "SVG", "-l", "M", "-m", "2", "-s", "8", "--rle", "-o", "-", text],
+                           capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 and r.stdout.lstrip().startswith(b"<") else None
 
 
 class Failure(Exception):
@@ -317,7 +353,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        if "Cache-Control" not in (extra or {}):
+            self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         for k, v in (extra or {}).items():
@@ -361,6 +398,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, ADMIN.replace("{{P}}", PREFIX), "text/html")
             if path.startswith(PREFIX + "/d/"):
                 return self.download(path[len(PREFIX + "/d/"):])
+            if path.startswith(PREFIX + "/qr/") and path.endswith(".svg"):
+                return self.qr(path[len(PREFIX + "/qr/"):-4])
             return self.send(404, {"error": "not found"})
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -468,11 +507,22 @@ class Handler(BaseHTTPRequestHandler):
             f.seek(start)
             left = end - start + 1
             while left > 0:
-                chunk = f.read(min(1 << 20, left))
+                chunk = f.read(min(256 << 10, left))
                 if not chunk:
                     break
+                THROTTLE.take(len(chunk))
                 self.wfile.write(chunk)
                 left -= len(chunk)
+
+    def qr(self, fid):
+        """받기 페이지 주소의 QR(SVG). 링크와 같은 조건(있고 기간 안)일 때만"""
+        m = read_meta(fid) if ID_RE.fullmatch(fid) else None
+        if not m or m["state"] != "ready" or time.time() > m["expires"]:
+            return self.send(404, {"error": "not found"})
+        svg = qr_svg(link_of(m))
+        if not svg:
+            return self.send(503, {"error": "qrencode missing"})
+        return self.send(200, svg, "image/svg+xml", {"Cache-Control": "private, max-age=3600"})
 
     def count(self, m):
         with _lock:
@@ -516,6 +566,8 @@ button:disabled{opacity:.35;cursor:default}
 .acts{display:flex;gap:6px;flex-wrap:wrap}.acts button{padding:6px 10px;font-size:12px}
 #log{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
 .bar{height:8px;background:var(--edge);border-radius:4px;overflow:hidden}.bar i{display:block;height:100%;width:0;background:var(--ok);transition:width .4s}
+.qrbox{align-items:center;text-align:center}
+.qr{display:block;width:200px;height:200px;background:#fff;border-radius:8px;padding:6px;image-rendering:pixelated}
 @media (prefers-reduced-motion:reduce){.cur{animation:none}}
 </style>"""
 
@@ -533,9 +585,13 @@ def landing(m, now):
 <div class="dim">%s · 남은 기간 %s</div>
 <a class="btn primary" href="%s" download>받기</a>
 <div class="dim">끊기면 다시 누르면 이어받아요(브라우저가 지원하면). 기간이 지나면 링크가 사라져요.</div>
-</div></section></main></body></html>""") % (
+</div></section>
+<section><div class="label">// 폰으로 받기</div><div class="box qrbox">
+<img class="qr" src="%s/qr/%s.svg" alt="이 페이지 주소 QR 코드" width="200" height="200">
+<div class="dim">컴퓨터에서 열었다면 폰 카메라로 찍으세요.</div></div></section>
+</main></body></html>""") % (
         STYLE, name, gb(m["size"]), left_text(int(m["expires"] - now)), name, name, gb(m["size"]),
-        left_text(int(m["expires"] - now)), esc(href))
+        left_text(int(m["expires"] - now)), esc(href), PREFIX, m["id"])
 
 
 GONE = """<!doctype html><html lang="ko"><head><meta charset="utf-8">{{STYLE}}<meta name="robots" content="noindex">
@@ -591,6 +647,12 @@ function row(f) {
   const b = (label, fn) => { const x = document.createElement("button"); x.textContent = label; x.onclick = () => fn(x); acts.append(x); };
   b("링크 복사", x => copy(f.link, x));
   if (navigator.share) b("공유", () => navigator.share({ title: f.name, url: f.link }).catch(() => {}));
+  let qr = null;
+  b("QR", x => {
+    if (qr) { qr.remove(); qr = null; x.textContent = "QR"; return; }
+    qr = document.createElement("img"); qr.className = "qr"; qr.alt = f.name + " 받기 링크 QR 코드";
+    qr.width = qr.height = 200; qr.src = P + "/qr/" + f.id + ".svg"; d.append(qr); x.textContent = "QR 닫기";
+  });
   b("+7일", async () => { await api("/api/extend", { id: f.id, hours: 168 }).catch(e => alert(e.message)); load(); });
   b("삭제", async () => { if (!confirm(f.name + " 을(를) 지울까요? 링크도 바로 막혀요.")) return; await api("/api/delete", { id: f.id }).catch(e => alert(e.message)); load(); });
   d.append(name, info, link, acts);
@@ -635,7 +697,7 @@ $("#go").onclick = async () => {
   } catch (e) { bar(null); log("✗ " + e.message, "err"); }
   $("#go").disabled = false; load();
 };
-load(); setInterval(load, 30000);
+load(); setInterval(() => { if (!document.querySelector("#list .qr")) load(); }, 30000);   // QR을 펼쳐 둔 동안은 새로 그리지 않는다
 </script></body></html>""".replace("{{STYLE}}", STYLE)
 
 
