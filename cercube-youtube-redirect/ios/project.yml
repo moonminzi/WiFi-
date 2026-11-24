@@ -1,0 +1,86 @@
+name: YTRedirect
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    # 공유 테마(WifiScan/Theme.swift)가 iOS 17 API(Text.foregroundStyle 등)를 쓴다 — NAGO VPN·DL과 같은 17.0
+    iOS: "17.0"
+settings:
+  base:
+    DEVELOPMENT_TEAM: ""          # ← 본인 Team ID
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+targets:
+  # 껍데기 앱: 설치 안내 화면만 있다. 실제 일은 아래 Safari 확장이 한다.
+  YTRedirect:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      # NAGO VPN·DL과 같은 터미널 테마·글꼴(JetBrains Mono, SIL OFL 1.1)
+      - path: ../../WifiScan/Theme.swift
+      - path: ../../WifiScan/Fonts
+    scheme: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.ytredirect   # ← 본인 것으로 변경
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+    dependencies:
+      - target: YTRedirectExtension
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: YT 리다이렉트
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UIAppFonts:
+          - JetBrainsMono-Regular.ttf
+          - JetBrainsMono-SemiBold.ttf
+          - JetBrainsMono-Bold.ttf
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        ITSAppUsesNonExemptEncryption: false
+
+  # Safari 웹 확장. 앱의 PlugIns에 들어간다.
+  # 웹 확장 파일은 상위 폴더(크롬/파이어폭스용과 같은 파일)를 그대로 묶는다.
+  YTRedirectExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Extension
+      - path: ../manifest.json
+        buildPhase: resources
+      - path: ../content.js
+        buildPhase: resources
+      - path: ../popup.html
+        buildPhase: resources
+      - path: ../popup.css
+        buildPhase: resources
+      - path: ../popup.js
+        buildPhase: resources
+      # manifest가 icons/icon-*.png 경로로 찾으니 폴더째(folder reference) 넣는다
+      - path: ../icons
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.ytredirect.extension   # 앱 번들 ID + .extension
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+    info:
+      path: Extension/Info.plist
+      properties:
+        CFBundleDisplayName: YT 리다이렉트
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.Safari.web-extension
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SafariWebExtensionHandler

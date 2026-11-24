@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Cercube 유튜브 앱 리다이렉트",
+  "version": "1.0.0",
+  "description": "유튜브 링크를 눌렀을 때 Safari(또는 브라우저) 대신 유튜브(Cercube) 앱으로 바로 열어줍니다.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "유튜브 앱 리다이렉트",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "permissions": ["storage", "activeTab"],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.youtube.com/*",
+        "*://youtu.be/*"
+      ],
+      "exclude_matches": [
+        "*://music.youtube.com/*",
+        "*://*.youtube.com/embed/*",
+        "*://*.youtube.com/live_chat*",
+        "*://*.youtube.com/live_chat_replay*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "cercube-youtube-redirect@moonminzi"
+    }
+  }
+}
