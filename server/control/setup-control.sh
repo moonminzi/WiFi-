@@ -139,6 +139,12 @@ ${TLS}
             flush_interval -1
         }
     }
+    # 파일 공유(share/setup-share.sh, 127.0.0.1:8091). 큰 파일이라 위와 같이 그대로 넘긴다
+    handle /share* {
+        reverse_proxy 127.0.0.1:8091 {
+            flush_interval -1
+        }
+    }
     handle {
         encode gzip
         reverse_proxy 127.0.0.1:8080

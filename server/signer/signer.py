@@ -105,6 +105,29 @@ def same(a, b):
     return hmac.compare_digest(hashlib.sha256(a.encode()).digest(), hashlib.sha256(b.encode()).digest())
 
 
+def notify(title, message, priority=3, tags=None):
+    """폰 알림(alert/alert.py와 같은 ntfy 설정 /etc/nago/alert.json). 설정이 없거나 실패해도 조용히 넘어간다."""
+    def go():
+        try:
+            with open(os.environ.get("NAGO_ALERT", "/etc/nago/alert.json"), encoding="utf-8") as f:
+                cfg = json.load(f)
+            url = (cfg.get("ntfy") or "").rstrip("/")
+            if not url:
+                return
+            base, topic = url.rsplit("/", 1)
+            body = {"topic": topic, "title": title, "message": message, "priority": priority, "tags": tags or []}
+            req = urllib.request.Request(base + "/", data=json.dumps(body).encode(), method="POST",
+                                         headers={"Content-Type": "application/json"})
+            if cfg.get("ntfy_token"):
+                req.add_header("Authorization", "Bearer " + cfg["ntfy_token"])
+            urllib.request.urlopen(req, timeout=10).read()
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log("notify:", repr(e))
+    threading.Thread(target=go, daemon=True).start()
+
+
 # MARK: - 서명된 링크 (설치기·업로드는 토큰 헤더를 못 붙이므로 경로+만료에 HMAC)
 
 def link_sig(path, exp):
@@ -786,12 +809,15 @@ def run_job(job, source, mode, cert):
         result.update(source=source, size=size, seconds=round(time.time() - t0, 1))
         prog.finish(status="done", phase="done", result=result, eta=None)
         log("job %s done: %s %s in %.0fs" % (job[:8], meta["bundle_id"], meta["version"], time.time() - t0))
+        notify("✅ 서명 완료", "%s %s (%s) · %.0f초\nsigner 페이지에서 설치하세요." % (
+            meta["title"], meta["version"], meta["build"], time.time() - t0), 3, ["white_check_mark"])
     except Exception as e:
         log("job %s failed: %r" % (job[:8], e))
         if not isinstance(e, Failure):
             traceback.print_exc()
         msg = str(e) if isinstance(e, Failure) else "%s: %s" % (type(e).__name__, str(e)[:300])
         prog.finish(status="error", error=msg, eta=None)
+        notify("✗ 서명 실패", msg[:300], 4, ["x"])
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

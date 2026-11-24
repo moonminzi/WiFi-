@@ -218,6 +218,42 @@ cd /root/server/signer && ./setup-signer.sh       # rcodesign이 없으면 cargo
 
 인증서 추가·교체는 위 json 파일을 넣거나 바꾸면 끝(서버 재시작 필요 없음).
 p12는 **옛(legacy) 형식**이어야 한다(키체인에서 내보낸 Apple p12는 그렇다). OpenSSL 3로 만들면 `-legacy`를 붙인다.
+서명이 끝나거나 실패하면 폰 알림(아래 NAGO alert 설정이 있을 때)을 보낸다.
+
+## NAGO share (친구에게 기간 한정 다운로드 링크)
+
+서울 서버에 파일을 올리고 `https://<서울 IP>:8443/share/d/<id>` 링크를 보내면, 받는 사람은 토큰 없이 받기 버튼으로 받는다.
+
+- 관리 페이지: `https://<서울 IP>:8443/share/?t=<대시보드 토큰>` — 올리기(여러 개, 기간 1시간·1일·3일·7일·30일), 목록, 링크 복사·공유, +7일, 삭제
+- `<id>`는 추측할 수 없는 무작위 12자. 기간이 지나면 링크가 404가 되고 파일을 지운다(5분마다 정리)
+- 한도: 올려 둔 파일 합계 25GB, 서버 디스크는 늘 8GB 남김(`nago-share.service`의 `SHARE_MAX_GB` · `SHARE_MIN_FREE_GB`)
+- 이어받기(Range) 지원. 누가 받아 가면 폰 알림(같은 파일은 10분에 한 번)
+- 파일: `/var/lib/nago-share/<id>/{meta.json,data}`, 서버 `/opt/nago-share/share.py`(127.0.0.1:8091), Caddy가 `/share*`를 넘긴다
+
+```bash
+cd /root/server/control && ./setup-control.sh     # Caddyfile에 /share 경로(한 번)
+cd /root/server/share && ./setup-share.sh
+```
+
+## NAGO alert (폰 알림, ntfy)
+
+1분마다 상태를 보고 일이 생길 때만 ntfy 앱으로 알린다. 같은 일은 한 번만, 나아지면 "복구"를 한 번.
+
+- 서울(`check`): 서비스 멈춤 · 도쿄 서버 문제 · 임시 서버 켜짐/꺼짐 · 기기 VPN 접속(30분 만에 다시 붙을 때) ·
+  한 시간 트래픽 20GB 넘음 · 이번 달 예상 요금 $40 넘음 · 무료 전송량 80% · Vultr 크레딧 $10 아래 ·
+  signer 인증서 만료 30/7/1/0일 전 · 디스크 85% · 메모리 부족 · 재부팅 · 매일 9시 요약
+- 도쿄(`watch`): 서울 `https://<서울 IP>:8443/healthz`가 3분 연속 안 되면 알림(서울이 죽으면 서울은 스스로 못 알리므로)
+- signer(서명 완료·실패)와 share(받아 감)도 같은 설정으로 알린다
+- 설정 `/etc/nago/alert.json`: `{"ntfy": "https://ntfy.sh/<토픽>", "hourly_gb": 20, "budget_usd": 40, "credit_usd": 10, "disk_pct": 85, "peer_online": true, "digest_hour": 9}`.
+  **토픽 이름을 아는 사람은 알림을 볼 수 있으니 레포에 넣지 않는다.** 알림 내용에는 IP·토큰을 넣지 않는다
+- 폰: ntfy 앱 → `+` → 토픽 이름 입력(서버 ntfy.sh)
+
+```bash
+cd /root/server/alert && ./setup-alert.sh check                 # 서울. 설정이 없으면 무작위 토픽으로 만든다
+# 도쿄: 서울의 /etc/nago/alert.json을 /etc/nago/에 복사한 뒤
+./setup-alert.sh watch https://<서울 IP>:8443/healthz
+/opt/nago-alert/alert.py test                                    # 테스트 알림
+```
 
 ## 포함된 파일
 
@@ -233,6 +269,8 @@ p12는 **옛(legacy) 형식**이어야 한다(키체인에서 내보낸 Apple p1
 | `home/nago-home.sh` | 친구 집 PC를 출구로 쓰는 노드 |
 | `control/` | 컨트롤 서버: `app.py`(국가 API·임시 서버·대시보드), `nago-peer.py`(서버에서 도는 피어 관리), `setup-control.sh`, `control.example.json` |
 | `signer/` | NAGO signer: `signer.py`(IPA 서명·OTA 설치 서버), `setup-signer.sh` |
+| `share/` | NAGO share: `share.py`(기간 한정 다운로드 링크 서버), `setup-share.sh` |
+| `alert/` | NAGO alert: `alert.py`(상태 감시·ntfy 알림), `setup-alert.sh` (`check` 서울 / `watch` 도쿄) |
 | `vultr/provision.ps1` | Vultr 서버·방화벽 그룹 만들기 |
 | `setup-strongswan.sh` | (옛) CA까지 새로 만드는 단일 서버 스크립트 |
 
