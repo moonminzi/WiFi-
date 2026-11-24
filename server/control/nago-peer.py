@@ -10,7 +10,8 @@ JSON op:
     reset   {ip}                사용량 카운터만 0으로(키·설정 그대로)
     remove  {ip}                영구 삭제(wg0.conf에서도 지움)
     rename  {ip, name}
-    flags   {ip, adblock}       피어별 스위치. adblock을 켜면 그 피어의 DNS(53)를 차단 DNS로 돌린다
+    flags   {ip, adblock}       피어별 스위치. adblock을 켜면 그 피어의 DNS(53)를 차단 DNS로 돌리고
+                                  암호화 DNS(853)는 거절해서 보통 DNS로 내려오게 한다
     sync    {peers: [{pub, ip, adblock}]}  피어 목록(컨트롤 서버의 wg-peers.json)에 맞춘다. 바뀐 것만
                                   건드려서 붙어 있는 사람은 끊기지 않는다
 
@@ -32,6 +33,7 @@ FLAGS = os.environ.get("NAGO_WG_FLAGS", "/etc/wireguard/nago-flags.json")
 # setup-adblock.sh가 올리는 VPN 안쪽 전용 차단 DNS(dummy 인터페이스 nago-dns)
 ADBLOCK_DNS = os.environ.get("NAGO_ADBLOCK_DNS", "10.53.53.53")
 DNS_CHAIN = "NAGO_DNS"
+DOT_CHAIN = "NAGO_DOT"     # filter 테이블: adblock 피어의 암호화 DNS(853) 거절
 BOOT_UNIT_NAME = "nago-dns-peers.service"
 BOOT_UNIT = "/etc/systemd/system/" + BOOT_UNIT_NAME
 RUN = os.environ.get("NAGO_WG_RUN", "/run")
@@ -123,9 +125,9 @@ def as_bool(value):
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
-def ipt(*args, soft=False):
-    """iptables nat 테이블. soft면 실패해도 넘어간다(이미 있는 체인 만들기, 없는 규칙 지우기 등)."""
-    r = subprocess.run(["iptables", "-t", "nat", *args], capture_output=True, text=True)
+def ipt(*args, soft=False, table="nat"):
+    """iptables(기본 nat 테이블). soft면 실패해도 넘어간다(이미 있는 체인 만들기, 없는 규칙 지우기 등)."""
+    r = subprocess.run(["iptables", "-t", table, *args], capture_output=True, text=True)
     if r.returncode != 0 and not soft:
         raise Fail("iptables %s: %s" % (" ".join(args[:2]), r.stderr.strip()[:200]))
     return r.returncode == 0
@@ -155,6 +157,19 @@ def apply_dns(flags=None):
             ipt("-D", *rule, soft=True)
         ipt("-I", *rule)
 
+    # 암호화 DNS(DoT·DoQ, 853)는 53으로 오지 않아 위 DNAT을 비켜 간다(안드로이드 '개인 DNS 자동'이
+    # VPN의 DNS 1.1.1.1에 853으로 붙는다). adblock 피어의 853은 바로 거절해서 폰이 보통 DNS(53)로
+    # 내려오게 한다. TCP는 가속(NAGO_ACCEL)이 로컬 프록시로 돌려 INPUT으로 오므로 원래 목적지 포트
+    # (conntrack)로 보고, INPUT·FORWARD 둘 다에 건다. REJECT는 filter 테이블에서만 된다.
+    ipt("-N", DOT_CHAIN, soft=True, table="filter")
+    ipt("-F", DOT_CHAIN, table="filter")
+    for hook in ("INPUT", "FORWARD"):
+        rule = [hook, "-i", IFACE, "-m", "conntrack", "--ctorigdstport", "853", "-j", DOT_CHAIN]
+        while ipt("-C", *rule, soft=True, table="filter"):
+            ipt("-D", *rule, soft=True, table="filter")
+        if wanted:
+            ipt("-I", *rule, table="filter")
+
     if not wanted:
         return []
     if not adblock_ready():
@@ -165,6 +180,16 @@ def apply_dns(flags=None):
         # 포트를 적으면 iptables가 -p를 요구한다(Need TCP, UDP ... with port specification).
         # 이 체인엔 53번만 들어오니 주소만 바꾸면 포트는 53 그대로 간다.
         ipt("-A", DNS_CHAIN, "-s", ip + "/32", "-j", "DNAT", "--to-destination", ADBLOCK_DNS)
+        ipt("-A", DOT_CHAIN, "-s", ip + "/32", "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset",
+            table="filter")
+        ipt("-A", DOT_CHAIN, "-s", ip + "/32", "-p", "udp", "-j", "REJECT", table="filter")
+        # 스위치를 켜기 전에 열린 DNS 흐름(conntrack)은 NAT를 다시 보지 않는다 → 지워서 새로 걸리게
+        for proto, port in (("udp", "53"), ("tcp", "53"), ("tcp", "853"), ("udp", "853")):
+            try:
+                subprocess.run(["conntrack", "-D", "-s", ip, "-p", proto, "--dport", port],
+                               capture_output=True, text=True)
+            except FileNotFoundError:   # conntrack 도구가 없으면 기존 흐름은 저절로 끝날 때까지 둔다
+                break
     return wanted
 
 
