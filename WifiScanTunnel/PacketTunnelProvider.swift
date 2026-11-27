@@ -1,3 +1,4 @@
+import Network
 import NetworkExtension
 import WireGuardKit
 import os
@@ -34,6 +35,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// nagoing(막힌 망 우회)으로 떴을 때의 클라이언트 프록시. WG(NepTUN)는 로컬 포트로 이 프록시에 붙는다.
     private var nagoing: NagoingProxy?
     private var nagoingState: NagoingState?
+    /// Wi-Fi(유선 포함)인지 보는 경로 감시. 큰 터널 MTU(mtuWiFi)는 Wi-Fi에서만 쓴다.
+    private var pathMonitor: NWPathMonitor?
+    private var onWiFi = false
+    /// 첫 경로가 오면(또는 1초가 지나면) 한 번 부를 일. 메인 액터에서만 만진다.
+    private var pathReady: (@MainActor () -> Void)?
+    /// 지금 utun에 적용된 MTU
+    private var appliedMTU = 0
 
     /// nagoing으로 뜰 때의 실제 서버 주소·포트·설정. 서버가 꺼졌다 켜져 IP가 바뀌면 프록시만 다시 띄운다.
     private struct NagoingState {
@@ -53,6 +61,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         var endpoint: String        // ip:port
         let dns: [String]
         let mtu: Int
+        /// Wi-Fi(유선)에서 쓸 큰 터널 MTU(settings → wi-fi mtu). 0이거나 mtu 이하면 끔.
+        /// 바깥 UDP가 IP 조각 2~3개로 나뉘어 가서, 폰이 처리할 패킷·시스템 호출·ACK 수가 1/2~1/3로 준다.
+        let mtuWiFi: Int
         let engine: String
         /// NepTUN 이벤트 루프 수(설정 탭 loops). 예전 설정(queue만 있음)이면 2
         let loops: Int
@@ -72,6 +83,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             self.endpoint = endpoint
             self.dns = (p["dns"] as? [String]) ?? ["1.1.1.1"]
             self.mtu = (p["mtu"] as? Int) ?? 1420
+            self.mtuWiFi = (p["mtuWiFi"] as? Int) ?? 0
             self.engine = (p["engine"] as? String) ?? "neptun"
             self.loops = (p["loops"] as? Int) ?? 1
             self.region = p["region"] as? String
@@ -164,6 +176,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         watchdog = nil
         sampler?.cancel()
         sampler = nil
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        pathReady = nil
         journal.add("stop · reason \(reason.rawValue)")
         if let unicorn {
             self.unicorn = nil
@@ -315,7 +330,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                                     localPort: localPort, settings: ns)
         journal.add("start nagoing · \(ns.summary) → \(serverIP):\(udpPort)")
         // 먼저 네트워크 설정을 적용(utun MTU), 그다음 프록시 → 엔진 순서로 띄운다.
-        setTunnelNetworkSettings(Self.networkSettings(s)) { [weak self] error in
+        // nagoing은 데이터그램을 2048바이트까지만 실어서 큰 MTU를 쓰지 않는다(s.mtu = 1380 그대로).
+        appliedMTU = s.mtu
+        setTunnelNetworkSettings(Self.networkSettings(s, mtu: s.mtu)) { [weak self] error in
             Task { @MainActor in
                 guard let self else { return }
                 if let error {
@@ -356,14 +373,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     @MainActor
     private func startNeptun(_ s: Settings, completionHandler: @escaping (Error?) -> Void) {
+        // 큰 MTU를 쓸지 정하려면 지금 Wi-Fi인지 먼저 알아야 한다(1초 안에 모르면 1420으로 뜬다).
+        waitForPath { [weak self] in
+            self?.startNeptunEngine(s, completionHandler: completionHandler)
+        }
+    }
+
+    @MainActor
+    private func startNeptunEngine(_ s: Settings, completionHandler: @escaping (Error?) -> Void) {
+        let mtu = tunnelMTU(s)
+        appliedMTU = mtu
         // 네트워크 설정을 먼저 적용해야 utun MTU가 맞춰지고, 그 뒤에 엔진이 MTU를 읽는다.
-        setTunnelNetworkSettings(Self.networkSettings(s)) { [weak self] error in
+        setTunnelNetworkSettings(Self.networkSettings(s, mtu: mtu)) { [weak self] error in
             Task { @MainActor in
                 guard let self else { return }
                 if let error {
                     completionHandler(error)
                     return
                 }
+                self.journal.add("mtu \(mtu)" + (mtu != s.mtu ? " · wi-fi jumbo" : (self.onWiFi ? "" : " · not wi-fi")))
                 guard let fd = NeptunEngine.utunFileDescriptor() else {
                     completionHandler(NSError(domain: "nago.neptun", code: 2,
                                               userInfo: [NSLocalizedDescriptionKey: "NagoTun: utun not found"]))
@@ -383,9 +411,77 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    // MARK: 큰 터널 MTU (Wi-Fi)
+
+    /// 지금 쓸 터널 MTU. 큰 MTU는 NagoTun + Wi-Fi(유선)일 때만 쓴다.
+    /// 바깥 UDP가 IP 조각으로 나뉘어 가는데, 셀룰러(특히 IPv6망 464XLAT)는 조각을 버리는 경우가 많다.
+    /// (go 엔진은 그대로 1420. nagoing은 startNagoing이 따로 s.mtu를 쓴다.)
+    private func tunnelMTU(_ s: Settings) -> Int {
+        guard s.engine != "go", s.mtuWiFi > s.mtu, onWiFi else { return s.mtu }
+        return s.mtuWiFi
+    }
+
+    /// 경로 감시를 (처음이면) 켜고, 첫 경로가 오거나 1초가 지나면 ready를 한 번 부른다.
+    /// 그 뒤로 Wi-Fi ↔ 셀룰러가 바뀔 때마다 retuneMTU가 utun MTU를 다시 맞춘다.
+    @MainActor
+    private func waitForPath(_ ready: @escaping @MainActor () -> Void) {
+        pathReady = ready
+        if pathMonitor == nil {
+            let monitor = NWPathMonitor()
+            monitor.pathUpdateHandler = { [weak self] path in
+                let wifi = path.status == .satisfied
+                    && (path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet))
+                let interfaces = path.availableInterfaces.map(\.name).joined(separator: ",")
+                Task { @MainActor in
+                    guard let self else { return }
+                    let changed = self.onWiFi != wifi
+                    self.onWiFi = wifi
+                    if let ready = self.pathReady {
+                        self.pathReady = nil
+                        self.journal.add("path: \(wifi ? "wi-fi" : "not wi-fi") [\(interfaces)]")
+                        ready()
+                    } else if changed {
+                        self.retuneMTU()
+                    }
+                }
+            }
+            monitor.start(queue: DispatchQueue(label: "nago.vpn.path"))
+            pathMonitor = monitor
+        }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard let self, let ready = self.pathReady else { return }
+            self.pathReady = nil
+            self.journal.add("path: unknown after 1s → mtu \(self.current?.mtu ?? 1420)")
+            ready()
+        }
+    }
+
+    /// Wi-Fi ↔ 셀룰러가 바뀌었을 때 utun MTU를 바꾼다. 엔진은 버퍼 전체로 읽어서 그대로 둬도 된다.
+    /// 이미 열린 TCP 연결은 처음 정한 MSS를 쓰다가 조각이 버려지면 양쪽(iOS·서버)의 블랙홀 감지가 MSS를 줄인다.
+    @MainActor
+    private func retuneMTU() {
+        guard let s = current, neptun != nil, nagoing == nil, unicorn == nil else { return }
+        let mtu = tunnelMTU(s)
+        let old = appliedMTU
+        guard mtu != old else { return }
+        appliedMTU = mtu
+        setTunnelNetworkSettings(Self.networkSettings(s, mtu: mtu)) { [weak self] error in
+            Task { @MainActor in
+                guard let self else { return }
+                if let error {
+                    self.appliedMTU = old
+                    self.journal.add("✗ mtu \(old) → \(mtu): \(error.localizedDescription)")
+                } else {
+                    self.journal.add("mtu \(old) → \(mtu) (\(self.onWiFi ? "wi-fi" : "not wi-fi"))")
+                }
+            }
+        }
+    }
+
     /// iOS에 알려 줄 터널 설정. 서버 주소는 도중에 바뀔 수 있어서 WireGuardKit처럼 127.0.0.1을 넣는다
     /// (확장 자신의 통신은 원래 터널 밖으로 나간다).
-    private static func networkSettings(_ s: Settings) -> NEPacketTunnelNetworkSettings {
+    private static func networkSettings(_ s: Settings, mtu: Int) -> NEPacketTunnelNetworkSettings {
         let network = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
         let v4 = NEIPv4Settings(addresses: [s.address], subnetMasks: ["255.255.255.255"])
         v4.includedRoutes = [NEIPv4Route.default()]
@@ -396,7 +492,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let dns = NEDNSSettings(servers: s.dns)
         dns.matchDomains = [""]     // 모든 도메인을 이 DNS로
         network.dnsSettings = dns
-        network.mtu = NSNumber(value: s.mtu)
+        network.mtu = NSNumber(value: mtu)
         return network
     }
 

@@ -17,6 +17,7 @@ NAGO VPN의 WireGuard 엔진. NordSecurity의 [NepTUN](https://github.com/NordSe
 | 4 | IPv6가 없는 커널에서도 뜸(v6 소켓 대신 쓰지 않는 v4 소켓) | 벤치 VM 등. 폰에서는 늘 v6 소켓이 있다 | `device/mod.rs` |
 | 5 | **바깥 전송 자리**(`DeviceConfig::external_net`, `DeviceHandle::set_external_net`·`external_receiver`) — nagoing을 엔진에 바로 붙임 | 127.0.0.1 UDP 홉(패킷마다 sendto/recvfrom + 스레드 넘김)을 없앤다. 비어 있으면 UDP 그대로 | `device/mod.rs`, `device/packet_workers.rs` |
 | 6 | `mock-tun` 기능: 가짜 tun으로 `DeviceHandle`을 띄움 | nago_tun의 끝에서 끝 시험·벤치(리눅스, dev 빌드만) | `device/mod.rs`, `device/tun_linux.rs` |
+| 7 | **패킷 버퍼 1550 → 9216**, tun은 시작 때 MTU가 아니라 버퍼 전체로 읽음 | iOS가 Wi-Fi에서 큰 터널 MTU(2880·4384)를 쓰면 바깥 UDP가 IP 조각으로 와서 커널이 합친 데이터그램이 1550을 넘는다(잘려서 복호화 실패로 버려졌다). utun MTU는 Wi-Fi↔셀룰러 때 도중에 바뀐다 | `device/mod.rs` |
 
 앱 쪽 기본값도 같이 바꿨다: **이벤트 루프 1개**(iOS·안드로이드), 안드로이드는 바로 처리(작업 스레드 없음).
 iOS 관리자용 settings → loops에서 2로 바꿔 비교할 수 있다.
@@ -26,6 +27,8 @@ iOS 관리자용 settings → loops에서 2로 바꿔 비교할 수 있다.
 - **MTU 1420 그대로.** 우리 서버(AWS)는 IPv4라 바깥 헤더가 60바이트뿐이어서 1440도 들어가지만,
   한국 통신사 LTE/5G는 IPv6망이라 iPhone이 IPv4를 IPv6로 감싸서(464XLAT) 보낸다. 그러면 20바이트가 더 붙어
   1440이면 1500을 넘어 조각나거나 버려진다. 1420은 그 경우까지 들어간다(얻는 건 1.4%뿐).
+  (셀룰러 기준 이야기다. Wi-Fi에서는 iOS가 일부러 조각을 내는 큰 MTU 2880·4384를 쓴다 — 위 #7,
+  `WifiScanTunnel/PacketTunnelProvider.swift`의 tunnelMTU, 서버는 `server/nago-jumbo.sh`.)
 - **keepalive 25초 그대로.** AWS 쪽엔 NAT가 없지만 폰 쪽 통신사 NAT가 UDP를 30초~몇 분이면 잊는다.
 
 ## 벤치(tools/nagotun-bench)

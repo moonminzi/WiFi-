@@ -87,11 +87,14 @@ pub(crate) fn peer_span(peer: impl Into<PubKey>) -> tracing::span::EnteredSpan {
 
 const HANDSHAKE_RATE_LIMIT: u64 = 100; // The number of handshakes per second we can tolerate before using cookies
 
-// Max packet size of 1550 because packets are limited by the MTU sizes
-// used in wild networks.
-const MAX_PKT_SIZE: usize = 1550;
+// NagoTun: NepTUN은 1550(MTU 1500 + WG 헤더·태그)이었다. 그러면 바깥 UDP가 조각나서 오는 큰 WG 패킷
+// (iOS가 Wi-Fi에서 쓰는 큰 터널 MTU, 예: 2880)을 recv_from이 1550에서 잘라 복호화에 실패하고 버린다.
+// 받기·보내기 버퍼를 터널 MTU 9000까지 들어가게 키운다(스레드당 버퍼 몇 개뿐이라 메모리는 몇십 KB).
+const MAX_PKT_SIZE: usize = 9216;
 const MAX_ITR: usize = 100;
 const WG_HEADER_OFFSET: usize = 16;
+/// 암호화 뒤에 붙는 ChaCha20-Poly1305 태그. 버퍼 끝에 이만큼은 비워 둬야 제자리 암호화가 된다.
+const AEAD_TAG_SIZE: usize = 16;
 const MAX_LISTEN_SOCKET_BIND_ATTEMPTS: usize = 100;
 
 fn bind_listen_sockets(port: u16) -> io::Result<(socket2::Socket, socket2::Socket, u16)> {
@@ -1537,12 +1540,15 @@ fn process_iface_inline(
 fn read_packet<'a>(
     iface: &Arc<TunSocket>,
     buf: &'a mut [u8; MAX_PKT_SIZE],
-    mtu: &CheckedMtu,
+    _mtu: &CheckedMtu,
     peers: &AllowedIps<Arc<Peer>>,
 ) -> IfaceReadResult<'a> {
-    // buf is [u8; MAX_PKT_SIZE] and CheckedMtu guarantees mtu + WG_HEADER_OFFSET <= MAX_PKT_SIZE
+    // NagoTun: 엔진을 띄울 때 읽은 MTU만큼이 아니라 버퍼 전체(태그 자리 빼고)로 읽는다.
+    // iOS는 Wi-Fi↔셀룰러가 바뀌면 utun MTU를 도중에 바꾼다(1420 ↔ 큰 MTU). 시작 때 MTU로 읽으면
+    // 나중에 커진 패킷이 잘린다. 더 크게 읽는 건 손해가 없다(utun은 패킷 하나씩 돌려준다).
+    // buf is [u8; MAX_PKT_SIZE], so WG_HEADER_OFFSET..MAX_PKT_SIZE - AEAD_TAG_SIZE is in bounds
     #[allow(clippy::indexing_slicing)]
-    match iface.read(&mut buf[WG_HEADER_OFFSET..WG_HEADER_OFFSET + mtu.get()]) {
+    match iface.read(&mut buf[WG_HEADER_OFFSET..MAX_PKT_SIZE - AEAD_TAG_SIZE]) {
         Ok(payload) => match Tunn::dst_address(payload) {
             None => IfaceReadResult::Skip,
             Some(dst_addr) => match peers.find(dst_addr) {

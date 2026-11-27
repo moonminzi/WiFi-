@@ -245,6 +245,12 @@ final class VPNManager {
         return (Bundle.main.bundleIdentifier ?? "com.example.wifiscan") + ".tunnel"
     }
 
+    /// Wi-Fi(유선)에서 쓸 큰 터널 MTU(settings → wi-fi mtu, 키 wgMTUWiFi). 0이면 Wi-Fi에서도 1420.
+    /// 2880 = 바깥 UDP가 IP 조각 2개, 4384 = 3개(IPv4, 바깥 MTU 1500). 셀룰러는 터널이 늘 1420을 쓴다.
+    static var wifiMTU: Int {
+        UserDefaults.standard.object(forKey: "wgMTUWiFi") as? Int ?? 2880
+    }
+
     /// WireGuard 설정을 저장한다. 처음 한 번은 "VPN 구성 추가" 허용 창이 뜬다.
     /// - engine: "neptun"(Rust, NordVPN 엔진) 또는 "go"(wireguard-go, 공식 앱과 같은 엔진)
     /// - loops: NepTUN 이벤트 루프 수(1~2). 2면 내려받기와 올리기가 다른 코어에서 돈다
@@ -267,6 +273,7 @@ final class VPNManager {
             "endpoint": endpoint,
             "dns": dns,
             "mtu": 1420,
+            "mtuWiFi": Self.wifiMTU,
             "engine": engine,
             "loops": loops,
             "region": region,
@@ -362,6 +369,7 @@ final class VPNManager {
         plain["mode"] = "wireguard"
         plain["endpoint"] = endpoint
         plain["mtu"] = 1420
+        plain["mtuWiFi"] = Self.wifiMTU
         plain["engine"] = "neptun"
         proto.providerConfiguration = plain
         proto.serverAddress = endpoint

@@ -823,6 +823,21 @@ else
     '}' | nft -f -
 fi
 
+# 큰 터널 MTU(iOS가 Wi-Fi에서 쓰는 2880·4384, server/nago-jumbo.sh와 같음): wg0에서 들어온 TCP에 표시를 하고
+# 그 연결(TCP 분할 가속 쪽)만 MTU 8960 경로를 쓴다. 나머지는 1420 경로 그대로라 예전 앱·셀룰러 폰은 같다.
+ip route replace 10.9.0.0/24 dev wg0 proto kernel scope link src 10.9.0.1 mtu 1420
+ip route replace 10.9.0.0/24 dev wg0 src 10.9.0.1 mtu 8960 table 51
+ip link set wg0 mtu 9000
+ip rule add fwmark 0x51 lookup 51 pref 1051
+sysctl -q -w net.ipv4.tcp_fwmark_accept=1
+if command -v iptables >/dev/null; then
+  iptables -t mangle -A PREROUTING -i wg0 -p tcp -j MARK --set-mark 0x51
+else
+  printf '%s\n' 'table ip nago_mark {' \
+    '  chain pre { type filter hook prerouting priority mangle; iifname "wg0" meta l4proto tcp meta mark set 0x51; }' \
+    '}' | nft -f -
+fi
+
 # 매분: 분당 송신 300KB 미만인 분이 이어지면 카운터를 올린다(/run이라 부팅마다 0부터). 끄지는 않는다 —
 # 컨트롤 서버가 SSH로 읽어서 30이 넘으면 지운다
 printf '%s\n' '#!/bin/bash' \

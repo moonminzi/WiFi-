@@ -12,6 +12,8 @@ struct SettingsView: View {
     /// NepTUN 이벤트 루프 수. 2면 내려받기와 올리기(ACK 포함)가 다른 코어에서 돈다.
     /// (예전 queue 설정은 iOS에서 NepTUN이 쓰지 않아 뺐다 — README)
     @AppStorage("wgLoops") private var wgLoops = 1
+    /// Wi-Fi에서 쓸 큰 터널 MTU(VPNManager.wifiMTU). 0 = 끔(1420). 셀룰러·nagoing은 늘 1420/1380.
+    @AppStorage("wgMTUWiFi") private var wgMTUWiFi = 2880
     @AppStorage("vpnFastMode") private var fastMode = true
     @AppStorage("vpnAdblock") private var adblock = false
     /// 광고 차단 강도·내 규칙(AdblockFilter). 연결 중에도 바꿀 수 있고 바로 서버에 보낸다
@@ -162,6 +164,15 @@ struct SettingsView: View {
                     row("loops") {
                         TermChoice(options: [1, 2].map { (label: "\($0)", value: $0) }, selection: $wgLoops)
                     }
+                    TermDivider()
+                    row("wi-fi mtu") {
+                        TermChoice(options: [(label: "1420", value: 0), (label: "2880", value: 2880),
+                                             (label: "4384", value: 4384)],
+                                   selection: $wgMTUWiFi)
+                    }
+                    Text("bigger tunnel packets on wi-fi: the phone handles 2–3× fewer packets. cellular and nagoing stay 1420. if a wi-fi stalls on big downloads, set 1420.")
+                        .font(Term.mono(12))
+                        .foregroundStyle(Term.muted)
                     TermDivider()
                     toggle("--nagoing", isOn: $nagoOn)
                     if nagoOn {
