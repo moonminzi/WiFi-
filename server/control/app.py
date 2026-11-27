@@ -69,6 +69,7 @@ OD_LABEL = "nago-od-"           # Vultr 라벨: nago-od-<code>
 OD_STATE = "ondemand.json"      # {instance_id: {code, pub, created}} — 만든 서버의 wg 공개키
 OD_USAGE = "ondemand-usage.json"  # {instance_id: {code, created, gone, tx}} — 이번 달 비용·송신량용 기록
 OD_READY = "NAGO_WG_READY"
+OD_ORPHAN_SEC = 600             # 공개키 기록이 없고 SSH로도 못 읽는 임시 서버를 이만큼 지나면 지우고 새로 만든다
 OD_GRACE_SEC = 240              # 준비 표시를 못 읽어도 만든 지 이만큼 지나면 준비된 걸로 본다(Vultr는 만들기가 느림)
 OD_IDLE_MIN = 30                # 이만큼(분) 거의 안 쓰면 지운다
 OD_TTL_SEC = 24 * 3600          # 이만큼 지나면 무조건 지운다
@@ -206,11 +207,11 @@ def vultr_enabled(node):
     return bool(CFG.get("vultr_api_key") and node.get("vultr_id"))
 
 
-def vultr(method, path, body=None):
+def vultr(method, path, body=None, timeout=10):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(VULTR_API + path, data=data, method=method, headers={
         "Authorization": "Bearer " + CFG["vultr_api_key"], "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=10) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         raw = r.read()
     return json.loads(raw) if raw else {}
 
@@ -1009,7 +1010,9 @@ def od_create(code):
             "user_data": base64.b64encode(script.encode()).decode(), "enable_ipv6": False, "backups": "disabled"}
     if oc.get("firewall_group_id"):
         body["firewall_group_id"] = oc["firewall_group_id"]
-    i = vultr("POST", "/instances", body)["instance"]
+    # 만들기는 10초를 넘길 때가 있다. 넘겨서 예외가 나면 서버는 Vultr에 생기는데 공개키 기록이 안 남아
+    # 앱이 wgPub 없이 "no wireguard key"로 실패했다(남은 서버는 handle_ondemand가 SSH로 키를 되찾는다)
+    i = vultr("POST", "/instances", body, timeout=60)["instance"]
     created = parse_time(i.get("date_created")) or utcnow()
     with _store_lock:
         state = read_json(OD_STATE, {})
@@ -1056,6 +1059,24 @@ def od_destroy(iid):
     log("ondemand: destroyed %s" % iid)
 
 
+def od_recover_pub(inst):
+    """기록에 공개키가 없는 임시 서버(만들기 응답을 못 받은 경우 등)에서 SSH로 wg0 공개키를 읽어 기록한다.
+    아직 안 떴거나 우리 SSH 키가 없는 서버면 None."""
+    if inst["status"] != "active" or inst["power"] != "running" or not inst["ip"]:
+        return None
+    r = run_on(od_node(inst), "wg show wg0 public-key 2>/dev/null", 10)
+    pub = r.out.strip() if r.ok else ""
+    if not KEY_RE.match(pub):
+        return None
+    with _store_lock:
+        state = read_json(OD_STATE, {})
+        state[inst["id"]] = dict(state.get(inst["id"], {}), code=inst["code"], pub=pub,
+                                 created=iso(inst["created"] or utcnow()))
+        write_json(OD_STATE, state)
+    log("ondemand %s: recovered wg key from %s" % (inst["code"], inst["id"]))
+    return pub
+
+
 def handle_ondemand(code):
     if not CFG.get("vultr_api_key") or not CFG.get("public_url"):
         return json_response(503, {"error": "on-demand servers need vultr_api_key and public_url in control.json"})
@@ -1070,10 +1091,21 @@ def handle_ondemand(code):
             inst = od_create(code)
             state = "creating"
     pub = read_json(OD_STATE, {}).get(inst["id"], {}).get("pub")
+    if not pub and state is None:
+        pub = od_recover_pub(inst)
+        if not pub and inst["created"] and (utcnow() - inst["created"]).total_seconds() > OD_ORPHAN_SEC:
+            # 키를 끝내 못 찾는 서버는 쓸 수 없다: 지우고 새로 만든다
+            with _od_lock:
+                log("ondemand %s: no wg key for %s, replacing" % (code, inst["id"]))
+                od_destroy(inst["id"])
+                inst = od_create(code)
+                state = "creating"
+                pub = read_json(OD_STATE, {}).get(inst["id"], {}).get("pub")
     running = inst["status"] == "active" and inst["power"] == "running"
     return json_response(200, {
         "region": code, "state": state or ("running" if running else "pending"),
-        "ready": state is None and od_ready(inst),
+        # 키가 없으면 준비 안 된 걸로: 앱은 계속 기다리고(그사이 위에서 되찾거나 새로 만든다) 키 없이 붙지 않는다
+        "ready": state is None and bool(pub) and od_ready(inst),
         "ip": inst["ip"] if running else None, "id": code + ".nago.vpn",
         "wgPub": pub, "wgPort": WG_PORT, "onDemand": True, "launched": iso(inst["created"]),
     })
